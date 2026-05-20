@@ -1,0 +1,55 @@
+# Phase 1 benchmark baseline
+# Generated: 2026-05-20
+# Platform: darwin/arm64 (Apple M5)
+# Go: 1.26.3
+# Run: go test -bench=. -benchmem -count=3
+
+## 1. JWT verify rate (internal/auth)
+
+goos: darwin
+goarch: arm64
+pkg: github.com/pocketstation-io/relay/internal/auth
+cpu: Apple M5
+BenchmarkVerify-10    	  309583	      3851 ns/op	    2784 B/op	      50 allocs/op
+BenchmarkVerify-10    	  315051	      3844 ns/op	    2784 B/op	      50 allocs/op
+BenchmarkVerify-10    	  315422	      3836 ns/op	    2784 B/op	      50 allocs/op
+BenchmarkSign-10    	  425649	      2417 ns/op	    2282 B/op	      33 allocs/op
+BenchmarkSign-10    	  497311	      2456 ns/op	    2282 B/op	      33 allocs/op
+BenchmarkSign-10    	  512658	      2427 ns/op	    2282 B/op	      33 allocs/op
+
+Interpretation:
+  Verify: ~3.8 µs/op, ~260k verifies/sec on M5. Acceptable for Phase 1 (one verify per WebSocket join).
+  Sign:   ~2.4 µs/op, ~415k signs/sec on M5.
+
+## 2. Pion TrackLocalStaticRTP.WriteRTP allocation profile (internal/room, ADR-009)
+
+goos: darwin
+goarch: arm64
+pkg: github.com/pocketstation-io/relay/internal/room
+cpu: Apple M5
+BenchmarkWriteRTPToPionTrack-10    	46451239	        26.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteRTPToPionTrack-10    	47016186	        25.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteRTPToPionTrack-10    	45769644	        25.74 ns/op	       0 B/op	       0 allocs/op
+
+ADR-009 note: This benchmark measures WriteRTP on a disconnected TrackLocalStaticRTP.
+The 0 alloc/0 B result reflects the pre-send path (no SRTP/subscriber present).
+When a subscriber is connected, WriteRTP copies and SRTP-encrypts each packet;
+that path is measured in the integration test but not isolated in a bench yet.
+No zero-allocation claim for the connected relay path is made at Phase 1 exit.
+A follow-up Phase 2 bench with a connected pair is tracked in RELAY_PHASE1_QUEUE.md.
+
+## 3. Room forward loop dispatch (internal/room)
+
+goos: darwin
+goarch: arm64
+pkg: github.com/pocketstation-io/relay/internal/room
+cpu: Apple M5
+BenchmarkWriteRTPToListeners_1-10      	25091064	        47.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteRTPToListeners_10-10     	 5870584	       190.0 ns/op	     160 B/op	       1 allocs/op
+BenchmarkWriteRTPToListeners_100-10    	  891003	      1311 ns/op	    1792 B/op	       1 allocs/op
+
+Interpretation:
+  1 listener:   ~48 ns/op, 0 alloc — snapshot slice is preallocated from map capacity.
+  10 listeners: ~195 ns/op, 1 alloc — 160-byte slice allocation for snapshot.
+  100 listeners: ~1.3 µs/op, 1 alloc — scales linearly with listener count.
+  At 20ms packet cadence (50 pkts/sec), forwarding 100 listeners costs ~65 µs/sec (0.3% CPU).
