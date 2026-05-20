@@ -37,8 +37,9 @@ type Room struct {
 	closeOnce sync.Once
 	done      chan struct{}
 
-	PacketCount atomic.Uint64
-	ByteCount   atomic.Uint64
+	PacketCount     atomic.Uint64
+	ByteCount       atomic.Uint64
+	PacketDropCount atomic.Uint64
 }
 
 // New returns an open room with the given id.
@@ -133,7 +134,9 @@ func (r *Room) forwardLoop(src Source) {
 		for _, l := range ls {
 			// TODO(Phase 1, ADR-009): measure WriteRTP allocation/mutation profile
 			// before claiming zero-alloc forwarding. See forward_bench_test.go.
-			_ = l.WriteRTP(pkt)
+			if err := l.WriteRTP(pkt); err != nil {
+				r.PacketDropCount.Add(1)
+			}
 		}
 	}
 }
@@ -180,4 +183,23 @@ func (m *Manager) Delete(id string) {
 		r.Close()
 		delete(m.rooms, id)
 	}
+}
+
+// PacketStats returns the aggregate forwarded and dropped packet counts
+// across all currently active rooms.
+func (m *Manager) PacketStats() (forwarded, dropped uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.rooms {
+		forwarded += r.PacketCount.Load()
+		dropped += r.PacketDropCount.Load()
+	}
+	return
+}
+
+// RoomCount returns the number of active rooms.
+func (m *Manager) RoomCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.rooms)
 }
