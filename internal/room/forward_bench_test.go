@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 )
 
 func BenchmarkWriteRTPToListeners_1(b *testing.B)   { benchmarkForward(b, 1) }
@@ -57,3 +58,28 @@ func benchmarkForward(b *testing.B, n int) {
 type discardListener struct{}
 
 func (discardListener) WriteRTP(_ *rtp.Packet) error { return nil }
+
+// BenchmarkWriteRTPToPionTrack measures alloc/ns for WriteRTP on a real
+// *webrtc.TrackLocalStaticRTP. This is the ADR-009 measurement.
+// Run: go test -bench=BenchmarkWriteRTPToPionTrack -benchmem ./internal/room/
+//
+// To get alloc count per op, run:
+//
+//	go test -bench=BenchmarkWriteRTPToPionTrack -benchmem -count=1 ./internal/room/
+func BenchmarkWriteRTPToPionTrack(b *testing.B) {
+	track, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio", "pocketstation",
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	pkt := &rtp.Packet{Payload: make([]byte, 200)}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		// WriteRTP returns error when no peer is connected; we measure
+		// the allocation profile of the pre-send path.
+		_ = track.WriteRTP(pkt)
+	}
+}
