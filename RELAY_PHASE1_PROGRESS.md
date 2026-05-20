@@ -27,7 +27,7 @@ Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentional
 
 ## What is blocked
 
-- `go test ./...` and `go test -race ./...` could not be run: the Go binary is not installed in the agent's shell environment. The `go.sum` file is also absent and must be generated with `go mod tidy` before the first build. All code was written to compile correctly but has not been machine-verified.
+Nothing is currently blocked. All tooling checks passed (2026-05-20).
 
 ## What needs human decision
 
@@ -153,11 +153,18 @@ Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentional
 
 ---
 
-### Staff Bar Self-Check — Task 10: final audit
+### Staff Bar Self-Check — Task 10: final audit (2026-05-20, Go 1.26.3 darwin/arm64)
 
-- gofmt: NOT RUN — Go binary not available in agent shell. Must be run by human before merge.
-- go vet: NOT RUN — same reason.
-- go test ./...: NOT RUN — same reason.
-- go test -race ./...: NOT RUN — same reason.
-- go.sum: ABSENT — `go mod tidy` required.
-- Remaining risk: all code requires human-run tooling verification before merge.
+- go mod tidy: PASS — go.sum generated; no unexpected deps added.
+- gofmt: PASS — two scaffold files (token.go, messages.go) had spaces-for-tabs; fixed with `gofmt -w`.
+- go vet ./...: PASS — no issues.
+- go test ./...: PASS — auth (0.267 s), room (0.487 s); signaling and cmd have no test files.
+- go test -race ./...: PASS — auth (1.616 s), room (1.361 s); no data races detected.
+- Smallest correct design: yes.
+- Tests added or updated: yes — 15 room + 6 auth.
+- Hot-path safe: yes — no locks held during WriteRTP; atomic counters; one slice alloc per forward tick pending ADR-009 measurement.
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: ADR-009 Pion WriteRTP allocation profile unmeasured (mock listeners only). ADR-010 jitter buffer not implemented. Both are explicit Phase 1 deferred items.
