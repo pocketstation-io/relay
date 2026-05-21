@@ -26,12 +26,17 @@ DEFERRED    Intentionally postponed; ADR or phase plan justifies it
 |---|---|---|---|---|---|
 | fake-source Opus payload | MOCK | relay/cmd/fake-source/main.go | Real libopus encoding; current repeats 0xAB byte | Phase 3 | libopus dependency + audio-core integration |
 | In-process token store (relay) | MOCK | internal/room/room.go Manager | Persistent store; rooms lost on restart | Phase 2 | DB dependency decision |
-| Pion WriteRTP connected bench | PARTIAL | internal/room/forward_bench_test.go | Bench with connected Pion pair; current uses disconnected track (0 alloc pre-send path, not SRTP path) | Phase 2 | Stable bench harness for Pion pair setup |
 | TURN configuration | DEFERRED | cmd/relay-server/main.go | Production TURN credentials; STUN-only fails behind symmetric NAT | Phase 2 | TURN provider decision |
 | SFrame E2EE | DEFERRED | relay + SDKs | Frame-layer encryption per RFC 9605 | Phase 3 | ADR for per-platform insertion point |
 | latency_estimate_ms metric | PARTIAL | internal/metrics/metrics.go | Per-packet latency measurement requires clock sync (ADR-006) | Phase 2 | ADR-006 resolution |
 
 ---
+
+## Phase 2 burns (completed 2026-05-21)
+
+| Component | Replaced by | Finding |
+|---|---|---|
+| Pion WriteRTP connected bench | `BenchmarkWriteRTPFanoutConnected_{1,10,50}` in `internal/room/forward_bench_test.go` — real loopback Pion pair, DTLS/SRTP path | SRTP: ~7.7 µs/op, 11 allocs/op at fanout 1 (~297x vs disconnected); linear scaling; within Phase 2 budget. ADR-009 decision: acceptable. See `benches/results/phase2-baseline.txt`. |
 
 ## Phase 1 burns (completed 2026-05-20)
 
