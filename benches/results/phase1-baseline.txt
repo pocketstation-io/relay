@@ -36,7 +36,7 @@ The 0 alloc/0 B result reflects the pre-send path (no SRTP/subscriber present).
 When a subscriber is connected, WriteRTP copies and SRTP-encrypts each packet;
 that path is measured in the integration test but not isolated in a bench yet.
 No zero-allocation claim for the connected relay path is made at Phase 1 exit.
-A follow-up Phase 2 bench with a connected pair is tracked in RELAY_PHASE1_QUEUE.md.
+A follow-up Phase 2 bench with a connected pair is tracked in RELAY_PHASE2_QUEUE.md.
 
 ## 3. Room forward loop dispatch (internal/room)
 
