@@ -197,6 +197,13 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 
 ---
 
+## Wave 2 — Cross-service JWT contract (2026-05-21)
+
+- TestGiven_ApiServerToken_When_UsedForRelaySignal_Then_Accepted: PASS
+- TestGiven_ApiServerToken_When_SecretMismatch_Then_BadToken: PASS
+- Decision: B1 blocker RESOLVED. api-server JWT tokens accepted by relay when POCKETSTATION_JWT_SECRET matches.
+- Test location: test/integration/cross_service_test.go
+
 ---
 
 ## Wave 3 — source_active push + listener decrement (2026-05-21)
@@ -220,7 +227,7 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 ## Deferred items
 
 - `RELAY_PHASE2_QUEUE.md` items still OPEN: SLO instrumentation, latency metric,
-  api-server JWT compat, source_active push, Connected WriteRTP bench, failure
+  source_active push, Connected WriteRTP bench, failure
   mode tests.
 - `Serve` return-value signature change: `cmd/relay-server/main.go` updated;
   no other callers (tests use `Handler()` not `Serve()`).
