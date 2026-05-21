@@ -8,7 +8,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
-      - run: test -z "$(gofmt -l .)"
+      - name: gofmt check
+        run: |
+          BAD=$(gofmt -l .)
+          if [ -n "$BAD" ]; then echo "needs gofmt:"; echo "$BAD"; exit 1; fi
       - run: go test -short ./...
       - run: go vet ./...
       - run: go test -race -short ./...
