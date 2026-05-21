@@ -197,6 +197,26 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 
 ---
 
+---
+
+## Wave 3 — source_active push + listener decrement (2026-05-21)
+
+- CallbackClient: best-effort POST to api-server, no-op if RELAY_API_SERVER_URL unset
+- source_active pushed on PUBLISH track arrival (source joined) and source LEAVE/cleanup
+- listener decrement pushed on listener LEAVE/cleanup
+- New package: `internal/callback` — `Client` struct with 5s timeout, `PushSourceActive`, `PushListenerLeave`
+- `Config.CallbackClient *callback.Client` added to server.Config; nil = disabled
+- RELAY_API_SERVER_URL env var read in cmd/relay-server/main.go
+
+**Tests added:**
+- `TestGiven_CallbackClient_When_PushSourceActive_Then_PostSent`
+- `TestGiven_CallbackClient_When_PushSourceActive_False_Then_PostSentWithFalse`
+- `TestGiven_CallbackClient_When_ServerDown_Then_NoError`
+- `TestGiven_CallbackClient_When_BaseURLEmpty_Then_Noop`
+- `TestGiven_CallbackClient_When_PushListenerLeave_Then_PostSent`
+
+---
+
 ## Deferred items
 
 - `RELAY_PHASE2_QUEUE.md` items still OPEN: SLO instrumentation, latency metric,
