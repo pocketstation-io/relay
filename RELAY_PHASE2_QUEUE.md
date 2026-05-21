@@ -17,7 +17,7 @@ Before picking up any item, read AGENTS.md, the relevant ADR, and the assigned i
 | latency_estimate_ms metric (ADR-006 clock sync) | §13.2 | ADR-006 | P2 | ADR-006 resolution | OPEN |
 | api-server JWT compatibility test | ADR-014 | ADR-015 | P1 | api-server Phase 2 | OPEN |
 | relay→api-server source_active push | §12.2 | — | P2 | api-server Phase 2 | OPEN |
-| Connected WriteRTP bench (ADR-009) | §26.6 | ADR-009 | P2 | Phase 2 start | OPEN |
+| Connected WriteRTP bench (ADR-009) | §26.6 | ADR-009 | P2 | Phase 2 start | DONE 2026-05-21 |
 | ICE failure / SIGTERM / room-delete failure mode tests | Audit F3 | — | P2 | Phase 2 start | OPEN |
 
 ---
