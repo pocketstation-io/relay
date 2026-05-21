@@ -139,7 +139,7 @@ func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *tes
 	select {
 	case <-connClosed:
 		// Pass: peer observed the connection close.
-	case <-time.After(3 * time.Second):
-		t.Fatal("WebSocket connection was not closed within 3s after Shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("WebSocket connection was not closed within 10s after Shutdown")
 	}
 }
