@@ -68,14 +68,19 @@ type Room struct {
 	listenersMu sync.Mutex
 	listeners   atomic.Pointer[[]listenerEntry]
 
-	// sourceMu guards source and sourceCloser.
+	// sourceMu guards source, sourceCloser, and loopDone.
 	// sourceCloser, when non-nil, terminates the previous source's underlying
 	// connection (e.g. closes the PeerConnection). Called by SetSource on
 	// reconnect so the old forwardLoop exits and listeners receive RTP from
 	// the new source without re-subscribing.
+	//
+	// loopDone is closed by the running forwardLoop goroutine when it exits.
+	// SetSource waits on prevLoopDone before launching the new loop, ensuring
+	// only one forwardLoop writes to listeners at a time.
 	sourceMu     sync.Mutex
 	source       Source
 	sourceCloser func()
+	loopDone     chan struct{} // closed by the current forwardLoop on exit; nil if none
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -143,17 +148,27 @@ func newWithTimeout(id string, timeout time.Duration) *Room {
 // Existing listeners are not affected: they continue to receive RTP from the
 // new source without re-subscribing, satisfying the ICE restart requirement.
 func (r *Room) SetSource(src Source, closer func()) {
+	newLoopDone := make(chan struct{})
+
 	r.sourceMu.Lock()
 	prevCloser := r.sourceCloser
+	prevLoopDone := r.loopDone
 	r.source = src
 	r.sourceCloser = closer
+	r.loopDone = newLoopDone
 	r.sourceMu.Unlock()
 
-	// Close the previous source's connection outside the lock so it doesn't
-	// block SetSource callers. The old forwardLoop exits when its ReadRTP
-	// returns an error after the PC is closed.
+	// Initiate teardown of the previous source's connection so its ReadRTP
+	// starts returning errors, unblocking the old forwardLoop.
 	if prevCloser != nil {
 		prevCloser()
+	}
+
+	// Wait for the old forwardLoop to exit before launching the new one.
+	// This ensures only one loop calls WriteRTP on the listener slice at a time,
+	// preventing double-write races on reconnect (BLOCK-1 fix).
+	if prevLoopDone != nil {
+		<-prevLoopDone
 	}
 
 	// Reset the inactivity timer: a publisher is now active.
@@ -164,7 +179,7 @@ func (r *Room) SetSource(src Source, closer func()) {
 	r.inactivityTimer.Reset(r.inactivityTimeout)
 	r.timerMu.Unlock()
 
-	go r.forwardLoop(src)
+	go r.forwardLoop(src, newLoopDone)
 }
 
 // AddListener registers listener l under peerID.
@@ -220,7 +235,8 @@ func (r *Room) Close() {
 }
 
 // forwardLoop reads RTP from src and writes to each listener until src
-// returns an error or the room is closed.
+// returns an error or the room is closed. loopDone is closed when the
+// goroutine exits, allowing SetSource to synchronise on reconnect.
 //
 // Hot-path invariants (ADR-005, ADR-009):
 //   - One atomic.Load per packet; no lock held during WriteRTP.
@@ -230,8 +246,9 @@ func (r *Room) Close() {
 //  1. src.ReadRTP errors (peer connection closed) → return.
 //  2. r.done closed (Room.Close called) → return after the next packet read.
 //
-// In both cases the deferred block clears r.source so SourceActive() returns false.
-func (r *Room) forwardLoop(src Source) {
+// In both cases the deferred block clears r.source and closes loopDone.
+func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
+	defer close(loopDone)
 	defer func() {
 		r.sourceMu.Lock()
 		if r.source == src {
