@@ -19,8 +19,8 @@ type Registry struct {
 // New returns an initialized Registry.
 func New() *Registry { return &Registry{} }
 
-// WriteTo writes Prometheus text format to w.
-func (r *Registry) WriteTo(w io.Writer) {
+// WritePrometheus writes Prometheus text format to w.
+func (r *Registry) WritePrometheus(w io.Writer) {
 	write := func(name, help, typ string, val uint64) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
 	}
