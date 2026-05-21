@@ -22,9 +22,11 @@ func BenchmarkWriteRTPToListeners_1(b *testing.B)   { benchmarkForward(b, 1) }
 func BenchmarkWriteRTPToListeners_10(b *testing.B)  { benchmarkForward(b, 10) }
 func BenchmarkWriteRTPToListeners_100(b *testing.B) { benchmarkForward(b, 100) }
 
-// benchmarkForward measures the listener-snapshot + write loop lifted from
-// forwardLoop with n mock listeners. This isolates room dispatch from any
+// benchmarkForward measures the copy-on-write atomic load + write loop lifted
+// from forwardLoop with n mock listeners. This isolates room dispatch from any
 // allocation inside *webrtc.TrackLocalStaticRTP.WriteRTP.
+//
+// ADR-005: the hot path uses one atomic.Load; no lock is held during WriteRTP.
 //
 // TODO(Phase 1, ADR-009): add a companion benchmark that substitutes real
 // *webrtc.TrackLocalStaticRTP instances so allocation inside Pion is visible.
@@ -41,15 +43,10 @@ func benchmarkForward(b *testing.B, n int) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		// Mirror exactly the hot path in forwardLoop.
-		r.mu.RLock()
-		ls := make([]Listener, 0, len(r.listeners))
-		for _, l := range r.listeners {
-			ls = append(ls, l)
-		}
-		r.mu.RUnlock()
-		for _, l := range ls {
-			_ = l.WriteRTP(pkt)
+		// Mirror exactly the hot path in forwardLoop (ADR-005 copy-on-write).
+		ls := *r.listeners.Load()
+		for _, e := range ls {
+			_ = e.l.WriteRTP(pkt)
 		}
 	}
 }

@@ -3,6 +3,7 @@
 package room
 
 import (
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -140,7 +141,7 @@ func TestSetSource_SourceActiveBecomesTrue(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	// When
-	r.SetSource(src)
+	r.SetSource(src, nil)
 	// Then
 	if !r.SourceActive() {
 		t.Error("expected source active after SetSource")
@@ -154,7 +155,7 @@ func TestForwardLoop_DeliversSinglePacketToOneListener(t *testing.T) {
 	src := newMockSource()
 	l := &mockListener{}
 	r.AddListener("peer-1", l)
-	r.SetSource(src)
+	r.SetSource(src, nil)
 
 	pkt := &rtp.Packet{Payload: []byte{0xDE, 0xAD, 0xBE, 0xEF}}
 
@@ -177,7 +178,7 @@ func TestForwardLoop_DeliversSinglePacketToMultipleListeners(t *testing.T) {
 	l1, l2 := &mockListener{}, &mockListener{}
 	r.AddListener("peer-1", l1)
 	r.AddListener("peer-2", l2)
-	r.SetSource(src)
+	r.SetSource(src, nil)
 
 	pkt := &rtp.Packet{Payload: []byte{0x01}}
 
@@ -196,7 +197,7 @@ func TestForwardLoop_SourceClearsAfterEOF(t *testing.T) {
 	// Given
 	r := New("room-1")
 	src := newMockSource()
-	r.SetSource(src)
+	r.SetSource(src, nil)
 
 	// When — close source channel to trigger EOF
 	src.close()
@@ -211,7 +212,7 @@ func TestForwardLoop_StopsAfterRoomClosed(t *testing.T) {
 	src := newMockSource()
 	l := &mockListener{}
 	r.AddListener("peer-1", l)
-	r.SetSource(src)
+	r.SetSource(src, nil)
 
 	// When — close room, then send a packet
 	r.Close()
@@ -227,7 +228,7 @@ func TestForwardLoop_CountersIncrementPerPacket(t *testing.T) {
 	// Given
 	r := New("room-1")
 	src := newMockSource()
-	r.SetSource(src)
+	r.SetSource(src, nil)
 
 	payload := []byte{0xAA, 0xBB, 0xCC}
 	pkt := &rtp.Packet{Payload: payload}
@@ -297,4 +298,164 @@ func TestManager_Delete_UnknownRoom_IsNoop(t *testing.T) {
 	m := NewManager()
 	// When / Then — must not panic
 	m.Delete("does-not-exist")
+}
+
+// TestGiven_Room_When_InactivityTimerExpires_Then_RoomClosed verifies that a
+// room auto-closes after its inactivity timeout elapses with no publisher.
+func TestGiven_Room_When_InactivityTimerExpires_Then_RoomClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timer expiry test sleeps up to 150ms — skipped in -short mode")
+	}
+
+	// Given — a room with a very short inactivity timeout and no publisher.
+	const timeout = 50 * time.Millisecond
+	r := newWithTimeout("expiry-room", timeout)
+
+	// When — we wait longer than the inactivity timeout without calling SetSource.
+
+	// Then — done channel is closed, meaning Room.Close was called by the timer.
+	waitFor(t, 500*time.Millisecond, func() bool {
+		select {
+		case <-r.done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// TestGiven_Room_When_SourceSetsBeforeTimeout_Then_TimerReset verifies that
+// calling SetSource resets the inactivity timer so the room stays open.
+func TestGiven_Room_When_SourceSetsBeforeTimeout_Then_TimerReset(t *testing.T) {
+	// Given — a room with a short inactivity timeout.
+	const timeout = 80 * time.Millisecond
+	r := newWithTimeout("reset-room", timeout)
+	src := newMockSource()
+
+	// When — attach a source before the timer fires; the timer must reset.
+	// We sleep half the timeout, then attach, then check the room is still open.
+	time.Sleep(timeout / 2)
+	r.SetSource(src, nil)
+
+	// Then — the room should still be open shortly after the original timeout.
+	// The timer was reset, so the room should remain open for another `timeout`.
+	time.Sleep(timeout / 2)
+	select {
+	case <-r.done:
+		t.Fatal("room closed too early: timer was not reset by SetSource")
+	default:
+	}
+
+	src.close()
+	r.Close()
+}
+
+// TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAfterReconnect
+// verifies that when a new source replaces an existing one (ICE restart), the
+// existing listener continues receiving RTP without re-subscribing.
+func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAfterReconnect(t *testing.T) {
+	// Given — a room with a source and a listener.
+	r := New("reconnect-room")
+	src1 := newMockSource()
+	l := &mockListener{}
+	r.AddListener("peer-1", l)
+
+	closerCalled := false
+	r.SetSource(src1, func() {
+		closerCalled = true
+		src1.close() // unblocks the old forwardLoop so SetSource can wait for it
+	})
+
+	// Send a packet from src1 to confirm the initial forward path works.
+	pkt1 := &rtp.Packet{Payload: []byte{0x01}}
+	src1.send(pkt1)
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 1 })
+
+	// When — reconnect: a new source replaces the old one.
+	// SetSource must call the prevCloser (simulating PC.Close on the old source).
+	src2 := newMockSource()
+	r.SetSource(src2, nil)
+
+	// The prevCloser (from src1's SetSource) must have been called.
+	waitFor(t, 100*time.Millisecond, func() bool { return closerCalled })
+
+	// Send a packet from src2 — the listener should receive it without
+	// having called AddListener again.
+	pkt2 := &rtp.Packet{Payload: []byte{0x02}}
+	src2.send(pkt2)
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 2 })
+
+	// Then — listener received both pkt1 and pkt2 in order.
+	pkts := l.received()
+	if len(pkts) < 2 {
+		t.Fatalf("expected at least 2 packets, got %d", len(pkts))
+	}
+	if pkts[0] != pkt1 {
+		t.Error("first packet from src1 not received correctly")
+	}
+	if pkts[1] != pkt2 {
+		t.Error("first packet from src2 not received after reconnect")
+	}
+
+	// src1 was already closed by the closer registered with SetSource.
+	src2.close()
+	r.Close()
+}
+
+// TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace
+// verifies that concurrent AddListener calls and forwardLoop do not race.
+// Run with -race; the race detector fires immediately on any unsynchronised
+// access to the listener slice.
+func TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace(t *testing.T) {
+	// Given — a room with a live source sending packets continuously.
+	r := New("race-room")
+	src := newMockSource()
+	r.SetSource(src, nil)
+
+	// stopProducer is closed first to stop the producer goroutine before
+	// src.close() is called, preventing a channel-close-while-sending race.
+	stopProducer := make(chan struct{})
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		pkt := &rtp.Packet{Payload: []byte{0x01}}
+		for {
+			select {
+			case <-stopProducer:
+				return
+			default:
+				// Non-blocking send: drop if channel is full so the producer
+				// never blocks after stopProducer is closed.
+				select {
+				case src.ch <- pkt:
+				default:
+				}
+			}
+		}
+	}()
+
+	// When — concurrently add and remove listeners while forwardLoop is running.
+	var wg sync.WaitGroup
+	const goroutines = 8
+	const opsPerGoroutine = 50
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				id := fmt.Sprintf("peer-%d-%d", g, i)
+				r.AddListener(id, &mockListener{})
+				r.RemoveListener(id)
+			}
+		}(g)
+	}
+
+	// Then — all goroutines complete without the race detector firing.
+	wg.Wait()
+
+	// Stop producer before closing the source channel to avoid a race between
+	// a concurrent send on src.ch and src.close() (which closes the channel).
+	close(stopProducer)
+	<-producerDone
+	src.close()
 }

@@ -4,10 +4,10 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -22,6 +22,17 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
+// shutdownDrainTimeout is the maximum time Serve waits for in-flight HTTP
+// connections to complete after receiving a shutdown signal.
+const shutdownDrainTimeout = 5 * time.Second
+
+// defaultMaxRooms is the default room-count limit when RELAY_MAX_ROOMS is unset.
+const defaultMaxRooms = 100
+
+// defaultMaxListenersPerRoom is the default per-room listener limit when
+// RELAY_MAX_LISTENERS_PER_ROOM is unset.
+const defaultMaxListenersPerRoom = 50
+
 // Config holds the parameters for creating a Server.
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for room tokens.
@@ -30,6 +41,12 @@ type Config struct {
 	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
 	// does not need real network interfaces.
 	API *webrtc.API
+	// MaxRooms is the maximum number of concurrently active rooms.
+	// Zero means use defaultMaxRooms.
+	MaxRooms int
+	// MaxListenersPerRoom is the maximum number of listeners in a single room.
+	// Zero means use defaultMaxListenersPerRoom.
+	MaxListenersPerRoom int
 }
 
 // Server is the top-level relay server.
@@ -38,15 +55,40 @@ type Server struct {
 	jwtSecret []byte
 	api       *webrtc.API
 	Metrics   *metrics.Registry
+
+	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
+	// Both are set once at construction and never written again.
+	maxRooms            int
+	maxListenersPerRoom int
+
+	// mu guards httpServer and sessions so Serve/Shutdown/signal handlers can
+	// run concurrently without data races.
+	mu         sync.Mutex
+	httpServer *http.Server
+	// sessions tracks active WebSocket sessions. Each session registers itself
+	// on creation and deregisters on cleanup. Shutdown closes all tracked
+	// connections so hijacked WebSocket connections are not abandoned.
+	sessions map[string]*session
 }
 
 // New creates a Server from cfg.
 func New(cfg Config) *Server {
+	maxRooms := cfg.MaxRooms
+	if maxRooms <= 0 {
+		maxRooms = defaultMaxRooms
+	}
+	maxListeners := cfg.MaxListenersPerRoom
+	if maxListeners <= 0 {
+		maxListeners = defaultMaxListenersPerRoom
+	}
 	return &Server{
-		rooms:     room.NewManager(),
-		jwtSecret: cfg.JWTSecret,
-		api:       cfg.API,
-		Metrics:   metrics.New(),
+		rooms:               room.NewManager(),
+		jwtSecret:           cfg.JWTSecret,
+		api:                 cfg.API,
+		Metrics:             metrics.New(),
+		maxRooms:            maxRooms,
+		maxListenersPerRoom: maxListeners,
+		sessions:            make(map[string]*session),
 	}
 }
 
@@ -61,15 +103,57 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Serve registers routes on the default mux and blocks until the listener fails.
-// It is used by cmd/relay-server/main.go.
-func (s *Server) Serve(addr string) {
-	http.Handle("/healthz", http.HandlerFunc(s.healthz))
-	http.Handle("/v1/rooms", http.HandlerFunc(s.createRoom))
-	http.Handle("/v1/signal", http.HandlerFunc(s.signal))
-	http.HandleFunc("/metrics", s.metricsHandler)
+// Serve starts the HTTP server on addr and blocks until it stops.
+// The caller is responsible for calling Shutdown to trigger a graceful drain.
+// Returns the first non-nil error from ListenAndServe (http.ErrServerClosed on
+// clean shutdown).
+func (s *Server) Serve(addr string) error {
+	hs := &http.Server{
+		Addr:    addr,
+		Handler: s.Handler(),
+	}
+	s.mu.Lock()
+	s.httpServer = hs
+	s.mu.Unlock()
+
 	slog.Info("relay listening", "addr", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	return hs.ListenAndServe()
+}
+
+// Shutdown drains the server with a 5-second deadline, closes all active
+// WebSocket sessions, and closes all rooms. It is safe to call from a signal
+// handler goroutine.
+//
+// WebSocket connections are hijacked from the HTTP server and therefore not
+// tracked by http.Server.Shutdown. We close them explicitly so peers observe
+// a clean connection close rather than a silent hang.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	hs := s.httpServer
+	// Snapshot the live sessions to close them without holding the lock.
+	toClose := make([]*session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		toClose = append(toClose, sess)
+	}
+	s.mu.Unlock()
+
+	// Close active WebSocket sessions first so their read loops unblock and
+	// can deregister cleanly.
+	for _, sess := range toClose {
+		sess.closeConn()
+	}
+
+	if hs != nil {
+		drainCtx, cancel := context.WithTimeout(ctx, shutdownDrainTimeout)
+		defer cancel()
+		if err := hs.Shutdown(drainCtx); err != nil {
+			return err
+		}
+	}
+	// Close all active rooms so forwardLoops exit and peer connections are
+	// cleaned up before the process exits.
+	s.rooms.CloseAll()
+	return nil
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -81,7 +165,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	s.Metrics.PacketsForwarded.Store(fwd)
 	s.Metrics.PacketsDropped.Store(drop)
 	s.Metrics.RoomsActive.Store(int64(s.rooms.RoomCount()))
-	s.Metrics.WriteTo(w)
+	s.Metrics.WritePrometheus(w)
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +173,15 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Rate limit: reject when the room count has reached the ceiling.
+	if s.rooms.RoomCount() >= s.maxRooms {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room_limit_exceeded"})
+		return
+	}
+
 	id := newID()
 	s.rooms.GetOrCreate(id)
 	s.Metrics.RoomsActive.Add(1)
@@ -126,8 +219,18 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 		srv:  s,
 		conn: conn,
 	}
+	// Register session so Shutdown can close it.
+	s.mu.Lock()
+	s.sessions[sess.id] = sess
+	s.mu.Unlock()
+
 	s.Metrics.SessionsTotal.Add(1)
-	defer sess.cleanup()
+	defer func() {
+		s.mu.Lock()
+		delete(s.sessions, sess.id)
+		s.mu.Unlock()
+		sess.cleanup()
+	}()
 	sess.run()
 }
 
@@ -177,6 +280,20 @@ func (s *session) cleanup() {
 	slog.Info("session cleaned up", "session_id", s.id)
 }
 
+// closeConn sends a WebSocket close frame and closes the underlying connection.
+// Called by Shutdown to unblock the session's read loop so the session goroutine
+// can deregister and exit cleanly.
+func (s *session) closeConn() {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	// Best-effort: send a close frame, then close the connection.
+	_ = s.conn.WriteMessage(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutdown"),
+	)
+	_ = s.conn.Close()
+}
+
 // handleJoin processes a PUBLISH or SUBSCRIBE message.
 // It verifies the JWT, creates a Pion PeerConnection, performs the SDP
 // offer/answer exchange, and wires up ICE candidate forwarding.
@@ -218,11 +335,20 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 	switch msg.Type {
 	case signaling.TypePublish:
 		// When the source's track arrives (after ICE connects), set it on the room.
+		// Pass pc.Close as the closer so that a subsequent SetSource call (ICE
+		// restart) closes this PeerConnection, causing ReadRTP to error and the
+		// old forwardLoop to exit before the new one starts.
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			rm.SetSource(&trackSource{track: track})
+			rm.SetSource(&trackSource{track: track}, func() { _ = pc.Close() })
 		})
 
 	case signaling.TypeSubscribe:
+		// Rate limit: reject if this room is already at listener capacity.
+		if rm.ListenerCount() >= s.srv.maxListenersPerRoom {
+			s.sendError("listener_limit_exceeded", "room has reached maximum listener count")
+			return
+		}
+
 		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
 			"audio", "pocketstation",
