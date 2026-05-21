@@ -304,3 +304,15 @@ func (m *Manager) RoomCount() int {
 	defer m.mu.RUnlock()
 	return len(m.rooms)
 }
+
+// CloseAll closes every active room and removes it from the manager.
+// Used by the graceful shutdown path to drain all sessions before the
+// process exits. Safe to call multiple times.
+func (m *Manager) CloseAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, r := range m.rooms {
+		r.Close()
+		delete(m.rooms, id)
+	}
+}
