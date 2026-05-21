@@ -17,6 +17,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
+	"github.com/pocketstation-io/relay/internal/callback"
 	"github.com/pocketstation-io/relay/internal/metrics"
 	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/signaling"
@@ -47,14 +48,18 @@ type Config struct {
 	// MaxListenersPerRoom is the maximum number of listeners in a single room.
 	// Zero means use defaultMaxListenersPerRoom.
 	MaxListenersPerRoom int
+	// CallbackClient is an optional client for posting source/listener events to
+	// api-server. Nil disables all outbound callbacks.
+	CallbackClient *callback.Client
 }
 
 // Server is the top-level relay server.
 type Server struct {
-	rooms     *room.Manager
-	jwtSecret []byte
-	api       *webrtc.API
-	Metrics   *metrics.Registry
+	rooms          *room.Manager
+	jwtSecret      []byte
+	api            *webrtc.API
+	Metrics        *metrics.Registry
+	callbackClient *callback.Client
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
 	// Both are set once at construction and never written again.
@@ -86,6 +91,7 @@ func New(cfg Config) *Server {
 		jwtSecret:           cfg.JWTSecret,
 		api:                 cfg.API,
 		Metrics:             metrics.New(),
+		callbackClient:      cfg.CallbackClient,
 		maxRooms:            maxRooms,
 		maxListenersPerRoom: maxListeners,
 		sessions:            make(map[string]*session),
@@ -273,9 +279,22 @@ func (s *session) cleanup() {
 	if s.pc != nil {
 		_ = s.pc.Close()
 	}
-	if s.rm != nil && s.role == auth.RoleListener {
-		s.rm.RemoveListener(s.id)
-		s.srv.Metrics.ListenerCount.Add(-1)
+	if s.rm != nil {
+		switch s.role {
+		case auth.RoleListener:
+			s.rm.RemoveListener(s.id)
+			s.srv.Metrics.ListenerCount.Add(-1)
+			if s.srv.callbackClient != nil {
+				go s.srv.callbackClient.PushListenerLeave(s.rm.ID)
+			}
+		case auth.RoleSource:
+			// Notify api-server that the source is no longer active.
+			// The room's forwardLoop will clear rm.source asynchronously;
+			// we push the inactive state eagerly on session teardown.
+			if s.srv.callbackClient != nil {
+				go s.srv.callbackClient.PushSourceActive(s.rm.ID, false)
+			}
+		}
 	}
 	slog.Info("session cleaned up", "session_id", s.id)
 }
@@ -338,8 +357,14 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		// Pass pc.Close as the closer so that a subsequent SetSource call (ICE
 		// restart) closes this PeerConnection, causing ReadRTP to error and the
 		// old forwardLoop to exit before the new one starts.
+		// Notify api-server of source join in a goroutine so the audio path is
+		// never blocked. Best-effort: errors are logged inside PushSourceActive.
+		roomIDForCallback := claims.RoomID
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			rm.SetSource(&trackSource{track: track}, func() { _ = pc.Close() })
+			if s.srv.callbackClient != nil {
+				go s.srv.callbackClient.PushSourceActive(roomIDForCallback, true)
+			}
 		})
 
 	case signaling.TypeSubscribe:

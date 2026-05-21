@@ -10,14 +10,24 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/pocketstation-io/relay/internal/callback"
 	"github.com/pocketstation-io/relay/internal/server"
 )
 
 func main() {
+	// RELAY_API_SERVER_URL is optional. When unset, source_active and
+	// listener-leave callbacks are disabled; the relay operates normally.
+	var cbClient *callback.Client
+	if apiURL := os.Getenv("RELAY_API_SERVER_URL"); apiURL != "" {
+		cbClient = callback.NewClient(apiURL)
+		slog.Info("relay callback client enabled", "api_server_url", apiURL)
+	}
+
 	s := server.New(server.Config{
 		JWTSecret:           []byte(getenv("POCKETSTATION_JWT_SECRET", "dev-secret-change-me")),
 		MaxRooms:            getenvInt("RELAY_MAX_ROOMS", 0),
 		MaxListenersPerRoom: getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
+		CallbackClient:      cbClient,
 	})
 
 	// Catch SIGTERM and SIGINT. The signal goroutine calls Shutdown which
