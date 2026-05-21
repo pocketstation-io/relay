@@ -298,8 +298,11 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 	switch msg.Type {
 	case signaling.TypePublish:
 		// When the source's track arrives (after ICE connects), set it on the room.
+		// Pass pc.Close as the closer so that a subsequent SetSource call (ICE
+		// restart) closes this PeerConnection, causing ReadRTP to error and the
+		// old forwardLoop to exit before the new one starts.
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			rm.SetSource(&trackSource{track: track})
+			rm.SetSource(&trackSource{track: track}, func() { _ = pc.Close() })
 		})
 
 	case signaling.TypeSubscribe:
