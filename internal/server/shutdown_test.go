@@ -78,6 +78,9 @@ func dialShutdownSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 // require the server to iterate sessions; the Phase 2 design uses room.Close
 // which tears down the underlying connection.
 func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *testing.T) {
+	if testing.Short() {
+		t.Skip("shutdown test relies on goroutine scheduling timing — skipped in -short mode")
+	}
 	ts, srv, _ := newShutdownTestServer(t)
 
 	// Verify the server is up before we create a room.
