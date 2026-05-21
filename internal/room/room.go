@@ -66,9 +66,14 @@ type Room struct {
 	listenersMu sync.Mutex
 	listeners   atomic.Pointer[[]listenerEntry]
 
-	// sourceMu guards source field for SetSource and SourceActive.
-	sourceMu sync.Mutex
-	source   Source
+	// sourceMu guards source and sourceCloser.
+	// sourceCloser, when non-nil, terminates the previous source's underlying
+	// connection (e.g. closes the PeerConnection). Called by SetSource on
+	// reconnect so the old forwardLoop exits and listeners receive RTP from
+	// the new source without re-subscribing.
+	sourceMu     sync.Mutex
+	source       Source
+	sourceCloser func()
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -127,11 +132,27 @@ func newWithTimeout(id string, timeout time.Duration) *Room {
 
 // SetSource sets the audio source and starts the forward loop.
 // Resets the inactivity timer to give the new publisher a fresh window.
-// Calling SetSource a second time replaces the source (ICE restart path, Task 4).
-func (r *Room) SetSource(src Source) {
+//
+// If a previous source is active (ICE restart / reconnect), SetSource closes
+// it via the registered sourceCloser before starting the new forwardLoop.
+// closer, if non-nil, will be called when the next SetSource call replaces
+// this source, or when the room closes; pass nil if no cleanup is needed.
+//
+// Existing listeners are not affected: they continue to receive RTP from the
+// new source without re-subscribing, satisfying the ICE restart requirement.
+func (r *Room) SetSource(src Source, closer func()) {
 	r.sourceMu.Lock()
+	prevCloser := r.sourceCloser
 	r.source = src
+	r.sourceCloser = closer
 	r.sourceMu.Unlock()
+
+	// Close the previous source's connection outside the lock so it doesn't
+	// block SetSource callers. The old forwardLoop exits when its ReadRTP
+	// returns an error after the PC is closed.
+	if prevCloser != nil {
+		prevCloser()
+	}
 
 	// Reset the inactivity timer: a publisher is now active.
 	// timerMu prevents a race between this Reset and the timer callback
@@ -213,6 +234,7 @@ func (r *Room) forwardLoop(src Source) {
 		r.sourceMu.Lock()
 		if r.source == src {
 			r.source = nil
+			r.sourceCloser = nil
 		}
 		r.sourceMu.Unlock()
 	}()
