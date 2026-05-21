@@ -4,9 +4,14 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/rtp"
 )
+
+// defaultInactivityTimeout is the time a room without an active publisher will
+// remain open before being automatically closed.
+const defaultInactivityTimeout = 30 * time.Minute
 
 // ErrNoSource is returned when an operation requires a live source and none is set.
 var ErrNoSource = errors.New("room has no source")
@@ -43,10 +48,13 @@ type listenerEntry struct {
 //   - source and sourceMu are separate because SetSource must be able to change
 //     the source without blocking the listener snapshot path.
 //   - closeOnce and done provide an idempotent close signal.
+//   - inactivityTimer fires when no PUBLISH arrives within inactivityTimeout.
+//     SetSource resets the timer on every successful source attachment.
 //
 // Ownership: Room is created open. Callers call Close to terminate it.
 // Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
-// Phase scope: ADR-005 copy-on-write (Phase 2). Source reconnect handled in Task 4.
+// Phase scope: ADR-005 copy-on-write + room expiry (Phase 2 Tasks 1 and 2).
+//   Source reconnect handled in Task 4.
 // Intentionally not implemented: automatic room cleanup on last-peer-leave (Phase 2 Task 4).
 type Room struct {
 	ID string
@@ -65,30 +73,74 @@ type Room struct {
 	closeOnce sync.Once
 	done      chan struct{}
 
+	// inactivityTimer auto-closes the room after inactivityTimeout of no publisher.
+	// timerMu serialises Reset/Stop calls on the timer to avoid a race between
+	// the timer firing and SetSource resetting it.
+	timerMu           sync.Mutex
+	inactivityTimer   *time.Timer
+	inactivityTimeout time.Duration
+
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
 }
 
-// New returns an open room with the given id.
+// New returns an open room with the given id and the default inactivity timeout.
 func New(id string) *Room {
+	return newWithTimeout(id, defaultInactivityTimeout)
+}
+
+// newWithTimeout creates a room with a configurable inactivity timeout.
+// Used by tests to exercise expiry with short durations without sleeping 30 min.
+func newWithTimeout(id string, timeout time.Duration) *Room {
 	r := &Room{
-		ID:   id,
-		done: make(chan struct{}),
+		ID:                id,
+		done:              make(chan struct{}),
+		inactivityTimeout: timeout,
 	}
 	// Initialise atomic pointer to an empty (non-nil) slice so Load always
 	// returns a valid pointer. This avoids nil-dereference in forwardLoop.
 	empty := make([]listenerEntry, 0)
 	r.listeners.Store(&empty)
+
+	// Start the inactivity timer. The timer fires if no publisher attaches within
+	// inactivityTimeout. SetSource resets the timer to give the publisher a
+	// fresh window on every reconnect.
+	//
+	// Race-free construction: both the timer field write and the Reset call
+	// happen under timerMu. The callback also acquires timerMu before reading
+	// the field (via Stop inside Close). This establishes a happens-before
+	// relationship between the write in newWithTimeout and any subsequent read
+	// in the callback, satisfying the Go memory model.
+	r.timerMu.Lock()
+	r.inactivityTimer = time.AfterFunc(timeout, func() {
+		// Acquire timerMu before calling Close so there is a happens-before edge
+		// between the r.inactivityTimer assignment in newWithTimeout and this
+		// goroutine reading it through r.Close → r.inactivityTimer.Stop().
+		r.timerMu.Lock()
+		r.timerMu.Unlock()
+		r.Close()
+	})
+	r.timerMu.Unlock()
 	return r
 }
 
 // SetSource sets the audio source and starts the forward loop.
+// Resets the inactivity timer to give the new publisher a fresh window.
 // Calling SetSource a second time replaces the source (ICE restart path, Task 4).
 func (r *Room) SetSource(src Source) {
 	r.sourceMu.Lock()
 	r.source = src
 	r.sourceMu.Unlock()
+
+	// Reset the inactivity timer: a publisher is now active.
+	// timerMu prevents a race between this Reset and the timer callback
+	// (which calls Close) firing concurrently.
+	r.timerMu.Lock()
+	r.inactivityTimer.Stop()
+	r.inactivityTimer.Reset(r.inactivityTimeout)
+	r.timerMu.Unlock()
+
 	go r.forwardLoop(src)
 }
 
@@ -134,8 +186,14 @@ func (r *Room) SourceActive() bool {
 }
 
 // Close terminates the room. Safe to call multiple times.
+// Stops the inactivity timer so it does not fire after an explicit close.
 func (r *Room) Close() {
-	r.closeOnce.Do(func() { close(r.done) })
+	r.closeOnce.Do(func() {
+		r.timerMu.Lock()
+		r.inactivityTimer.Stop()
+		r.timerMu.Unlock()
+		close(r.done)
+	})
 }
 
 // forwardLoop reads RTP from src and writes to each listener until src

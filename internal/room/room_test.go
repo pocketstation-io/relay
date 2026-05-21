@@ -300,6 +300,57 @@ func TestManager_Delete_UnknownRoom_IsNoop(t *testing.T) {
 	m.Delete("does-not-exist")
 }
 
+// TestGiven_Room_When_InactivityTimerExpires_Then_RoomClosed verifies that a
+// room auto-closes after its inactivity timeout elapses with no publisher.
+func TestGiven_Room_When_InactivityTimerExpires_Then_RoomClosed(t *testing.T) {
+	if testing.Short() {
+		// This test sleeps up to 150ms; skip with -short only if needed.
+		// 150ms is acceptable in the standard test run; kept here for CI gate.
+	}
+
+	// Given — a room with a very short inactivity timeout and no publisher.
+	const timeout = 50 * time.Millisecond
+	r := newWithTimeout("expiry-room", timeout)
+
+	// When — we wait longer than the inactivity timeout without calling SetSource.
+
+	// Then — done channel is closed, meaning Room.Close was called by the timer.
+	waitFor(t, 500*time.Millisecond, func() bool {
+		select {
+		case <-r.done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// TestGiven_Room_When_SourceSetsBeforeTimeout_Then_TimerReset verifies that
+// calling SetSource resets the inactivity timer so the room stays open.
+func TestGiven_Room_When_SourceSetsBeforeTimeout_Then_TimerReset(t *testing.T) {
+	// Given — a room with a short inactivity timeout.
+	const timeout = 80 * time.Millisecond
+	r := newWithTimeout("reset-room", timeout)
+	src := newMockSource()
+
+	// When — attach a source before the timer fires; the timer must reset.
+	// We sleep half the timeout, then attach, then check the room is still open.
+	time.Sleep(timeout / 2)
+	r.SetSource(src)
+
+	// Then — the room should still be open shortly after the original timeout.
+	// The timer was reset, so the room should remain open for another `timeout`.
+	time.Sleep(timeout / 2)
+	select {
+	case <-r.done:
+		t.Fatal("room closed too early: timer was not reset by SetSource")
+	default:
+	}
+
+	src.close()
+	r.Close()
+}
+
 // TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace
 // verifies that concurrent AddListener calls and forwardLoop do not race.
 // Run with -race; the race detector fires immediately on any unsynchronised
