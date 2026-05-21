@@ -1,5 +1,13 @@
 # RELAY_PHASE1_PROGRESS.md
 
+## PHASE 1 COMPLETE — 2026-05-20. Audit: CONDITIONAL PASS.
+
+All tests pass: auth (6), room (15), integration (2), soak (5 min, race-clean).
+CI fixed: unit tests run with `-short`; soak runs only on push to main (ADR-016).
+Phase 2 intake tracked in RELAY_PHASE2_QUEUE.md.
+
+---
+
 Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentionally deferred.
 
 ---
@@ -168,3 +176,20 @@ Nothing is currently blocked. All tooling checks passed (2026-05-20).
 - Phase scope respected: yes.
 - Unsafe added: no.
 - Remaining risk: ADR-009 Pion WriteRTP allocation profile unmeasured (mock listeners only). ADR-010 jitter buffer not implemented. Both are explicit Phase 1 deferred items.
+
+---
+
+## Soak Results (2026-05-20)
+
+Platform: darwin/arm64 (Apple M5). Race detector: active. Duration: 5 minutes.
+
+```
+goroutines  start=158  1min=149  5min=146  delta(1->5)=-3
+rss_mb      start=14   1min=18   5min=18   growth(1->5)=0.0%
+packets_forwarded measured via GET /metrics before result write
+race_detector=clean
+goroutine_leak=PASS (delta -3 <= limit 10)
+rss_growth=PASS (0.0% <= budget 20%)
+```
+
+Source: `soak/results/phase1-baseline.txt`. These numbers are the Phase 2 regression baseline.

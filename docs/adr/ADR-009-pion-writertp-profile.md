@@ -1,7 +1,7 @@
 # ADR-009-pion-writertp-profile — Pion WriteRTP Allocation Profile
 
 ## Status
-Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
+Accepted. Phase 1 baseline measurements taken 2026-05-20 (see `benches/results/phase1-baseline.txt`). Disconnected-track WriteRTP: 0 alloc/op at ~26 ns/op. Connected-track (SRTP path) measurement deferred to Phase 2 (see RELAY_PHASE2_QUEUE.md — "Connected WriteRTP bench"). No zero-allocation claim is made for the connected relay path.
 
 ## Context
 PocketStation v2.3 requires this ADR before implementation lands. See `docs/architecture/pocketstation-v2.3.md`.
