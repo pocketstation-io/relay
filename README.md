@@ -3,7 +3,7 @@
 **Organization:** `pocketstation-io`  
 **Repository:** `pocketstation-io/relay`  
 **v2.3 tier:** Tier 3 — Server Services  
-**Activation phase:** Phase 1  
+**Current phase:** Phase 2 (activated Phase 1; Phase 1 COMPLETE 2026-05-20)  
 **Language/package:** Go + Pion v4  
 **Release strategy:** SemVer independent; Docker image on tag
 

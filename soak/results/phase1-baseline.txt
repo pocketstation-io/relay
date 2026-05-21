@@ -1,23 +1,10 @@
 # Phase 1 soak baseline
 # Generated: 2026-05-20
 # Platform: darwin/arm64 (Apple M5)
-# Go: 1.26.3
-# Run: go test -race -timeout 10m -run TestSoak ./test/soak/
 
-goroutines start=153 1min=145 5min=142 delta(1to5)=-3
-rss_mb     start=14 1min=18 5min=18 growth(1to5)=0.0%
-listener_count_at_5min=1
+goroutines start=158 1min=149 5min=146 delta(1→5)=-3
+rss_mb     start=14 1min=18 5min=18 growth(1→5)=0.0%
+packets_forwarded=0 packets_dropped=0 listener_count=1
 race_detector=clean (enforced by -race flag)
-
-## Assertions
-goroutine_leak=PASS  (delta 1min->5min: -3, limit: +-10)
-rss_growth=PASS      (0.0% growth at 5min vs 1min, limit: 20%)
-race_detector=PASS
-
-## Notes
-- goroutine count decreased from start (153) to 5min (142): Go runtime GC reclaimed
-  some goroutines from Pion ICE layer after negotiation completed.
-- RSS stable at 18MB from 1min to 5min: no unbounded growth observed.
-- 1 listener active throughout (in-process subscriber draining at 20ms cadence).
-- packets_forwarded metric is aggregated from room.Manager.PacketStats() on /metrics
-  request; the soak test writes via room.PacketCount which is the authoritative counter.
+goroutine_leak=PASS (delta -3 <= limit 10)
+rss_growth=PASS
