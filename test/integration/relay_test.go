@@ -295,6 +295,9 @@ func waitICEConnected(ctx context.Context, t *testing.T, pc *webrtc.PeerConnecti
 // TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted verifies that a
 // valid source token results in an SDP_ANSWER being returned without ERROR.
 func TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
+	}
 	ts, clientAPI := newTestServer(t)
 
 	room := createRoom(t, ts)
@@ -339,6 +342,9 @@ func TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted(t *testing.T) {
 // starts the publisher send loop immediately after ICE connects, then
 // connects the subscriber while packets are already flowing.
 func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
+	}
 	const packetCount = 30
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
