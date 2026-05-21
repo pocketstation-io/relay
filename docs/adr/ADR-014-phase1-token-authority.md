@@ -46,6 +46,19 @@ Cleanest boundary. Phase 1 has a single authoritative token issuer. Phase 2 upgr
 - `TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted` in `test/integration/relay_test.go` verifies the full token flow: POST /v1/rooms → JWT → WebSocket PUBLISH with that token → SDP_ANSWER received.
 - Auth unit tests in `internal/auth/token_test.go` (6 tests) cover: happy path, wrong secret, expired token, listener role, malformed token, empty token.
 
+## Phase 2 resolution
+
+Resolved 2026-05-21. The cross-service integration test now gates Phase 2 exit:
+
+- `TestGiven_ApiServerToken_When_UsedForRelaySignal_Then_Accepted` — confirms that a token
+  minted by api-server (HS256, `Claims{RoomID, Role}`, shared `POCKETSTATION_JWT_SECRET`)
+  is accepted by relay `/v1/signal` and results in an SDP_ANSWER.
+- `TestGiven_ApiServerToken_When_SecretMismatch_Then_BadToken` — confirms that a
+  mismatched-secret token is rejected with ERROR code `bad_token`.
+
+Both tests are in `test/integration/cross_service_test.go` and pass with `-race`.
+The reversal trigger below is satisfied.
+
 ## Reversal trigger
 
 Phase 2 api-server JWT upgrade is complete and a cross-service integration test (relay token issuance by api-server, accepted by relay `/v1/signal`) passes in CI.
