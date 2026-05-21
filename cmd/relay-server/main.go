@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/pocketstation-io/relay/internal/server"
@@ -14,7 +15,9 @@ import (
 
 func main() {
 	s := server.New(server.Config{
-		JWTSecret: []byte(getenv("POCKETSTATION_JWT_SECRET", "dev-secret-change-me")),
+		JWTSecret:           []byte(getenv("POCKETSTATION_JWT_SECRET", "dev-secret-change-me")),
+		MaxRooms:            getenvInt("RELAY_MAX_ROOMS", 0),
+		MaxListenersPerRoom: getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
 	})
 
 	// Catch SIGTERM and SIGINT. The signal goroutine calls Shutdown which
@@ -41,4 +44,19 @@ func getenv(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// getenvInt returns the integer value of env var k, or d if unset or unparseable.
+// A value of 0 for d means "use the server default".
+func getenvInt(k string, d int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return d
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		slog.Warn("invalid env var value, using default", "key", k, "value", v)
+		return d
+	}
+	return n
 }

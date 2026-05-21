@@ -26,6 +26,13 @@ import (
 // connections to complete after receiving a shutdown signal.
 const shutdownDrainTimeout = 5 * time.Second
 
+// defaultMaxRooms is the default room-count limit when RELAY_MAX_ROOMS is unset.
+const defaultMaxRooms = 100
+
+// defaultMaxListenersPerRoom is the default per-room listener limit when
+// RELAY_MAX_LISTENERS_PER_ROOM is unset.
+const defaultMaxListenersPerRoom = 50
+
 // Config holds the parameters for creating a Server.
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for room tokens.
@@ -34,6 +41,12 @@ type Config struct {
 	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
 	// does not need real network interfaces.
 	API *webrtc.API
+	// MaxRooms is the maximum number of concurrently active rooms.
+	// Zero means use defaultMaxRooms.
+	MaxRooms int
+	// MaxListenersPerRoom is the maximum number of listeners in a single room.
+	// Zero means use defaultMaxListenersPerRoom.
+	MaxListenersPerRoom int
 }
 
 // Server is the top-level relay server.
@@ -42,6 +55,11 @@ type Server struct {
 	jwtSecret []byte
 	api       *webrtc.API
 	Metrics   *metrics.Registry
+
+	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
+	// Both are set once at construction and never written again.
+	maxRooms            int
+	maxListenersPerRoom int
 
 	// mu guards httpServer and sessions so Serve/Shutdown/signal handlers can
 	// run concurrently without data races.
@@ -55,12 +73,22 @@ type Server struct {
 
 // New creates a Server from cfg.
 func New(cfg Config) *Server {
+	maxRooms := cfg.MaxRooms
+	if maxRooms <= 0 {
+		maxRooms = defaultMaxRooms
+	}
+	maxListeners := cfg.MaxListenersPerRoom
+	if maxListeners <= 0 {
+		maxListeners = defaultMaxListenersPerRoom
+	}
 	return &Server{
-		rooms:     room.NewManager(),
-		jwtSecret: cfg.JWTSecret,
-		api:       cfg.API,
-		Metrics:   metrics.New(),
-		sessions:  make(map[string]*session),
+		rooms:               room.NewManager(),
+		jwtSecret:           cfg.JWTSecret,
+		api:                 cfg.API,
+		Metrics:             metrics.New(),
+		maxRooms:            maxRooms,
+		maxListenersPerRoom: maxListeners,
+		sessions:            make(map[string]*session),
 	}
 }
 
@@ -137,7 +165,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	s.Metrics.PacketsForwarded.Store(fwd)
 	s.Metrics.PacketsDropped.Store(drop)
 	s.Metrics.RoomsActive.Store(int64(s.rooms.RoomCount()))
-	s.Metrics.WriteTo(w)
+	s.Metrics.WritePrometheus(w)
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +173,15 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Rate limit: reject when the room count has reached the ceiling.
+	if s.rooms.RoomCount() >= s.maxRooms {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room_limit_exceeded"})
+		return
+	}
+
 	id := newID()
 	s.rooms.GetOrCreate(id)
 	s.Metrics.RoomsActive.Add(1)
@@ -306,6 +343,12 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		})
 
 	case signaling.TypeSubscribe:
+		// Rate limit: reject if this room is already at listener capacity.
+		if rm.ListenerCount() >= s.srv.maxListenersPerRoom {
+			s.sendError("listener_limit_exceeded", "room has reached maximum listener count")
+			return
+		}
+
 		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
 			"audio", "pocketstation",
