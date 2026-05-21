@@ -25,14 +25,42 @@ type Listener interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
 
+// listenerEntry pairs a peer ID with its Listener.
+// Stored by value in the copy-on-write slice so the slice itself holds no
+// extra pointer indirection beyond the interface header.
+type listenerEntry struct {
+	peerID string
+	l      Listener
+}
+
 // Room holds one live audio source and its set of listeners.
-// A room is created open and closed explicitly via Close.
+//
+// Invariants:
+//   - listeners is a copy-on-write atomic pointer to an immutable []listenerEntry.
+//     forwardLoop reads it with one Load and holds no lock during WriteRTP.
+//   - listenersMu is a short-lived write lock used only by AddListener and
+//     RemoveListener to serialise slice copies. It is never held during I/O.
+//   - source and sourceMu are separate because SetSource must be able to change
+//     the source without blocking the listener snapshot path.
+//   - closeOnce and done provide an idempotent close signal.
+//
+// Ownership: Room is created open. Callers call Close to terminate it.
+// Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
+// Phase scope: ADR-005 copy-on-write (Phase 2). Source reconnect handled in Task 4.
+// Intentionally not implemented: automatic room cleanup on last-peer-leave (Phase 2 Task 4).
 type Room struct {
 	ID string
 
-	mu        sync.RWMutex
-	source    Source
-	listeners map[string]Listener
+	// listeners is a copy-on-write pointer to an immutable snapshot.
+	// The zero value (nil pointer) is treated as an empty slice in forwardLoop.
+	// Write ops (AddListener, RemoveListener) take listenersMu, copy the slice,
+	// then atomically store the new pointer.
+	listenersMu sync.Mutex
+	listeners   atomic.Pointer[[]listenerEntry]
+
+	// sourceMu guards source field for SetSource and SourceActive.
+	sourceMu sync.Mutex
+	source   Source
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -44,47 +72,64 @@ type Room struct {
 
 // New returns an open room with the given id.
 func New(id string) *Room {
-	return &Room{
-		ID:        id,
-		listeners: make(map[string]Listener),
-		done:      make(chan struct{}),
+	r := &Room{
+		ID:   id,
+		done: make(chan struct{}),
 	}
+	// Initialise atomic pointer to an empty (non-nil) slice so Load always
+	// returns a valid pointer. This avoids nil-dereference in forwardLoop.
+	empty := make([]listenerEntry, 0)
+	r.listeners.Store(&empty)
+	return r
 }
 
 // SetSource sets the audio source and starts the forward loop.
-// Calling SetSource a second time is undefined; the caller must not do this.
+// Calling SetSource a second time replaces the source (ICE restart path, Task 4).
 func (r *Room) SetSource(src Source) {
-	r.mu.Lock()
+	r.sourceMu.Lock()
 	r.source = src
-	r.mu.Unlock()
+	r.sourceMu.Unlock()
 	go r.forwardLoop(src)
 }
 
 // AddListener registers listener l under peerID.
+// Takes listenersMu briefly to copy the slice, then stores the new pointer.
 func (r *Room) AddListener(peerID string, l Listener) {
-	r.mu.Lock()
-	r.listeners[peerID] = l
-	r.mu.Unlock()
+	r.listenersMu.Lock()
+	defer r.listenersMu.Unlock()
+
+	old := *r.listeners.Load()
+	next := make([]listenerEntry, len(old)+1)
+	copy(next, old)
+	next[len(old)] = listenerEntry{peerID: peerID, l: l}
+	r.listeners.Store(&next)
 }
 
 // RemoveListener deregisters the listener for peerID. No-op if absent.
+// Takes listenersMu briefly to copy the slice, then stores the new pointer.
 func (r *Room) RemoveListener(peerID string) {
-	r.mu.Lock()
-	delete(r.listeners, peerID)
-	r.mu.Unlock()
+	r.listenersMu.Lock()
+	defer r.listenersMu.Unlock()
+
+	old := *r.listeners.Load()
+	next := make([]listenerEntry, 0, len(old))
+	for _, e := range old {
+		if e.peerID != peerID {
+			next = append(next, e)
+		}
+	}
+	r.listeners.Store(&next)
 }
 
 // ListenerCount returns the current number of registered listeners.
 func (r *Room) ListenerCount() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.listeners)
+	return len(*r.listeners.Load())
 }
 
 // SourceActive reports whether a source is currently attached.
 func (r *Room) SourceActive() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
 	return r.source != nil
 }
 
@@ -94,18 +139,24 @@ func (r *Room) Close() {
 }
 
 // forwardLoop reads RTP from src and writes to each listener until src
-// returns an error or the room is closed. The goroutine teardown path:
+// returns an error or the room is closed.
+//
+// Hot-path invariants (ADR-005, ADR-009):
+//   - One atomic.Load per packet; no lock held during WriteRTP.
+//   - No heap allocation beyond what the loaded slice pointer itself costs.
+//
+// Goroutine teardown:
 //  1. src.ReadRTP errors (peer connection closed) → return.
 //  2. r.done closed (Room.Close called) → return after the next packet read.
 //
 // In both cases the deferred block clears r.source so SourceActive() returns false.
 func (r *Room) forwardLoop(src Source) {
 	defer func() {
-		r.mu.Lock()
+		r.sourceMu.Lock()
 		if r.source == src {
 			r.source = nil
 		}
-		r.mu.Unlock()
+		r.sourceMu.Unlock()
 	}()
 
 	for {
@@ -123,18 +174,10 @@ func (r *Room) forwardLoop(src Source) {
 		r.PacketCount.Add(1)
 		r.ByteCount.Add(uint64(len(pkt.Payload)))
 
-		// Snapshot listener set under read lock to minimise lock hold time.
-		r.mu.RLock()
-		ls := make([]Listener, 0, len(r.listeners))
-		for _, l := range r.listeners {
-			ls = append(ls, l)
-		}
-		r.mu.RUnlock()
-
-		for _, l := range ls {
-			// TODO(Phase 1, ADR-009): measure WriteRTP allocation/mutation profile
-			// before claiming zero-alloc forwarding. See forward_bench_test.go.
-			if err := l.WriteRTP(pkt); err != nil {
+		// ADR-005: one atomic load; no lock held during WriteRTP.
+		ls := *r.listeners.Load()
+		for _, e := range ls {
+			if err := e.l.WriteRTP(pkt); err != nil {
 				r.PacketDropCount.Add(1)
 			}
 		}

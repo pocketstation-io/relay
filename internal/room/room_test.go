@@ -3,6 +3,7 @@
 package room
 
 import (
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -297,4 +298,62 @@ func TestManager_Delete_UnknownRoom_IsNoop(t *testing.T) {
 	m := NewManager()
 	// When / Then — must not panic
 	m.Delete("does-not-exist")
+}
+
+// TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace
+// verifies that concurrent AddListener calls and forwardLoop do not race.
+// Run with -race; the race detector fires immediately on any unsynchronised
+// access to the listener slice.
+func TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace(t *testing.T) {
+	// Given — a room with a live source sending packets continuously.
+	r := New("race-room")
+	src := newMockSource()
+	r.SetSource(src)
+
+	// stopProducer is closed first to stop the producer goroutine before
+	// src.close() is called, preventing a channel-close-while-sending race.
+	stopProducer := make(chan struct{})
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		pkt := &rtp.Packet{Payload: []byte{0x01}}
+		for {
+			select {
+			case <-stopProducer:
+				return
+			default:
+				// Non-blocking send: drop if channel is full so the producer
+				// never blocks after stopProducer is closed.
+				select {
+				case src.ch <- pkt:
+				default:
+				}
+			}
+		}
+	}()
+
+	// When — concurrently add and remove listeners while forwardLoop is running.
+	var wg sync.WaitGroup
+	const goroutines = 8
+	const opsPerGoroutine = 50
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				id := fmt.Sprintf("peer-%d-%d", g, i)
+				r.AddListener(id, &mockListener{})
+				r.RemoveListener(id)
+			}
+		}(g)
+	}
+
+	// Then — all goroutines complete without the race detector firing.
+	wg.Wait()
+
+	// Stop producer before closing the source channel to avoid a race between
+	// a concurrent send on src.ch and src.close() (which closes the channel).
+	close(stopProducer)
+	<-producerDone
+	src.close()
 }
