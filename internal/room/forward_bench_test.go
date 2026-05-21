@@ -1,9 +1,10 @@
 // Benchmarks for the RTP forward path.
 //
 // ADR-009: no zero-alloc claim for the relay is permitted until the
-// *webrtc.TrackLocalStaticRTP write path has been measured. These benchmarks
-// use a discard Listener to isolate room dispatch overhead; a separate
-// benchmark wiring real Pion tracks is required before Phase 1 exit.
+// *webrtc.TrackLocalStaticRTP write path has been measured with a connected
+// peer. These benchmarks use a discard Listener to isolate room dispatch
+// overhead; a companion benchmark wiring real connected Pion tracks is
+// tracked as a Phase 2 task in RELAY_PHASE2_QUEUE.md.
 //
 // Run with:
 //
@@ -28,7 +29,7 @@ func BenchmarkWriteRTPToListeners_100(b *testing.B) { benchmarkForward(b, 100) }
 //
 // ADR-005: the hot path uses one atomic.Load; no lock is held during WriteRTP.
 //
-// TODO(Phase 1, ADR-009): add a companion benchmark that substitutes real
+// TODO(Phase 2, ADR-009): add a companion benchmark that substitutes real
 // *webrtc.TrackLocalStaticRTP instances so allocation inside Pion is visible.
 func benchmarkForward(b *testing.B, n int) {
 	b.Helper()
