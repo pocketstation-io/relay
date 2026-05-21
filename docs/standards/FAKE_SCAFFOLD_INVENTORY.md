@@ -25,10 +25,10 @@ DEFERRED    Intentionally postponed; ADR or phase plan justifies it
 | Component | Status | File | What's missing | Replace by | Blocked on |
 |---|---|---|---|---|---|
 | fake-source Opus payload | MOCK | relay/cmd/fake-source/main.go | Real libopus encoding; current repeats 0xAB byte | Phase 3 | libopus dependency + audio-core integration |
-| In-process token store (relay) | MOCK | internal/room/room.go Manager | Persistent store; rooms lost on restart | Phase 2 | DB dependency decision |
-| TURN configuration | DEFERRED | cmd/relay-server/main.go | Production TURN credentials; STUN-only fails behind symmetric NAT | Phase 2 | TURN provider decision |
+| In-process token store (relay) | DEFERRED | internal/room/room.go Manager | Persistent store; rooms lost on restart | Phase 3 | DB / Durable Objects deployment infra decision not made; carry to Phase 3 when deployment target is chosen |
+| TURN configuration | DEFERRED | cmd/relay-server/main.go | Production TURN credentials; STUN-only fails behind symmetric NAT | Phase 3 | TURN provider decision pending; see docs/architecture/ for open decision |
 | SFrame E2EE | DEFERRED | relay + SDKs | Frame-layer encryption per RFC 9605 | Phase 3 | ADR for per-platform insertion point |
-| latency_estimate_ms metric | PARTIAL | internal/metrics/metrics.go | Per-packet latency measurement requires clock sync (ADR-006) | Phase 2 | ADR-006 resolution |
+| latency_estimate_ms metric | DEFERRED | internal/metrics/metrics.go | Per-packet latency measurement requires clock sync | Phase 3 | ADR-006 (clock sync) deferred to Phase 3 |
 
 ---
 
