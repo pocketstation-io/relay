@@ -304,8 +304,7 @@ func TestManager_Delete_UnknownRoom_IsNoop(t *testing.T) {
 // room auto-closes after its inactivity timeout elapses with no publisher.
 func TestGiven_Room_When_InactivityTimerExpires_Then_RoomClosed(t *testing.T) {
 	if testing.Short() {
-		// This test sleeps up to 150ms; skip with -short only if needed.
-		// 150ms is acceptable in the standard test run; kept here for CI gate.
+		t.Skip("timer expiry test sleeps up to 150ms — skipped in -short mode")
 	}
 
 	// Given — a room with a very short inactivity timeout and no publisher.
@@ -362,7 +361,10 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 	r.AddListener("peer-1", l)
 
 	closerCalled := false
-	r.SetSource(src1, func() { closerCalled = true })
+	r.SetSource(src1, func() {
+		closerCalled = true
+		src1.close() // unblocks the old forwardLoop so SetSource can wait for it
+	})
 
 	// Send a packet from src1 to confirm the initial forward path works.
 	pkt1 := &rtp.Packet{Payload: []byte{0x01}}
@@ -395,7 +397,7 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 		t.Error("first packet from src2 not received after reconnect")
 	}
 
-	src1.close()
+	// src1 was already closed by the closer registered with SetSource.
 	src2.close()
 	r.Close()
 }
