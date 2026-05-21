@@ -54,7 +54,9 @@ type listenerEntry struct {
 // Ownership: Room is created open. Callers call Close to terminate it.
 // Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
 // Phase scope: ADR-005 copy-on-write + room expiry (Phase 2 Tasks 1 and 2).
-//   Source reconnect handled in Task 4.
+//
+//	Source reconnect handled in Task 4.
+//
 // Intentionally not implemented: automatic room cleanup on last-peer-leave (Phase 2 Task 4).
 type Room struct {
 	ID string
