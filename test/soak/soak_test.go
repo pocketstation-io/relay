@@ -31,9 +31,9 @@ import (
 )
 
 const (
-	soakDuration     = 5 * time.Minute
-	goroutineSlop    = 10   // allowed goroutine count drift 1min→5min
-	rssGrowthBudget  = 0.20 // 20% RSS growth from 1min to 5min
+	soakDuration    = 5 * time.Minute
+	goroutineSlop   = 10   // allowed goroutine count drift 1min→5min
+	rssGrowthBudget = 0.20 // 20% RSS growth from 1min to 5min
 )
 
 func newLoopbackAPI() *webrtc.API {
@@ -396,6 +396,11 @@ func TestSoak(t *testing.T) {
 			t.Errorf("RSS growth %.1f%% > budget %.0f%% (1min=%dMB 5min=%dMB)",
 				growth*100, rssGrowthBudget*100, s1.rssBytes>>20, s5.rssBytes>>20)
 		}
+	}
+
+	// Refresh aggregated packet stats from rooms into srv.Metrics before reading.
+	if r, err := http.Get(ts.URL + "/metrics"); err == nil {
+		r.Body.Close()
 	}
 
 	// Write results file.
