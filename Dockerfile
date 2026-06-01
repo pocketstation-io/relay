@@ -1,8 +1,11 @@
-FROM golang:1.23 AS build
-WORKDIR /src
+FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN go mod download && go build -o /out/relay ./cmd/relay-server
-FROM gcr.io/distroless/base-debian12
-COPY --from=build /out/relay /relay
-EXPOSE 8080
-CMD ["/relay"]
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/relay-server/
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /app/relay /relay
+EXPOSE 8080 3478/udp
+ENTRYPOINT ["/relay"]

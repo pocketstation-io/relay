@@ -1,0 +1,16 @@
+# PocketStation relay — multi-region topology
+#
+# Three-region deployment: EU / US / APAC
+#
+# EU:   fra (Frankfurt), ams (Amsterdam)
+# US:   iad (Ashburn),   lax (Los Angeles)
+# APAC: nrt (Tokyo),     sin (Singapore)
+#
+# Deploy with:
+#   fly scale count 2 --region fra,iad,nrt
+#
+# This file is documentation-only. Fly.io does not read it at deploy time.
+# Region selection is driven by fly.toml (primary_region) and the scale
+# command above. To add a region:
+#   fly regions add <code>
+#   fly scale count <n> --region <code>
