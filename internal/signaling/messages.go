@@ -22,6 +22,13 @@ const (
 	// per-segment latency measurements. The relay accumulates reports and
 	// exposes aggregated percentiles via GET /v1/rooms/{id}/latency (spec §13.4).
 	TypeLatencyReport MessageType = "LATENCY_REPORT"
+	// TypeICERestart is sent by the relay to the source when sustained packet
+	// loss (>15% for 3 consecutive RTCP reports) indicates the current ICE
+	// path has degraded beyond recovery (spec §10.4). The source calls
+	// RTCPeerConnection.restartIce() on receipt. When the relay's embedded
+	// TURN server is configured, use_turn=true signals that the client should
+	// prefer TURN relay candidates on the next ICE negotiation.
+	TypeICERestart MessageType = "ICE_RESTART"
 )
 
 // LatencyReport is sent by source/listener clients to report per-segment latency.
@@ -82,4 +89,8 @@ type ServerMessage struct {
 	SFrameKey     string            `json:"sframe_key,omitempty"`
 	// CodecHint is populated on CODEC_HINT messages from relay to source.
 	CodecHint     *CodecHintPayload `json:"codec_hint,omitempty"`
+	// UseTURN is set to true on ICE_RESTART messages when the relay has an
+	// embedded TURN server configured. The source should prefer TURN relay
+	// candidates on the next ICE negotiation (spec §10.4, ADR-023).
+	UseTURN bool `json:"use_turn,omitempty"`
 }
