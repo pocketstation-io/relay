@@ -24,6 +24,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/ratelimit"
 	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/signaling"
+	"github.com/pocketstation-io/relay/internal/webhook"
 )
 
 // shutdownDrainTimeout is the maximum time Serve waits for in-flight HTTP
@@ -62,6 +63,10 @@ type Config struct {
 	// CallbackClient is an optional client for posting source/listener events to
 	// api-server. Nil disables all outbound callbacks.
 	CallbackClient *callback.Client
+	// WebhookDispatcher is an optional dispatcher for posting relay lifecycle
+	// events (session_started, utterance_detected, session_ended) to an
+	// external HTTP endpoint. Nil disables all webhook delivery.
+	WebhookDispatcher *webhook.Dispatcher
 	// ICEServers replaces the default STUN-only ICE server list. When non-empty,
 	// these servers are used for all PeerConnections. The createRoom response
 	// also returns this list as ice_servers so clients can configure their own
@@ -80,13 +85,14 @@ type Config struct {
 
 // Server is the top-level relay server.
 type Server struct {
-	rooms          *room.Manager
-	jwtSecret      []byte
-	api            *webrtc.API
-	Metrics        *metrics.Registry
-	callbackClient *callback.Client
-	iceServers     []webrtc.ICEServer
-	iceTCPMux      pionIce.TCPMux
+	rooms              *room.Manager
+	jwtSecret          []byte
+	api                *webrtc.API
+	Metrics            *metrics.Registry
+	callbackClient     *callback.Client
+	webhookDispatcher  *webhook.Dispatcher
+	iceServers         []webrtc.ICEServer
+	iceTCPMux          pionIce.TCPMux
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
 	// Both are set once at construction and never written again.
@@ -138,6 +144,7 @@ func New(cfg Config) *Server {
 		api:                 cfg.API,
 		Metrics:             metrics.New(),
 		callbackClient:      cfg.CallbackClient,
+		webhookDispatcher:   cfg.WebhookDispatcher,
 		iceServers:          cfg.ICEServers,
 		iceTCPMux:           cfg.ICETCPMux,
 		maxRooms:            maxRooms,
@@ -154,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/v1/rooms", s.createRoom)
 	mux.HandleFunc("/v1/rooms/", s.roomsSubrouter)
+	mux.HandleFunc("/v1/channels", s.listChannels)
 	mux.HandleFunc("/v1/signal", s.signal)
 	mux.HandleFunc("/v1/echo", s.echo)
 	mux.HandleFunc("/metrics", s.metricsHandler)
@@ -421,6 +429,11 @@ func (s *session) cleanup() {
 				go s.srv.callbackClient.PushSourceActive(s.rm.ID, false)
 			}
 		}
+		s.srv.webhookDispatcher.Send(webhook.Event{
+			Type:      webhook.EventSessionEnded,
+			RoomID:    s.rm.ID,
+			SessionID: s.id,
+		})
 	}
 	slog.Info("session cleaned up", "session_id", s.id)
 }
@@ -468,6 +481,13 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 	s.rm = rm
 	s.role = claims.Role
 
+	// Mark room public when the PUBLISH message carries "public": true.
+	// Written only on the first PUBLISH; subsequent PUBLISH calls on an existing
+	// room (ICE restart) do not clear a previously set public flag.
+	if msg.Type == signaling.TypePublish && msg.Public {
+		rm.Public = true
+	}
+
 	slog.Info("session joined", "session_id", s.id, "room_id", claims.RoomID, "role", string(claims.Role))
 
 	pc, err := s.newPeerConnection()
@@ -486,11 +506,17 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		// Notify api-server of source join in a goroutine so the audio path is
 		// never blocked. Best-effort: errors are logged inside PushSourceActive.
 		roomIDForCallback := claims.RoomID
+		sessionIDForWebhook := s.id
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			rm.SetSource(&trackSource{track: track}, func() { _ = pc.Close() })
 			if s.srv.callbackClient != nil {
 				go s.srv.callbackClient.PushSourceActive(roomIDForCallback, true)
 			}
+			s.srv.webhookDispatcher.Send(webhook.Event{
+				Type:      webhook.EventSessionStarted,
+				RoomID:    roomIDForCallback,
+				SessionID: sessionIDForWebhook,
+			})
 		})
 
 	case signaling.TypeSubscribe:
@@ -626,6 +652,28 @@ func (s *session) handleLatencyReport(msg signaling.ClientMessage) {
 		rpt.DecodeMs,
 		rpt.PacketLossPct,
 	)
+	// A positive capture_ms indicates that the source is actively capturing
+	// audio (i.e. an utterance is in progress). Emit utterance_detected so
+	// voice-agent integrations can react without inspecting RTP.
+	if rpt.CaptureMs > 0 {
+		s.srv.webhookDispatcher.Send(webhook.Event{
+			Type:      webhook.EventUtteranceDetected,
+			RoomID:    s.rm.ID,
+			SessionID: s.id,
+		})
+	}
+}
+
+// listChannels handles GET /v1/channels (spec §3.1, Phase 6).
+// Returns a JSON array of public broadcast rooms. Returns [] when none exist.
+func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	channels := s.rooms.ListPublic()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(channels)
 }
 
 // roomsSubrouter dispatches sub-paths under /v1/rooms/.

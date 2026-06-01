@@ -230,6 +230,14 @@ type Room struct {
 	// Zero means unlimited. Set once at creation from ManagerConfig.MaxListeners.
 	maxListeners int
 
+	// Public marks this room as a public broadcast channel (spec §3.1).
+	// Set once at creation time when the PUBLISH message carries "public": true.
+	// Readable by multiple goroutines; written once before any concurrent access.
+	Public bool
+
+	// createdAt records when the room was created. Set once in newWithTimeouts.
+	createdAt time.Time
+
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
@@ -261,6 +269,7 @@ func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration
 		inactivityTimeout: inactivityTimeout,
 		reconnectWindow:   reconnectWindow,
 		latency:           newLatencyStore(),
+		createdAt:         time.Now().UTC(),
 	}
 	// Initialise atomic pointer to an empty (non-nil) slice so Load always
 	// returns a valid pointer. This avoids nil-dereference in forwardLoop.
@@ -599,4 +608,36 @@ func (m *Manager) CloseAll() {
 		r.Close()
 		delete(m.rooms, id)
 	}
+}
+
+// RoomSummary is a snapshot of a room's observable state, used by the public
+// broadcast channel listing endpoint (GET /v1/channels, spec §3.1).
+type RoomSummary struct {
+	RoomID        string    `json:"room_id"`
+	ListenerCount int       `json:"listener_count"`
+	SourceActive  bool      `json:"source_active"`
+	CreatedAt     time.Time `json:"created_at"`
+	Public        bool      `json:"public"`
+}
+
+// ListPublic returns a summary of every room that was created with Public==true.
+// Returns an empty (non-nil) slice when no public rooms exist.
+func (m *Manager) ListPublic() []RoomSummary {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]RoomSummary, 0)
+	for _, r := range m.rooms {
+		if !r.Public {
+			continue
+		}
+		result = append(result, RoomSummary{
+			RoomID:        r.ID,
+			ListenerCount: r.ListenerCount(),
+			SourceActive:  r.SourceActive(),
+			CreatedAt:     r.createdAt,
+			Public:        true,
+		})
+	}
+	return result
 }

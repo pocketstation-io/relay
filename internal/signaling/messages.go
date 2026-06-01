@@ -64,6 +64,9 @@ type ClientMessage struct {
 	// LatencyReport is populated on LATENCY_REPORT messages sent by clients to
 	// report per-segment latency measurements (spec §13.4).
 	LatencyReport *LatencyReport `json:"latency_report,omitempty"`
+	// Public, when true on a PUBLISH message, marks the room as a public
+	// broadcast channel visible via GET /v1/channels (spec §3.1, Phase 6).
+	Public bool `json:"public,omitempty"`
 }
 
 type ServerMessage struct {
