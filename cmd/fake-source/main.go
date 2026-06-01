@@ -42,12 +42,16 @@ const (
 	rtpPacketCadence = 20 * time.Millisecond
 	// iceConnectTimeout is the maximum time we wait for ICE to reach Connected.
 	iceConnectTimeout = 30 * time.Second
-	// rtpPayloadByte is the fill value for synthetic Opus payloads.
-	rtpPayloadByte = 0xAB
-	// rtpPayloadSize is the size of each synthetic Opus payload in bytes.
-	// 160 bytes is a plausible 20 ms Opus frame at low bitrate.
-	rtpPayloadSize = 160
 )
+
+// validOpusSilence is a 3-byte valid Opus comfort-noise (DTX) frame for 20 ms,
+// 48 kHz, mono. The browser Opus decoder accepts it and outputs silence.
+//
+// To replace with real encoded audio: install opusfile via brew
+// (`brew install opusfile`), add gopkg.in/hraban/opus.v2 as a dependency, and
+// encode a 440 Hz sine PCM buffer with opus.NewEncoder + enc.Encode. The CGO
+// build failed here because opusfile was not present on the build host.
+var validOpusSilence = []byte{0xF8, 0xFF, 0xFE}
 
 func main() {
 	relayURL := flag.String("relay", "http://localhost:8080", "relay base URL (http/https)")
@@ -264,7 +268,7 @@ func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, lo
 	}
 
 	// --- RTP send loop ---
-	payload := bytes.Repeat([]byte{rtpPayloadByte}, rtpPayloadSize)
+	payload := validOpusSilence
 	var seqNum uint16
 	var timestamp uint32
 	ticker := time.NewTicker(rtpPacketCadence)
