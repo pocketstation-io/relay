@@ -32,18 +32,21 @@ func main() {
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
 	iceServers, turnSrv := setupTURN(jwtSecret)
 
-	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)         // 0 → package default (30 min)
+	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)            // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
+	maxListenersPerRoom := getenvInt("MAX_LISTENERS_PER_ROOM", 0)     // 0 → unlimited
 
 	cfg := server.Config{
-		JWTSecret:           jwtSecret,
-		MaxRooms:            getenvInt("RELAY_MAX_ROOMS", 0),
-		MaxListenersPerRoom: getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
-		CallbackClient:      cbClient,
-		ICEServers:          iceServers,
+		JWTSecret:              jwtSecret,
+		MaxRooms:               getenvInt("RELAY_MAX_ROOMS", 0),
+		MaxListenersPerRoom:    getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
+		MaxRoomsPerIPPerMinute: getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
+		CallbackClient:         cbClient,
+		ICEServers:             iceServers,
 		RoomConfig: room.ManagerConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
+			MaxListeners:      maxListenersPerRoom,
 		},
 	}
 
@@ -63,13 +66,19 @@ func main() {
 
 	s := server.New(cfg)
 
+	const defaultShutdownGraceSec = 30
+	shutdownGraceSec := getenvInt("SHUTDOWN_GRACE_PERIOD_SEC", defaultShutdownGraceSec)
+	shutdownGrace := time.Duration(shutdownGraceSec) * time.Second
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		slog.Info("relay shutting down", "signal", sig.String())
+		slog.Info("relay shutting down", "signal", sig.String(), "grace_period", shutdownGrace)
 		turnSrv.Stop()
-		if err := s.Shutdown(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
 			slog.Error("shutdown error", "error", err)
 		}
 	}()

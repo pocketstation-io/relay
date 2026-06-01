@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/callback"
 	"github.com/pocketstation-io/relay/internal/metrics"
+	"github.com/pocketstation-io/relay/internal/ratelimit"
 	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -35,6 +37,10 @@ const defaultMaxRooms = 100
 // RELAY_MAX_LISTENERS_PER_ROOM is unset.
 const defaultMaxListenersPerRoom = 50
 
+// defaultMaxRoomsPerIPPerMinute is the default per-IP room-creation rate limit
+// when MAX_ROOMS_PER_IP_PER_MINUTE is unset.
+const defaultMaxRoomsPerIPPerMinute = 10
+
 // Config holds the parameters for creating a Server.
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for room tokens.
@@ -49,6 +55,10 @@ type Config struct {
 	// MaxListenersPerRoom is the maximum number of listeners in a single room.
 	// Zero means use defaultMaxListenersPerRoom.
 	MaxListenersPerRoom int
+	// MaxRoomsPerIPPerMinute is the maximum number of rooms a single IP may
+	// create per minute. Zero means use defaultMaxRoomsPerIPPerMinute.
+	// Set to -1 to disable per-IP rate limiting (tests, trusted environments).
+	MaxRoomsPerIPPerMinute int
 	// CallbackClient is an optional client for posting source/listener events to
 	// api-server. Nil disables all outbound callbacks.
 	CallbackClient *callback.Client
@@ -83,6 +93,10 @@ type Server struct {
 	maxRooms            int
 	maxListenersPerRoom int
 
+	// ipLimiter enforces per-IP room-creation rate limiting.
+	// Nil when per-IP limiting is disabled (MaxRoomsPerIPPerMinute == -1).
+	ipLimiter *ratelimit.IPLimiter
+
 	// mu guards httpServer and sessions so Serve/Shutdown/signal handlers can
 	// run concurrently without data races.
 	mu         sync.Mutex
@@ -108,6 +122,16 @@ func New(cfg Config) *Server {
 	if maxListeners <= 0 {
 		maxListeners = defaultMaxListenersPerRoom
 	}
+
+	var ipLim *ratelimit.IPLimiter
+	if cfg.MaxRoomsPerIPPerMinute != -1 {
+		maxPerIP := cfg.MaxRoomsPerIPPerMinute
+		if maxPerIP <= 0 {
+			maxPerIP = defaultMaxRoomsPerIPPerMinute
+		}
+		ipLim = ratelimit.New(int64(maxPerIP), time.Minute)
+	}
+
 	return &Server{
 		rooms:               room.NewManagerWithConfig(cfg.RoomConfig),
 		jwtSecret:           cfg.JWTSecret,
@@ -118,6 +142,7 @@ func New(cfg Config) *Server {
 		iceTCPMux:           cfg.ICETCPMux,
 		maxRooms:            maxRooms,
 		maxListenersPerRoom: maxListeners,
+		ipLimiter:           ipLim,
 		sessions:            make(map[string]*session),
 	}
 }
@@ -158,6 +183,9 @@ func (s *Server) Serve(addr string) error {
 // WebSocket connections are hijacked from the HTTP server and therefore not
 // tracked by http.Server.Shutdown. We close them explicitly so peers observe
 // a clean connection close rather than a silent hang.
+//
+// Before closing each connection, Shutdown sends a RELAY_SHUTTING_DOWN error
+// frame so clients can detect the restart and reconnect promptly.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	hs := s.httpServer
@@ -168,9 +196,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	// Close active WebSocket sessions first so their read loops unblock and
-	// can deregister cleanly.
+	// Notify and close active WebSocket sessions so their read loops unblock
+	// and can deregister cleanly.
+	shuttingDown := signaling.ServerMessage{
+		Type:    signaling.TypeError,
+		Code:    "RELAY_SHUTTING_DOWN",
+		Message: "relay restarting, reconnect",
+	}
 	for _, sess := range toClose {
+		sess.send(shuttingDown)
 		sess.closeConn()
 	}
 
@@ -184,6 +218,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Close all active rooms so forwardLoops exit and peer connections are
 	// cleaned up before the process exits.
 	s.rooms.CloseAll()
+
+	// Stop the per-IP rate limiter's background goroutine.
+	if s.ipLimiter != nil {
+		s.ipLimiter.Stop()
+	}
 	return nil
 }
 
@@ -239,6 +278,20 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Per-IP rate limit: reject when a single IP creates rooms too rapidly.
+	if s.ipLimiter != nil {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr // fall back to raw address if no port
+		}
+		if !s.ipLimiter.Allow(ip) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
+			return
+		}
 	}
 
 	// Rate limit: reject when the room count has reached the ceiling.
@@ -457,7 +510,10 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			s.sendError("track_error", "failed to add audio track to peer connection")
 			return
 		}
-		rm.AddListener(s.id, audioTrack)
+		if err := rm.AddListener(s.id, audioTrack); err != nil {
+			s.sendError("listener_limit_exceeded", err.Error())
+			return
+		}
 		s.srv.Metrics.ListenerCount.Add(1)
 
 		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (ADR-021).
