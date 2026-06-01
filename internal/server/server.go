@@ -120,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/v1/rooms", s.createRoom)
 	mux.HandleFunc("/v1/signal", s.signal)
+	mux.HandleFunc("/v1/echo", s.echo)
 	mux.HandleFunc("/metrics", s.metricsHandler)
 	return mux
 }
@@ -179,6 +180,42 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
+}
+
+// echo implements the /v1/echo WebSocket endpoint (ADR-020).
+//
+// Clients send JSON messages of the form {"send_timestamp_ns": <int64>}.
+// The relay echoes each message back with the relay's receive timestamp added:
+// {"send_timestamp_ns": <int64>, "recv_timestamp_ns": <int64>}.
+//
+// This is used by the capture-to-cloud benchmark CLI (cmd/benchmark) to measure
+// the relay-visible portion of end-to-end latency without audio pipeline overhead.
+// The endpoint requires no authentication — it is a pure timing mirror.
+func (s *Server) echo(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	for {
+		var msg struct {
+			SendTimestampNs int64 `json:"send_timestamp_ns"`
+		}
+		if err := conn.ReadJSON(&msg); err != nil {
+			return
+		}
+		reply := struct {
+			SendTimestampNs int64 `json:"send_timestamp_ns"`
+			RecvTimestampNs int64 `json:"recv_timestamp_ns"`
+		}{
+			SendTimestampNs: msg.SendTimestampNs,
+			RecvTimestampNs: time.Now().UnixNano(),
+		}
+		if err := conn.WriteJSON(reply); err != nil {
+			return
+		}
+	}
 }
 
 func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
@@ -289,6 +326,8 @@ func (s *session) run() {
 			s.handleJoin(msg)
 		case signaling.TypeIce:
 			s.handleICE(msg)
+		case signaling.TypeKeyExchange:
+			s.handleKeyExchange(msg)
 		case signaling.TypeLeave:
 			return
 		default:
@@ -450,6 +489,45 @@ func (s *session) handleICE(msg signaling.ClientMessage) {
 	}
 	if err := s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: msg.Candidate}); err != nil {
 		s.sendError("ice_error", err.Error())
+	}
+}
+
+// handleKeyExchange forwards an SFrame KEY_EXCHANGE message from the source to
+// all listeners in the room (ADR-014). The relay does NOT read the key material:
+// it copies SFrameKey verbatim into a ServerMessage and sends it to every
+// current listener session. This preserves the SFrame guarantee that the relay
+// is never in possession of plaintext audio.
+//
+// Invariant: only the source role may send KEY_EXCHANGE. Listener-sourced
+// KEY_EXCHANGE messages are rejected with a role_mismatch error.
+func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
+	if s.role != auth.RoleSource {
+		s.sendError("role_mismatch", "KEY_EXCHANGE requires a source token")
+		return
+	}
+	if s.rm == nil {
+		s.sendError("not_joined", "join a room before sending KEY_EXCHANGE")
+		return
+	}
+
+	forward := signaling.ServerMessage{
+		Type:      signaling.TypeKeyExchange,
+		SFrameKey: msg.SFrameKey,
+	}
+
+	s.srv.mu.Lock()
+	sessions := make([]*session, 0, len(s.srv.sessions))
+	for _, sess := range s.srv.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.srv.mu.Unlock()
+
+	// Deliver to all listener sessions in this room.
+	for _, sess := range sessions {
+		if sess.id != s.id && sess.rm != nil && sess.rm.ID == s.rm.ID &&
+			sess.role == auth.RoleListener {
+			sess.send(forward)
+		}
 	}
 }
 

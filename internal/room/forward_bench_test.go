@@ -100,9 +100,10 @@ func BenchmarkWriteRTPToPionTrack(b *testing.B) {
 // Run:
 //
 //	go test -bench=BenchmarkWriteRTPFanoutConnected -benchmem -benchtime=5s -run=^$ ./internal/room/
-func BenchmarkWriteRTPFanoutConnected_1(b *testing.B)  { benchmarkForwardConnected(b, 1) }
-func BenchmarkWriteRTPFanoutConnected_10(b *testing.B) { benchmarkForwardConnected(b, 10) }
-func BenchmarkWriteRTPFanoutConnected_50(b *testing.B) { benchmarkForwardConnected(b, 50) }
+func BenchmarkWriteRTPFanoutConnected_1(b *testing.B)   { benchmarkForwardConnected(b, 1) }
+func BenchmarkWriteRTPFanoutConnected_10(b *testing.B)  { benchmarkForwardConnected(b, 10) }
+func BenchmarkWriteRTPFanoutConnected_50(b *testing.B)  { benchmarkForwardConnected(b, 50) }
+func BenchmarkWriteRTPFanoutConnected_200(b *testing.B) { benchmarkForwardConnected(b, 200) }
 
 // benchmarkForwardConnected sets up n real Pion loopback pairs and benchmarks
 // the forwardLoop write path through the live SRTP tunnel.
