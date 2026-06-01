@@ -39,7 +39,7 @@ func benchmarkForward(b *testing.B, n int) {
 	r := New("bench-room")
 	defer r.Close()
 	for i := 0; i < n; i++ {
-		r.AddListener(fmt.Sprintf("peer-%d", i), discardListener{})
+		_ = r.AddListener(fmt.Sprintf("peer-%d", i), discardListener{})
 	}
 	pkt := &rtp.Packet{Payload: make([]byte, 200)} // typical 20 ms Opus frame
 
@@ -144,7 +144,7 @@ func benchmarkForwardConnected(b *testing.B, n int) {
 	r := New(fmt.Sprintf("bench-connected-%d", n))
 	defer r.Close()
 	for i, t := range tracks {
-		r.AddListener(fmt.Sprintf("peer-%d", i), t)
+		_ = r.AddListener(fmt.Sprintf("peer-%d", i), t)
 	}
 
 	pkt := &rtp.Packet{

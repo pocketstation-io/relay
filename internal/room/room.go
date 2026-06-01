@@ -22,6 +22,10 @@ const defaultReconnectWindow = 60 * time.Second
 // ErrNoSource is returned when an operation requires a live source and none is set.
 var ErrNoSource = errors.New("room has no source")
 
+// ErrRoomFull is returned by AddListener when the room has reached its
+// maximum listener capacity (configured via MaxListeners in ManagerConfig).
+var ErrRoomFull = errors.New("room has reached maximum listener capacity")
+
 // Source is the readable side of a live audio stream.
 // Using an interface here decouples room from *webrtc.TrackRemote and allows
 // the forward loop to be unit-tested without a live Pion setup.
@@ -112,6 +116,10 @@ type Room struct {
 	// Used to choose between inactivity semantics (no source yet) and reconnect
 	// semantics (source previously connected).
 	sourceEverConnected atomic.Bool
+
+	// maxListeners is the maximum number of listeners allowed in this room.
+	// Zero means unlimited. Set once at creation from ManagerConfig.MaxListeners.
+	maxListeners int
 
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
@@ -216,16 +224,21 @@ func (r *Room) SetSource(src Source, closer func()) {
 }
 
 // AddListener registers listener l under peerID.
+// Returns ErrRoomFull when r.maxListeners > 0 and the room is at capacity.
 // Takes listenersMu briefly to copy the slice, then stores the new pointer.
-func (r *Room) AddListener(peerID string, l Listener) {
+func (r *Room) AddListener(peerID string, l Listener) error {
 	r.listenersMu.Lock()
 	defer r.listenersMu.Unlock()
 
 	old := *r.listeners.Load()
+	if r.maxListeners > 0 && len(old) >= r.maxListeners {
+		return ErrRoomFull
+	}
 	next := make([]listenerEntry, len(old)+1)
 	copy(next, old)
 	next[len(old)] = listenerEntry{peerID: peerID, l: l}
 	r.listeners.Store(&next)
+	return nil
 }
 
 // RemoveListener deregisters the listener for peerID. No-op if absent.
@@ -347,10 +360,11 @@ type Manager struct {
 	mu    sync.RWMutex
 	rooms map[string]*Room
 
-	// inactivityTimeout and reconnectWindow are applied to every room created
-	// by GetOrCreate. Zero values use the package defaults.
+	// inactivityTimeout, reconnectWindow, and maxListeners are applied to every
+	// room created by GetOrCreate. Zero values use the package defaults.
 	inactivityTimeout time.Duration
 	reconnectWindow   time.Duration
+	maxListeners      int
 }
 
 // ManagerConfig holds configurable timeouts for the Manager.
@@ -364,6 +378,10 @@ type ManagerConfig struct {
 	// Zero means use defaultReconnectWindow (60 s).
 	// Configurable via SOURCE_RECONNECT_WINDOW_SEC env in main.go.
 	ReconnectWindow time.Duration
+	// MaxListeners is the maximum number of listeners allowed per room.
+	// Zero means unlimited.
+	// Configurable via MAX_LISTENERS_PER_ROOM env in main.go.
+	MaxListeners int
 }
 
 // NewManager returns an empty Manager with default timeouts.
@@ -385,6 +403,7 @@ func NewManagerWithConfig(cfg ManagerConfig) *Manager {
 		rooms:             make(map[string]*Room),
 		inactivityTimeout: inactivity,
 		reconnectWindow:   reconnect,
+		maxListeners:      cfg.MaxListeners,
 	}
 }
 
@@ -396,6 +415,7 @@ func (m *Manager) GetOrCreate(id string) *Room {
 		return r
 	}
 	r := newWithTimeouts(id, m.inactivityTimeout, m.reconnectWindow)
+	r.maxListeners = m.maxListeners
 	m.rooms[id] = r
 	return r
 }
