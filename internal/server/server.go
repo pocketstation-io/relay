@@ -81,6 +81,10 @@ type Config struct {
 	// Zero values in RoomConfig use package defaults (30 min / 60 s).
 	// Read from ROOM_EXPIRY_MINUTES and SOURCE_RECONNECT_WINDOW_SEC env vars.
 	RoomConfig room.ManagerConfig
+	// UseTURN, when true, sets use_turn=true in ICE_RESTART messages sent to
+	// the source (spec §10.4). Set to true when the relay's embedded TURN
+	// server is configured (TURN_PUBLIC_IP is set, ADR-023).
+	UseTURN bool
 }
 
 // Server is the top-level relay server.
@@ -116,6 +120,17 @@ type Server struct {
 	// (D13, ADR-021). Keys are room IDs; values are *codecHintState.
 	// sync.Map is safe for concurrent access from multiple listener goroutines.
 	codecHintStates sync.Map
+
+	// iceRestartStates holds per-room state for ICE restart tracking (spec §10.4).
+	// Keys are room IDs; values are *iceRestartState.
+	// sync.Map is safe for concurrent access from multiple listener goroutines.
+	iceRestartStates sync.Map
+
+	// useTURN is true when the relay's embedded TURN server is configured.
+	// Propagated into ICE_RESTART messages so the source knows to prefer TURN
+	// relay candidates on the next ICE negotiation (spec §10.4, ADR-023).
+	// Set once at construction time from Config.UseTURN.
+	useTURN bool
 }
 
 // New creates a Server from cfg.
@@ -151,6 +166,7 @@ func New(cfg Config) *Server {
 		maxListenersPerRoom: maxListeners,
 		ipLimiter:           ipLim,
 		sessions:            make(map[string]*session),
+		useTURN:             cfg.UseTURN,
 	}
 }
 
@@ -546,8 +562,10 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		s.srv.Metrics.ListenerCount.Add(1)
 
 		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (ADR-021).
+		// Also track sustained high loss and emit ICE_RESTART when needed (spec §10.4).
 		hintState := s.srv.roomCodecHintState(claims.RoomID)
-		s.srv.startRTCPReader(sender, claims.RoomID, hintState)
+		restartState := s.srv.roomICERestartState(claims.RoomID)
+		s.srv.startRTCPReader(sender, claims.RoomID, hintState, restartState)
 	}
 
 	offer := webrtc.SessionDescription{
