@@ -88,7 +88,9 @@ func TestAddListener_IncreasesCount(t *testing.T) {
 	// Given
 	r := New("room-1")
 	// When
-	r.AddListener("peer-1", &mockListener{})
+	if err := r.AddListener("peer-1", &mockListener{}); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 	// Then
 	if r.ListenerCount() != 1 {
 		t.Errorf("got %d listeners, want 1", r.ListenerCount())
@@ -99,9 +101,11 @@ func TestAddListener_MultipleListeners(t *testing.T) {
 	// Given
 	r := New("room-1")
 	// When
-	r.AddListener("peer-1", &mockListener{})
-	r.AddListener("peer-2", &mockListener{})
-	r.AddListener("peer-3", &mockListener{})
+	for _, id := range []string{"peer-1", "peer-2", "peer-3"} {
+		if err := r.AddListener(id, &mockListener{}); err != nil {
+			t.Fatalf("AddListener %s: %v", id, err)
+		}
+	}
 	// Then
 	if r.ListenerCount() != 3 {
 		t.Errorf("got %d listeners, want 3", r.ListenerCount())
@@ -111,7 +115,9 @@ func TestAddListener_MultipleListeners(t *testing.T) {
 func TestRemoveListener_DecreasesCount(t *testing.T) {
 	// Given
 	r := New("room-1")
-	r.AddListener("peer-1", &mockListener{})
+	if err := r.AddListener("peer-1", &mockListener{}); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 	// When
 	r.RemoveListener("peer-1")
 	// Then
@@ -154,7 +160,9 @@ func TestForwardLoop_DeliversSinglePacketToOneListener(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	l := &mockListener{}
-	r.AddListener("peer-1", l)
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 	r.SetSource(src, nil)
 
 	pkt := &rtp.Packet{Payload: []byte{0xDE, 0xAD, 0xBE, 0xEF}}
@@ -176,8 +184,12 @@ func TestForwardLoop_DeliversSinglePacketToMultipleListeners(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	l1, l2 := &mockListener{}, &mockListener{}
-	r.AddListener("peer-1", l1)
-	r.AddListener("peer-2", l2)
+	if err := r.AddListener("peer-1", l1); err != nil {
+		t.Fatalf("AddListener peer-1: %v", err)
+	}
+	if err := r.AddListener("peer-2", l2); err != nil {
+		t.Fatalf("AddListener peer-2: %v", err)
+	}
 	r.SetSource(src, nil)
 
 	pkt := &rtp.Packet{Payload: []byte{0x01}}
@@ -211,7 +223,9 @@ func TestForwardLoop_StopsAfterRoomClosed(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	l := &mockListener{}
-	r.AddListener("peer-1", l)
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 	r.SetSource(src, nil)
 
 	// When — close room, then send a packet
@@ -358,7 +372,9 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 	r := New("reconnect-room")
 	src1 := newMockSource()
 	l := &mockListener{}
-	r.AddListener("peer-1", l)
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 
 	closerCalled := false
 	r.SetSource(src1, func() {
@@ -444,7 +460,7 @@ func TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace(t *
 			defer wg.Done()
 			for i := 0; i < opsPerGoroutine; i++ {
 				id := fmt.Sprintf("peer-%d-%d", g, i)
-				r.AddListener(id, &mockListener{})
+				_ = r.AddListener(id, &mockListener{})
 				r.RemoveListener(id)
 			}
 		}(g)
@@ -505,7 +521,9 @@ func TestSourceReconnectWithinWindow(t *testing.T) {
 
 	src1 := newMockSource()
 	l := &mockListener{}
-	r.AddListener("peer-1", l)
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 
 	// Attach src1 and confirm the listener receives a packet.
 	r.SetSource(src1, func() { src1.close() })
@@ -560,7 +578,9 @@ func TestSourceReconnectWindowExpired(t *testing.T) {
 	r := newWithTimeouts("reconnect-expired-room", inactivity, reconnect)
 
 	src := newMockSource()
-	r.AddListener("peer-1", &mockListener{})
+	if err := r.AddListener("peer-1", &mockListener{}); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
 	r.SetSource(src, func() { src.close() })
 
 	// Confirm source is active.
@@ -583,4 +603,41 @@ func TestSourceReconnectWindowExpired(t *testing.T) {
 			return false
 		}
 	})
+}
+
+// TestMaxListenersEnforced verifies that AddListener returns ErrRoomFull when
+// the room has reached its configured maxListeners ceiling.
+func TestMaxListenersEnforced(t *testing.T) {
+	// Given — a manager configured with a max of 2 listeners per room.
+	cfg := ManagerConfig{
+		InactivityTimeout: time.Hour,
+		ReconnectWindow:   time.Hour,
+		MaxListeners:      2,
+	}
+	m := NewManagerWithConfig(cfg)
+	r := m.GetOrCreate("capacity-room")
+
+	// When — fill the room to its limit.
+	if err := r.AddListener("peer-1", &mockListener{}); err != nil {
+		t.Fatalf("AddListener peer-1: unexpected error: %v", err)
+	}
+	if err := r.AddListener("peer-2", &mockListener{}); err != nil {
+		t.Fatalf("AddListener peer-2: unexpected error: %v", err)
+	}
+
+	// Then — the next AddListener must return ErrRoomFull.
+	err := r.AddListener("peer-3", &mockListener{})
+	if err == nil {
+		t.Fatal("expected ErrRoomFull, got nil")
+	}
+	if err != ErrRoomFull {
+		t.Errorf("expected ErrRoomFull, got %v", err)
+	}
+
+	// And — the listener count must remain at the ceiling.
+	if got := r.ListenerCount(); got != 2 {
+		t.Errorf("ListenerCount = %d, want 2", got)
+	}
+
+	r.Close()
 }
