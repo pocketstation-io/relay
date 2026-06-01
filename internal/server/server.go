@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	pionIce "github.com/pion/ice/v4"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
@@ -51,6 +52,16 @@ type Config struct {
 	// CallbackClient is an optional client for posting source/listener events to
 	// api-server. Nil disables all outbound callbacks.
 	CallbackClient *callback.Client
+	// ICEServers replaces the default STUN-only ICE server list. When non-empty,
+	// these servers are used for all PeerConnections. The createRoom response
+	// also returns this list as ice_servers so clients can configure their own
+	// PeerConnections with the same TURN credentials. See ADR-023.
+	// When nil or empty, the relay falls back to stun.l.google.com:19302.
+	ICEServers []webrtc.ICEServer
+	// ICETCPMux, when non-nil, enables ICE-TCP candidates for PeerConnections
+	// created by this server. Production: SetICETCPMux(tcpMux) on port 443.
+	// Tests: leave nil; the loopback ICE API handles connectivity.
+	ICETCPMux pionIce.TCPMux
 }
 
 // Server is the top-level relay server.
@@ -60,6 +71,8 @@ type Server struct {
 	api            *webrtc.API
 	Metrics        *metrics.Registry
 	callbackClient *callback.Client
+	iceServers     []webrtc.ICEServer
+	iceTCPMux      pionIce.TCPMux
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
 	// Both are set once at construction and never written again.
@@ -92,6 +105,8 @@ func New(cfg Config) *Server {
 		api:                 cfg.API,
 		Metrics:             metrics.New(),
 		callbackClient:      cfg.CallbackClient,
+		iceServers:          cfg.ICEServers,
+		iceTCPMux:           cfg.ICETCPMux,
 		maxRooms:            maxRooms,
 		maxListenersPerRoom: maxListeners,
 		sessions:            make(map[string]*session),
@@ -202,13 +217,20 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	resp := map[string]any{
 		"room_id":        id,
 		"source_token":   sourceToken,
 		"listener_token": listenerToken,
 		"qr_url":         "/listen?room=" + id,
-	})
+	}
+	// Include ICE server configuration when TURN is enabled (ADR-023).
+	// Clients pass this list directly to RTCPeerConnection so they use the
+	// relay's embedded TURN server without hardcoding any addresses.
+	if len(s.iceServers) > 0 {
+		resp["ice_servers"] = s.iceServers
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 var upgrader = websocket.Upgrader{
@@ -433,21 +455,42 @@ func (s *session) handleICE(msg signaling.ClientMessage) {
 
 // newPeerConnection creates a Pion PeerConnection and wires up ICE candidate
 // forwarding to the WebSocket peer.
-// If s.srv.api is non-nil (e.g. in tests), it uses the injected API.
+//
+// ICE server list: uses s.srv.iceServers when set (STUN + embedded TURN per
+// ADR-023). Falls back to stun.l.google.com when no servers are configured
+// (dev mode / tests).
+//
+// ICE-TCP mux: when s.srv.iceTCPMux is non-nil, TCP ICE candidates are added
+// to the SettingEngine. Tests inject a nil mux via the loopback API path, so
+// TCP binding is never attempted in CI. Production sets this from main.go.
+//
+// If s.srv.api is non-nil (e.g. in tests), it uses the injected API directly
+// and the SettingEngine customisation for ICE-TCP is skipped (the test API
+// already has loopback settings applied).
 func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
-	cfg := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
+	iceServers := s.srv.iceServers
+	if len(iceServers) == 0 {
+		iceServers = []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
+		}
 	}
+	pcCfg := webrtc.Configuration{ICEServers: iceServers}
+
 	var (
 		pc  *webrtc.PeerConnection
 		err error
 	)
 	if s.srv.api != nil {
-		pc, err = s.srv.api.NewPeerConnection(cfg)
+		// Test path: use the injected loopback API as-is.
+		pc, err = s.srv.api.NewPeerConnection(pcCfg)
+	} else if s.srv.iceTCPMux != nil {
+		// Production with ICE-TCP: build a SettingEngine to add the TCP mux.
+		se := webrtc.SettingEngine{}
+		se.SetICETCPMux(s.srv.iceTCPMux)
+		api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+		pc, err = api.NewPeerConnection(pcCfg)
 	} else {
-		pc, err = webrtc.NewPeerConnection(cfg)
+		pc, err = webrtc.NewPeerConnection(pcCfg)
 	}
 	if err != nil {
 		return nil, err

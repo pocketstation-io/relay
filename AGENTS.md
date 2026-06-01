@@ -96,3 +96,19 @@ Every non-trivial implementation documents:
 Every PR that introduces a fake/mock/scaffold adds a row to
 FAKE_SCAFFOLD_INVENTORY.md. Every PR that replaces one burns
 the row down.
+
+## Phase 5 intake gates
+
+- [ ] ADR-023 Embedded TURN: pion/turn running in relay process on UDP/3478 + TURNS/TLS/443; ICE-TCP mux on 443; HMAC-SHA1 auth validated
+- [ ] ADR-023 Embedded TURN soak: Phase 2 soak (50L × 30min) repeated with TCP-only ICE constraint; goroutine delta and RSS within ±20% of phase2-baseline
+- [ ] ADR-014 SFrame E2EE: relay forwards encrypted frames without decrypting; test verifies relay cannot read audio content
+- [ ] ADR-021 RTCP adaptive codec: CODEC_HINT sent within 2 RTT of entering a loss tier; ICE restart at > 15% loss
+- [ ] ADR-020 Benchmark: /v1/echo endpoint implemented; cmd/benchmark CLI produces P95 ≤ 120ms in-process
+- [x] Phase 2 soak target (50 listeners, 30 min) — COMPLETE 2026-06-01; goroutine delta=-1, RSS 13%, 89,435 pkts, 0 drops
+- [ ] SFrame key exchange added to signaling protocol as KEY_EXCHANGE message type
+
+## Phase 6 intake gates
+
+- [ ] ADR-016 WebTransport: /v1/wt endpoint serves audio alongside /v1/signal WebRTC
+- [ ] Multi-region Fly.io deployment (Phase 6 scaling, §9.5 BuildGuide)
+- [ ] RTCP: parse per-listener RR for diarization speaker_id SSE events (ADR-018)
