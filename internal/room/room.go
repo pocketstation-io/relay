@@ -2,12 +2,121 @@ package room
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
 )
+
+// latencyWindowSize is the number of LatencyReport samples retained in the
+// rolling window used to compute P50 percentiles (spec §13.4).
+const latencyWindowSize = 100
+
+// LatencyStats holds aggregated per-segment latency percentiles for a room.
+// All duration fields are P50 medians computed over the last latencyWindowSize
+// reports received from source and listener clients.
+type LatencyStats struct {
+	CaptureP50Ms      float64 `json:"capture_p50_ms"`
+	EncodeP50Ms       float64 `json:"encode_p50_ms"`
+	RelayRttP50Ms     float64 `json:"relay_rtt_p50_ms"`
+	JitterBufferP50Ms float64 `json:"jitter_buffer_p50_ms"`
+	DecodeP50Ms       float64 `json:"decode_p50_ms"`
+	PacketLossPct     float64 `json:"packet_loss_pct"`
+	SampleCount       int     `json:"sample_count"`
+}
+
+// latencySample holds the fields from a single LatencyReport used for aggregation.
+type latencySample struct {
+	captureMs      float64
+	encodeMs       float64
+	relayRttMs     float64
+	jitterBufferMs float64
+	decodeMs       float64
+	packetLossPct  float64
+}
+
+// latencyStore accumulates latency samples in a fixed-size ring and computes
+// rolling P50 percentiles. It is safe for concurrent use.
+type latencyStore struct {
+	mu      sync.Mutex
+	samples []latencySample // ring buffer, length grows up to latencyWindowSize
+	head    int             // next write position
+	full    bool            // true once the ring has wrapped at least once
+}
+
+func newLatencyStore() *latencyStore {
+	return &latencyStore{
+		samples: make([]latencySample, latencyWindowSize),
+	}
+}
+
+// record adds a latency sample to the rolling window.
+func (ls *latencyStore) record(s latencySample) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.samples[ls.head] = s
+	ls.head = (ls.head + 1) % latencyWindowSize
+	if ls.head == 0 {
+		ls.full = true
+	}
+}
+
+// stats computes rolling P50 percentiles over the current window contents.
+func (ls *latencyStore) stats() LatencyStats {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	count := ls.head
+	if ls.full {
+		count = latencyWindowSize
+	}
+	if count == 0 {
+		return LatencyStats{}
+	}
+
+	capture := make([]float64, count)
+	encode := make([]float64, count)
+	relayRtt := make([]float64, count)
+	jitter := make([]float64, count)
+	decode := make([]float64, count)
+	lossSum := 0.0
+
+	for i := 0; i < count; i++ {
+		s := ls.samples[i]
+		capture[i] = s.captureMs
+		encode[i] = s.encodeMs
+		relayRtt[i] = s.relayRttMs
+		jitter[i] = s.jitterBufferMs
+		decode[i] = s.decodeMs
+		lossSum += s.packetLossPct
+	}
+
+	return LatencyStats{
+		CaptureP50Ms:      p50(capture),
+		EncodeP50Ms:       p50(encode),
+		RelayRttP50Ms:     p50(relayRtt),
+		JitterBufferP50Ms: p50(jitter),
+		DecodeP50Ms:       p50(decode),
+		PacketLossPct:     lossSum / float64(count),
+		SampleCount:       count,
+	}
+}
+
+// p50 returns the median of a non-empty, unsorted slice of float64.
+// The input slice is sorted in place.
+func p50(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	sort.Float64s(v)
+	mid := len(v) / 2
+	if len(v)%2 == 0 {
+		return (v[mid-1] + v[mid]) / 2
+	}
+	return v[mid]
+}
 
 // defaultInactivityTimeout is the time a room without an active publisher will
 // remain open before being automatically closed. Configurable via
@@ -124,6 +233,10 @@ type Room struct {
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
+
+	// latency holds rolling per-segment latency samples submitted via
+	// LATENCY_REPORT WebSocket messages (spec §13.4).
+	latency *latencyStore
 }
 
 // New returns an open room with the given id and default timeouts.
@@ -147,6 +260,7 @@ func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration
 		done:              make(chan struct{}),
 		inactivityTimeout: inactivityTimeout,
 		reconnectWindow:   reconnectWindow,
+		latency:           newLatencyStore(),
 	}
 	// Initialise atomic pointer to an empty (non-nil) slice so Load always
 	// returns a valid pointer. This avoids nil-dereference in forwardLoop.
@@ -455,6 +569,24 @@ func (m *Manager) RoomCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.rooms)
+}
+
+// RecordLatency adds a latency sample to the room's rolling window.
+// Called by the server when a LATENCY_REPORT WebSocket message is received.
+func (r *Room) RecordLatency(captureMs, encodeMs, relayRttMs, jitterBufferMs, decodeMs, packetLossPct float64) {
+	r.latency.record(latencySample{
+		captureMs:      captureMs,
+		encodeMs:       encodeMs,
+		relayRttMs:     relayRttMs,
+		jitterBufferMs: jitterBufferMs,
+		decodeMs:       decodeMs,
+		packetLossPct:  packetLossPct,
+	})
+}
+
+// GetLatencyStats returns the current rolling P50 latency statistics for the room.
+func (r *Room) GetLatencyStats() LatencyStats {
+	return r.latency.stats()
 }
 
 // CloseAll closes every active room and removes it from the manager.

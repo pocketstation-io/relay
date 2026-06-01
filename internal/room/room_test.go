@@ -641,3 +641,78 @@ func TestMaxListenersEnforced(t *testing.T) {
 
 	r.Close()
 }
+
+// TestLatencyReportAccumulatesAndReturnsP50 verifies that RecordLatency populates
+// the rolling window and GetLatencyStats returns the P50 median of each dimension
+// over the recorded samples (spec §13.4).
+func TestLatencyReportAccumulatesAndReturnsP50(t *testing.T) {
+	// Given — a fresh room and 5 latency samples with known, distinct values.
+	r := New("latency-room")
+	defer r.Close()
+
+	type sample struct {
+		capture, encode, relayRtt, jitter, decode, loss float64
+	}
+	samples := []sample{
+		{capture: 1, encode: 1, relayRtt: 10, jitter: 20, decode: 1, loss: 0.1},
+		{capture: 2, encode: 2, relayRtt: 20, jitter: 40, decode: 2, loss: 0.2},
+		{capture: 3, encode: 3, relayRtt: 30, jitter: 60, decode: 3, loss: 0.3},
+		{capture: 4, encode: 4, relayRtt: 40, jitter: 80, decode: 4, loss: 0.4},
+		{capture: 5, encode: 5, relayRtt: 50, jitter: 100, decode: 5, loss: 0.5},
+	}
+
+	// When — all samples are recorded.
+	for _, s := range samples {
+		r.RecordLatency(s.capture, s.encode, s.relayRtt, s.jitter, s.decode, s.loss)
+	}
+
+	// Then — GetLatencyStats returns P50 medians.
+	// For 5 sorted values [1,2,3,4,5] the median (P50) is index 2 = 3.
+	// For packet_loss_pct the result is the mean of all samples (0.3).
+	stats := r.GetLatencyStats()
+
+	if stats.SampleCount != 5 {
+		t.Errorf("SampleCount = %d, want 5", stats.SampleCount)
+	}
+	if stats.CaptureP50Ms != 3 {
+		t.Errorf("CaptureP50Ms = %v, want 3", stats.CaptureP50Ms)
+	}
+	if stats.EncodeP50Ms != 3 {
+		t.Errorf("EncodeP50Ms = %v, want 3", stats.EncodeP50Ms)
+	}
+	if stats.RelayRttP50Ms != 30 {
+		t.Errorf("RelayRttP50Ms = %v, want 30", stats.RelayRttP50Ms)
+	}
+	if stats.JitterBufferP50Ms != 60 {
+		t.Errorf("JitterBufferP50Ms = %v, want 60", stats.JitterBufferP50Ms)
+	}
+	if stats.DecodeP50Ms != 3 {
+		t.Errorf("DecodeP50Ms = %v, want 3", stats.DecodeP50Ms)
+	}
+
+	const wantLoss = 0.3
+	const epsilon = 1e-9
+	if diff := stats.PacketLossPct - wantLoss; diff > epsilon || diff < -epsilon {
+		t.Errorf("PacketLossPct = %v, want %v", stats.PacketLossPct, wantLoss)
+	}
+}
+
+// TestLatencyReportRollingWindowEvictsOldestSamples verifies that once the
+// window fills (latencyWindowSize = 100), new samples overwrite the oldest ones
+// so SampleCount stays at the window size.
+func TestLatencyReportRollingWindowEvictsOldestSamples(t *testing.T) {
+	// Given — a fresh room.
+	r := New("latency-window-room")
+	defer r.Close()
+
+	// When — record more samples than the window size.
+	for i := 0; i < latencyWindowSize+10; i++ {
+		r.RecordLatency(float64(i), 0, 0, 0, 0, 0)
+	}
+
+	// Then — SampleCount is capped at the window size.
+	stats := r.GetLatencyStats()
+	if stats.SampleCount != latencyWindowSize {
+		t.Errorf("SampleCount = %d, want %d", stats.SampleCount, latencyWindowSize)
+	}
+}
