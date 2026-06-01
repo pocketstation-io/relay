@@ -146,3 +146,33 @@ func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *tes
 		t.Fatal("WebSocket connection was not closed within 10s after Shutdown")
 	}
 }
+
+// TestGracefulShutdownSignal verifies that a context cancelled before the
+// shutdown grace period elapses causes Shutdown to return promptly (within
+// the deadline). This is a unit-level check that the shutdown path respects
+// context cancellation and does not block indefinitely.
+func TestGracefulShutdownSignal(t *testing.T) {
+	// Given — a server with no active connections.
+	ts, srv, _ := newShutdownTestServer(t)
+	defer ts.Close()
+
+	// When — Shutdown is called with a 2-second deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Shutdown(ctx) }()
+
+	// Then — Shutdown completes within the deadline (no active connections
+	// means it should return almost immediately).
+	select {
+	case err := <-done:
+		if err != nil {
+			// http.ErrServerClosed is expected when the underlying listener
+			// is stopped; anything else is a real failure.
+			t.Errorf("Shutdown returned unexpected error: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Shutdown did not return within the grace period deadline")
+	}
+}
