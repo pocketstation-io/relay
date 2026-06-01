@@ -38,6 +38,7 @@ func main() {
 	// Build ICE server list and start embedded TURN if configured (ADR-023).
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
 	iceServers, turnSrv := setupTURN(jwtSecret)
+	useTURN := len(iceServers) > 0
 
 	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)            // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
@@ -51,6 +52,7 @@ func main() {
 		CallbackClient:         cbClient,
 		WebhookDispatcher:      whDispatcher,
 		ICEServers:             iceServers,
+		UseTURN:                useTURN,
 		RoomConfig: room.ManagerConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
