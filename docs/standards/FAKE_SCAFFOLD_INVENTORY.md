@@ -61,6 +61,25 @@ These never become production — they exist for testing and development.
 
 ---
 
+## Phase 5 additions (added 2026-05-23)
+
+| Artifact | Status | Location | Replace by | Notes |
+|---|---|---|---|---|
+| SFrame E2EE relay endpoint | PENDING | internal/sframe/ | Phase 5 | ADR-014; RFC 9605; relay forwards without decrypting |
+| RTCP adaptive codec feedback | PENDING | internal/rtcp/ + signaling CODEC_HINT | Phase 5 | ADR-021; 3 operating points; ICE restart at loss>15% |
+| Relay echo endpoint | PENDING | cmd/relay-server/ | Phase 4/5 | ADR-020; /v1/echo WebSocket; benchmark timestamp reflection |
+| Capture-to-cloud benchmark CLI | PENDING | cmd/benchmark/ | Phase 5 | ADR-020; P95 CI gate ≤120ms/≤80ms |
+| Embedded TURN server (pion/turn) | PENDING | cmd/relay-server/main.go + internal/turn/ | Phase 5 | ADR-023; UDP/3478 + TURNS/TLS/443; zero external provider |
+| ICE-TCP mux on port 443 | PENDING | cmd/relay-server/main.go | Phase 5 | ADR-023; SetICETCPMux; fallback for UDP-blocked networks |
+| HMAC-SHA1 TURN credential issuance | PENDING | api-server POST /v1/rooms | Phase 5 | ADR-023; RFC 5766 §9.2; reuses POCKETSTATION_JWT_SECRET |
+
+## Phase 6 additions (added 2026-05-23)
+
+| Artifact | Status | Location | Replace by | Notes |
+|---|---|---|---|---|
+| WebTransport endpoint | PENDING | internal/webtransport/ | Phase 6 | ADR-016; /v1/wt; quic-go; ICE-free |
+| Multi-region routing | PENDING | Phase 6 scaling | Phase 6 | Fly.io edge nodes; EU/US/APAC |
+
 ## How to use this file in a PR
 
 When introducing a scaffold:
