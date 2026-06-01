@@ -61,17 +61,27 @@ These never become production — they exist for testing and development.
 
 ---
 
-## Phase 5 additions (added 2026-05-23)
+## Phase 5 additions — status as of 2026-06-01
 
 | Artifact | Status | Location | Replace by | Notes |
 |---|---|---|---|---|
-| SFrame E2EE relay endpoint | PENDING | internal/sframe/ | Phase 5 | ADR-014; RFC 9605; relay forwards without decrypting |
-| RTCP adaptive codec feedback | PENDING | internal/rtcp/ + signaling CODEC_HINT | Phase 5 | ADR-021; 3 operating points; ICE restart at loss>15% |
-| Relay echo endpoint | PENDING | cmd/relay-server/ | Phase 4/5 | ADR-020; /v1/echo WebSocket; benchmark timestamp reflection |
-| Capture-to-cloud benchmark CLI | PENDING | cmd/benchmark/ | Phase 5 | ADR-020; P95 CI gate ≤120ms/≤80ms |
-| Embedded TURN server (pion/turn) | PENDING | cmd/relay-server/main.go + internal/turn/ | Phase 5 | ADR-023; UDP/3478 + TURNS/TLS/443; zero external provider |
-| ICE-TCP mux on port 443 | PENDING | cmd/relay-server/main.go | Phase 5 | ADR-023; SetICETCPMux; fallback for UDP-blocked networks |
-| HMAC-SHA1 TURN credential issuance | PENDING | api-server POST /v1/rooms | Phase 5 | ADR-023; RFC 5766 §9.2; reuses POCKETSTATION_JWT_SECRET |
+| SFrame E2EE relay endpoint | PARTIAL | internal/signaling/messages.go | Phase 5 | ADR-014; KEY_EXCHANGE forwarding done; per-frame test pending |
+| RTCP adaptive codec feedback | PENDING | internal/rtcp/ + signaling CODEC_HINT | Phase 5 | ADR-021; signaling type done; RTCP→CODEC_HINT logic not wired |
+| Capture-to-cloud benchmark CLI | PENDING | cmd/benchmark/ | Phase 5 | ADR-020; /v1/echo done; cmd/benchmark CLI not yet implemented |
+
+## Phase 5 burns (completed 2026-06-01)
+
+| Artifact | Burned by | Evidence |
+|---|---|---|
+| Embedded TURN server (pion/turn) | ADR-023 impl | internal/turn/; cmd/relay-server/main.go; 8 tests pass; on main |
+| ICE-TCP mux | ADR-023 impl | server.Config.ICETCPMux; ICE_TCP_PORT env var |
+| Relay echo endpoint | ADR-020 partial | /v1/echo WebSocket; HTTP test PASS |
+| KEY_EXCHANGE signaling type | ADR-014 partial | internal/signaling/messages.go; handleKeyExchange() in server |
+| CODEC_HINT signaling type | ADR-021 partial | internal/signaling/messages.go; CodecHintPayload struct |
+| BenchmarkWriteRTPFanoutConnected_200 | P5-PROD-002 | internal/room/forward_bench_test.go; result pending local run |
+| ICE failure integration tests | P5-PROD-003 | test/integration/ice_failure_test.go; execution pending local run |
+| Binary smoke test CI job | P5-PROD-004 | .github/workflows/ci.yml smoke job |
+| Phase 2 soak 50L×30min | P2-C1 | soak/results/phase2-baseline.txt; delta=-1, RSS 13%, 0 drops |
 
 ## Phase 6 additions (added 2026-05-23)
 
