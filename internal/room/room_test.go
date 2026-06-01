@@ -459,3 +459,128 @@ func TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace(t *
 	<-producerDone
 	src.close()
 }
+
+// Phase 2 exit-criterion tests — named for the three scenarios called out in the
+// Phase 2 hardening spec. They use newWithTimeouts to exercise short durations
+// without waiting for production defaults (30 min inactivity / 60 s reconnect).
+
+// TestRoomExpiryAfterTimeout verifies that a room with no publisher auto-closes
+// after its configured inactivity timeout. This satisfies the Phase 2 exit
+// criterion: "Relay survives source disconnect + reconnect without losing listeners."
+// The complementary side is that rooms without any publisher are reclaimed promptly.
+func TestRoomExpiryAfterTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timer expiry test sleeps up to 250 ms — skipped in -short mode")
+	}
+
+	// Given — a room with a very short inactivity timeout and no reconnect window.
+	const inactivity = 50 * time.Millisecond
+	r := newWithTimeouts("expiry-room", inactivity, time.Hour)
+
+	// When — no publisher connects; we simply wait.
+
+	// Then — the room must auto-close after the inactivity timeout.
+	waitFor(t, 500*time.Millisecond, func() bool {
+		select {
+		case <-r.done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// TestSourceReconnectWithinWindow verifies that when a source disconnects and a
+// replacement source re-PUBLISHes within the reconnect window, existing listeners
+// keep receiving RTP without re-subscribing.
+func TestSourceReconnectWithinWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("reconnect window test sleeps up to 200 ms — skipped in -short mode")
+	}
+
+	// Given — a room with a generous reconnect window and a listener.
+	const inactivity = time.Hour    // never fires during this test
+	const reconnect = 200 * time.Millisecond
+	r := newWithTimeouts("reconnect-window-room", inactivity, reconnect)
+
+	src1 := newMockSource()
+	l := &mockListener{}
+	r.AddListener("peer-1", l)
+
+	// Attach src1 and confirm the listener receives a packet.
+	r.SetSource(src1, func() { src1.close() })
+	pkt1 := &rtp.Packet{Payload: []byte{0xAA}}
+	src1.send(pkt1)
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 1 })
+
+	// When — source1 disconnects. The reconnect window timer starts.
+	// Simulate ICE failure: the closer is called, which closes src1's channel,
+	// causing the forwardLoop to exit via ReadRTP → EOF.
+	src1.close()
+
+	// Wait for forwardLoop to exit and source to clear.
+	waitFor(t, 100*time.Millisecond, func() bool { return !r.SourceActive() })
+
+	// Reconnect a new source within the window.
+	src2 := newMockSource()
+	r.SetSource(src2, nil)
+
+	// Then — listener receives a packet from src2 without having re-subscribed.
+	pkt2 := &rtp.Packet{Payload: []byte{0xBB}}
+	src2.send(pkt2)
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 2 })
+
+	pkts := l.received()
+	if len(pkts) < 2 || pkts[0] != pkt1 || pkts[1] != pkt2 {
+		t.Errorf("listener did not receive both packets; got %d", len(pkts))
+	}
+
+	// Room must still be open.
+	select {
+	case <-r.done:
+		t.Fatal("room was closed unexpectedly during reconnect window")
+	default:
+	}
+
+	src2.close()
+	r.Close()
+}
+
+// TestSourceReconnectWindowExpired verifies that when a source disconnects and no
+// replacement arrives within the reconnect window, the room auto-closes so
+// listeners are not held open indefinitely.
+func TestSourceReconnectWindowExpired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("reconnect window expiry test sleeps up to 300 ms — skipped in -short mode")
+	}
+
+	// Given — a room with a short reconnect window.
+	const inactivity = time.Hour    // never fires during this test
+	const reconnect = 50 * time.Millisecond
+	r := newWithTimeouts("reconnect-expired-room", inactivity, reconnect)
+
+	src := newMockSource()
+	r.AddListener("peer-1", &mockListener{})
+	r.SetSource(src, func() { src.close() })
+
+	// Confirm source is active.
+	if !r.SourceActive() {
+		t.Fatal("source must be active after SetSource")
+	}
+
+	// When — source disconnects.
+	src.close()
+
+	// Wait for forwardLoop to clear the source.
+	waitFor(t, 100*time.Millisecond, func() bool { return !r.SourceActive() })
+
+	// Then — room must close after the reconnect window expires (no re-PUBLISH).
+	waitFor(t, 500*time.Millisecond, func() bool {
+		select {
+		case <-r.done:
+			return true
+		default:
+			return false
+		}
+	})
+}
