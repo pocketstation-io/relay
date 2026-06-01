@@ -14,6 +14,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/callback"
+	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/server"
 	relayTurn "github.com/pocketstation-io/relay/internal/turn"
 )
@@ -31,12 +32,19 @@ func main() {
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
 	iceServers, turnSrv := setupTURN(jwtSecret)
 
+	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)         // 0 → package default (30 min)
+	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
+
 	cfg := server.Config{
 		JWTSecret:           jwtSecret,
 		MaxRooms:            getenvInt("RELAY_MAX_ROOMS", 0),
 		MaxListenersPerRoom: getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
 		CallbackClient:      cbClient,
 		ICEServers:          iceServers,
+		RoomConfig: room.ManagerConfig{
+			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
+			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
+		},
 	}
 
 	// ICE-TCP mux: enabled when ICE_TCP_PORT is set.

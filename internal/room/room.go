@@ -10,8 +10,14 @@ import (
 )
 
 // defaultInactivityTimeout is the time a room without an active publisher will
-// remain open before being automatically closed.
+// remain open before being automatically closed. Configurable via
+// ROOM_EXPIRY_MINUTES env (default 30).
 const defaultInactivityTimeout = 30 * time.Minute
+
+// defaultReconnectWindow is the time a source has to reconnect after an
+// unexpected disconnect before the room is closed. Configurable via
+// SOURCE_RECONNECT_WINDOW_SEC env (default 60 s).
+const defaultReconnectWindow = 60 * time.Second
 
 // ErrNoSource is returned when an operation requires a live source and none is set.
 var ErrNoSource = errors.New("room has no source")
@@ -48,16 +54,17 @@ type listenerEntry struct {
 //   - source and sourceMu are separate because SetSource must be able to change
 //     the source without blocking the listener snapshot path.
 //   - closeOnce and done provide an idempotent close signal.
-//   - inactivityTimer fires when no PUBLISH arrives within inactivityTimeout.
-//     SetSource resets the timer on every successful source attachment.
+//   - inactivityTimer fires when no PUBLISH arrives within inactivityTimeout
+//     before any source has ever connected.
+//   - reconnectTimer fires when a source disconnects and no new PUBLISH arrives
+//     within reconnectWindow. Both timers call Close; only one fires per lifecycle.
+//     timerMu serialises all Reset/Stop calls across both timers.
 //
 // Ownership: Room is created open. Callers call Close to terminate it.
 // Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
-// Phase scope: ADR-005 copy-on-write + room expiry (Phase 2 Tasks 1 and 2).
+// Phase scope: ADR-005 copy-on-write + room expiry + source reconnect (Phase 2).
 //
-//	Source reconnect handled in Task 4.
-//
-// Intentionally not implemented: automatic room cleanup on last-peer-leave (Phase 2 Task 4).
+// Intentionally not implemented: automatic room cleanup on last-peer-leave.
 type Room struct {
 	ID string
 
@@ -85,30 +92,53 @@ type Room struct {
 	closeOnce sync.Once
 	done      chan struct{}
 
-	// inactivityTimer auto-closes the room after inactivityTimeout of no publisher.
-	// timerMu serialises Reset/Stop calls on the timer to avoid a race between
-	// the timer firing and SetSource resetting it.
-	timerMu           sync.Mutex
+	// timerMu serialises Reset/Stop calls on inactivityTimer and reconnectTimer
+	// to avoid races between timer callbacks and SetSource.
+	timerMu sync.Mutex
+
+	// inactivityTimer auto-closes the room after inactivityTimeout when no
+	// publisher has ever connected. Cancelled by the first SetSource call.
 	inactivityTimer   *time.Timer
 	inactivityTimeout time.Duration
+
+	// reconnectTimer auto-closes the room after reconnectWindow when a source
+	// disconnects and no replacement PUBLISH arrives in time. Started by
+	// forwardLoop on exit (after the first publisher has connected); cancelled
+	// by the next SetSource call.
+	reconnectTimer  *time.Timer
+	reconnectWindow time.Duration
+
+	// sourceEverConnected tracks whether SetSource has been called at least once.
+	// Used to choose between inactivity semantics (no source yet) and reconnect
+	// semantics (source previously connected).
+	sourceEverConnected atomic.Bool
 
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
 }
 
-// New returns an open room with the given id and the default inactivity timeout.
+// New returns an open room with the given id and default timeouts.
 func New(id string) *Room {
-	return newWithTimeout(id, defaultInactivityTimeout)
+	return newWithTimeouts(id, defaultInactivityTimeout, defaultReconnectWindow)
 }
 
-// newWithTimeout creates a room with a configurable inactivity timeout.
-// Used by tests to exercise expiry with short durations without sleeping 30 min.
+// newWithTimeout creates a room with a configurable inactivity timeout and the
+// default reconnect window. Used by existing tests that pre-date the reconnect
+// window feature.
 func newWithTimeout(id string, timeout time.Duration) *Room {
+	return newWithTimeouts(id, timeout, defaultReconnectWindow)
+}
+
+// newWithTimeouts creates a room with configurable inactivity timeout and
+// reconnect window. Used by tests to exercise expiry / reconnect with short
+// durations without sleeping through production values.
+func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration) *Room {
 	r := &Room{
 		ID:                id,
 		done:              make(chan struct{}),
-		inactivityTimeout: timeout,
+		inactivityTimeout: inactivityTimeout,
+		reconnectWindow:   reconnectWindow,
 	}
 	// Initialise atomic pointer to an empty (non-nil) slice so Load always
 	// returns a valid pointer. This avoids nil-dereference in forwardLoop.
@@ -116,18 +146,16 @@ func newWithTimeout(id string, timeout time.Duration) *Room {
 	r.listeners.Store(&empty)
 
 	// Start the inactivity timer. The timer fires if no publisher attaches within
-	// inactivityTimeout. SetSource resets the timer to give the publisher a
-	// fresh window on every reconnect.
+	// inactivityTimeout. SetSource cancels this timer on the first connection.
 	//
-	// Race-free construction: both the timer field write and the Reset call
-	// happen under timerMu. The callback also acquires timerMu before reading
-	// the field (via Stop inside Close). This establishes a happens-before
-	// relationship between the write in newWithTimeout and any subsequent read
-	// in the callback, satisfying the Go memory model.
+	// Race-free construction: both the timer field write and the timerMu lock
+	// happen under timerMu. The callback also acquires timerMu before calling
+	// Close, establishing a happens-before relationship that satisfies the Go
+	// memory model.
 	r.timerMu.Lock()
-	r.inactivityTimer = time.AfterFunc(timeout, func() {
+	r.inactivityTimer = time.AfterFunc(inactivityTimeout, func() {
 		// Acquire timerMu before calling Close so there is a happens-before edge
-		// between the r.inactivityTimer assignment in newWithTimeout and this
+		// between the r.inactivityTimer assignment in newWithTimeouts and this
 		// goroutine reading it through r.Close → r.inactivityTimer.Stop().
 		r.timerMu.Lock()
 		r.timerMu.Unlock()
@@ -171,13 +199,18 @@ func (r *Room) SetSource(src Source, closer func()) {
 		<-prevLoopDone
 	}
 
-	// Reset the inactivity timer: a publisher is now active.
-	// timerMu prevents a race between this Reset and the timer callback
-	// (which calls Close) firing concurrently.
+	// On the first publisher: stop the pre-connection inactivity timer so it
+	// does not fire after a source has successfully joined. On subsequent
+	// publishers (reconnect): stop any pending reconnect timer.
+	// timerMu prevents a race between these Stop/Reset calls and the callback.
 	r.timerMu.Lock()
 	r.inactivityTimer.Stop()
-	r.inactivityTimer.Reset(r.inactivityTimeout)
+	if r.reconnectTimer != nil {
+		r.reconnectTimer.Stop()
+	}
 	r.timerMu.Unlock()
+
+	r.sourceEverConnected.Store(true)
 
 	go r.forwardLoop(src, newLoopDone)
 }
@@ -224,11 +257,14 @@ func (r *Room) SourceActive() bool {
 }
 
 // Close terminates the room. Safe to call multiple times.
-// Stops the inactivity timer so it does not fire after an explicit close.
+// Stops both the inactivity timer and the reconnect timer.
 func (r *Room) Close() {
 	r.closeOnce.Do(func() {
 		r.timerMu.Lock()
 		r.inactivityTimer.Stop()
+		if r.reconnectTimer != nil {
+			r.reconnectTimer.Stop()
+		}
 		r.timerMu.Unlock()
 		close(r.done)
 	})
@@ -256,6 +292,26 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 			r.sourceCloser = nil
 		}
 		r.sourceMu.Unlock()
+
+		// Source disconnected (EOF or room closed). If the room is still open,
+		// start the reconnect window timer: give the source reconnectWindow to
+		// re-PUBLISH before the room is closed. This allows listeners to remain
+		// connected across a brief source ICE failure or network blip.
+		select {
+		case <-r.done:
+			// Room already closed — no reconnect timer needed.
+		default:
+			r.timerMu.Lock()
+			r.reconnectTimer = time.AfterFunc(r.reconnectWindow, func() {
+				// Acquire timerMu before calling Close to establish a happens-before
+				// edge between the reconnectTimer field assignment and this callback
+				// reading it through r.Close → r.reconnectTimer.Stop().
+				r.timerMu.Lock()
+				r.timerMu.Unlock()
+				r.Close()
+			})
+			r.timerMu.Unlock()
+		}
 	}()
 
 	for {
@@ -290,11 +346,46 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 type Manager struct {
 	mu    sync.RWMutex
 	rooms map[string]*Room
+
+	// inactivityTimeout and reconnectWindow are applied to every room created
+	// by GetOrCreate. Zero values use the package defaults.
+	inactivityTimeout time.Duration
+	reconnectWindow   time.Duration
 }
 
-// NewManager returns an empty Manager.
+// ManagerConfig holds configurable timeouts for the Manager.
+type ManagerConfig struct {
+	// InactivityTimeout is the time a room waits for its first publisher before
+	// auto-closing. Zero means use defaultInactivityTimeout (30 min).
+	// Configurable via ROOM_EXPIRY_MINUTES env in main.go.
+	InactivityTimeout time.Duration
+	// ReconnectWindow is the time a room keeps listeners alive after its source
+	// disconnects, waiting for a re-PUBLISH on the same room_id.
+	// Zero means use defaultReconnectWindow (60 s).
+	// Configurable via SOURCE_RECONNECT_WINDOW_SEC env in main.go.
+	ReconnectWindow time.Duration
+}
+
+// NewManager returns an empty Manager with default timeouts.
 func NewManager() *Manager {
-	return &Manager{rooms: make(map[string]*Room)}
+	return NewManagerWithConfig(ManagerConfig{})
+}
+
+// NewManagerWithConfig returns an empty Manager configured with the given timeouts.
+func NewManagerWithConfig(cfg ManagerConfig) *Manager {
+	inactivity := cfg.InactivityTimeout
+	if inactivity <= 0 {
+		inactivity = defaultInactivityTimeout
+	}
+	reconnect := cfg.ReconnectWindow
+	if reconnect <= 0 {
+		reconnect = defaultReconnectWindow
+	}
+	return &Manager{
+		rooms:             make(map[string]*Room),
+		inactivityTimeout: inactivity,
+		reconnectWindow:   reconnect,
+	}
 }
 
 // GetOrCreate returns the room for id, creating it if absent.
@@ -304,7 +395,7 @@ func (m *Manager) GetOrCreate(id string) *Room {
 	if r := m.rooms[id]; r != nil {
 		return r
 	}
-	r := New(id)
+	r := newWithTimeouts(id, m.inactivityTimeout, m.reconnectWindow)
 	m.rooms[id] = r
 	return r
 }

@@ -62,6 +62,10 @@ type Config struct {
 	// created by this server. Production: SetICETCPMux(tcpMux) on port 443.
 	// Tests: leave nil; the loopback ICE API handles connectivity.
 	ICETCPMux pionIce.TCPMux
+	// RoomConfig sets per-room inactivity timeout and source reconnect window.
+	// Zero values in RoomConfig use package defaults (30 min / 60 s).
+	// Read from ROOM_EXPIRY_MINUTES and SOURCE_RECONNECT_WINDOW_SEC env vars.
+	RoomConfig room.ManagerConfig
 }
 
 // Server is the top-level relay server.
@@ -105,7 +109,7 @@ func New(cfg Config) *Server {
 		maxListeners = defaultMaxListenersPerRoom
 	}
 	return &Server{
-		rooms:               room.NewManager(),
+		rooms:               room.NewManagerWithConfig(cfg.RoomConfig),
 		jwtSecret:           cfg.JWTSecret,
 		api:                 cfg.API,
 		Metrics:             metrics.New(),
