@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,20 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/server"
 )
+
+// newIPv4Server creates an httptest.Server bound to 127.0.0.1 (IPv4 only).
+// The standard httptest.NewServer prefers ::1 (IPv6), which fails in some
+// macOS sandbox environments.
+func newIPv4Server(handler http.Handler) *httptest.Server {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		panic("newIPv4Server: " + err.Error())
+	}
+	ts := httptest.NewUnstartedServer(handler)
+	ts.Listener = l
+	ts.Start()
+	return ts
+}
 
 const (
 	phase2ListenerCount   = 50
@@ -109,7 +124,7 @@ func TestSoakPhase2(t *testing.T) {
 		JWTSecret: []byte("soak-phase2-secret"),
 		API:       api,
 	})
-	ts := httptest.NewServer(srv.Handler())
+	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
 	// Create room.
@@ -180,7 +195,7 @@ func TestSoakPhase2(t *testing.T) {
 			}
 		}
 	}()
-	defer close(soakStop)
+	// soakStop is closed exactly once below; no defer to avoid double-close panic.
 
 	// Give the publisher's forwardLoop a moment to start.
 	time.Sleep(200 * time.Millisecond)
