@@ -17,8 +17,26 @@ const (
 	// TypeCodecHint is sent by the relay to the source when RTCP Receiver
 	// Reports indicate a change in packet-loss tier (ADR-021). The source
 	// adjusts its Opus encoder parameters on receipt.
-	TypeCodecHint   MessageType = "CODEC_HINT"
+	TypeCodecHint MessageType = "CODEC_HINT"
+	// TypeLatencyReport is sent by source or listener clients to report
+	// per-segment latency measurements. The relay accumulates reports and
+	// exposes aggregated percentiles via GET /v1/rooms/{id}/latency (spec §13.4).
+	TypeLatencyReport MessageType = "LATENCY_REPORT"
 )
+
+// LatencyReport is sent by source/listener clients to report per-segment latency.
+// All duration fields are in milliseconds. The relay aggregates these into a
+// rolling window and exposes P50 percentiles via GET /v1/rooms/{id}/latency.
+type LatencyReport struct {
+	SessionID      string  `json:"session_id"`
+	CaptureMs      float64 `json:"capture_ms"`
+	EncodeMs       float64 `json:"encode_ms"`
+	RelayRttMs     float64 `json:"relay_rtt_ms"`
+	JitterBufferMs float64 `json:"jitter_buffer_ms"`
+	DecodeMs       float64 `json:"decode_ms"`
+	PacketLossPct  float64 `json:"packet_loss_pct"`
+	ClockDriftPpm  float64 `json:"clock_drift_ppm"`
+}
 
 // CodecHintPayload carries the encoder parameters for the CODEC_HINT message.
 // All fields are advisory: the source applies them best-effort on the next
@@ -43,6 +61,9 @@ type ClientMessage struct {
 	// SFrameKey is the base64-encoded SFrame key material for KEY_EXCHANGE messages.
 	// The relay forwards this to all room listeners without reading it.
 	SFrameKey string `json:"sframe_key,omitempty"`
+	// LatencyReport is populated on LATENCY_REPORT messages sent by clients to
+	// report per-segment latency measurements (spec §13.4).
+	LatencyReport *LatencyReport `json:"latency_report,omitempty"`
 }
 
 type ServerMessage struct {

@@ -153,6 +153,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/v1/rooms", s.createRoom)
+	mux.HandleFunc("/v1/rooms/", s.roomsSubrouter)
 	mux.HandleFunc("/v1/signal", s.signal)
 	mux.HandleFunc("/v1/echo", s.echo)
 	mux.HandleFunc("/metrics", s.metricsHandler)
@@ -390,6 +391,8 @@ func (s *session) run() {
 			s.handleICE(msg)
 		case signaling.TypeKeyExchange:
 			s.handleKeyExchange(msg)
+		case signaling.TypeLatencyReport:
+			s.handleLatencyReport(msg)
 		case signaling.TypeLeave:
 			return
 		default:
@@ -599,6 +602,77 @@ func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 			sess.send(forward)
 		}
 	}
+}
+
+// handleLatencyReport processes a LATENCY_REPORT message sent by a client.
+// The report is recorded into the room's rolling latency window.
+// Silently discarded when the session has not joined a room or the report
+// payload is absent, to protect the hot path from malformed messages.
+func (s *session) handleLatencyReport(msg signaling.ClientMessage) {
+	if s.rm == nil {
+		s.sendError("not_joined", "join a room before sending LATENCY_REPORT")
+		return
+	}
+	rpt := msg.LatencyReport
+	if rpt == nil {
+		s.sendError("bad_request", "LATENCY_REPORT requires a latency_report payload")
+		return
+	}
+	s.rm.RecordLatency(
+		rpt.CaptureMs,
+		rpt.EncodeMs,
+		rpt.RelayRttMs,
+		rpt.JitterBufferMs,
+		rpt.DecodeMs,
+		rpt.PacketLossPct,
+	)
+}
+
+// roomsSubrouter dispatches sub-paths under /v1/rooms/.
+// Currently supports GET /v1/rooms/{id}/latency (spec §13.4).
+func (s *Server) roomsSubrouter(w http.ResponseWriter, r *http.Request) {
+	// Pattern: /v1/rooms/{id}/latency
+	const prefix = "/v1/rooms/"
+	tail := r.URL.Path[len(prefix):]
+	// tail is "{id}/latency" or "{id}/..."
+	slashIdx := -1
+	for i, c := range tail {
+		if c == '/' {
+			slashIdx = i
+			break
+		}
+	}
+	if slashIdx < 0 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	roomID := tail[:slashIdx]
+	subpath := tail[slashIdx+1:]
+
+	switch subpath {
+	case "latency":
+		s.roomLatency(w, r, roomID)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// roomLatency handles GET /v1/rooms/{id}/latency.
+// Returns the rolling P50 latency statistics for the specified room as JSON.
+// Returns 404 when the room does not exist.
+func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rm, ok := s.rooms.Get(roomID)
+	if !ok {
+		http.Error(w, "room not found", http.StatusNotFound)
+		return
+	}
+	stats := rm.GetLatencyStats()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(stats)
 }
 
 // newPeerConnection creates a Pion PeerConnection and wires up ICE candidate
