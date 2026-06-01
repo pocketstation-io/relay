@@ -17,6 +17,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/server"
 	relayTurn "github.com/pocketstation-io/relay/internal/turn"
+	"github.com/pocketstation-io/relay/internal/webhook"
 )
 
 func main() {
@@ -26,6 +27,12 @@ func main() {
 	if apiURL := os.Getenv("RELAY_API_SERVER_URL"); apiURL != "" {
 		cbClient = callback.NewClient(apiURL)
 		slog.Info("relay callback client enabled", "api_server_url", apiURL)
+	}
+
+	var whDispatcher *webhook.Dispatcher
+	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
+		whDispatcher = webhook.New(webhookURL)
+		slog.Info("relay webhook dispatcher enabled", "webhook_url", webhookURL)
 	}
 
 	// Build ICE server list and start embedded TURN if configured (ADR-023).
@@ -42,6 +49,7 @@ func main() {
 		MaxListenersPerRoom:    getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
 		MaxRoomsPerIPPerMinute: getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
 		CallbackClient:         cbClient,
+		WebhookDispatcher:      whDispatcher,
 		ICEServers:             iceServers,
 		RoomConfig: room.ManagerConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
