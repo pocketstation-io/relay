@@ -1,0 +1,27 @@
+app = "pocketstation-relay"
+primary_region = "iad"  # US East (lowest NA latency)
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 8080
+force_https = true
+
+[[services.ports]]
+port = 80
+handlers = ["http"]
+
+[[services.ports]]
+port = 443
+handlers = ["tls", "http"]
+
+[services.concurrency]
+type = "connections"
+hard_limit = 500
+soft_limit = 400
+
+[[vm]]
+memory = "512mb"
+cpu_kind = "shared"
+cpus = 1
