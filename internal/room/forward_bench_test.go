@@ -127,7 +127,11 @@ func benchmarkForwardConnected(b *testing.B, n int) {
 	// pcs collects all PeerConnections so we can close them at the end.
 	pcs := make([]*webrtc.PeerConnection, 0, n*2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Budget 600ms per pair for ICE negotiation; minimum 10s.
+	// Sequential setup avoids resource contention between concurrent ICE agents
+	// (competing for UDP ports and Go scheduler bandwidth degrades throughput).
+	setupTimeout := time.Duration(n)*600*time.Millisecond + 10*time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), setupTimeout)
 	defer cancel()
 
 	for i := 0; i < n; i++ {
@@ -154,19 +158,22 @@ func benchmarkForwardConnected(b *testing.B, n int) {
 		Payload: make([]byte, 200), // typical 20 ms Opus frame
 	}
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Mirror the forwardLoop hot-path (ADR-005): one atomic.Load, then
-		// WriteRTP per listener. Connected tracks exercise the full SRTP path.
-		ls := *r.listeners.Load()
-		for _, e := range ls {
-			_ = e.l.WriteRTP(pkt)
+	// Use a sub-benchmark so the framework calibrates b.N against the write
+	// loop only — not the ICE setup. Without this, -benchtime=5s causes the
+	// framework to call benchmarkForwardConnected repeatedly, re-running the
+	// expensive setup on every calibration pass.
+	b.Run("write", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			// Mirror the forwardLoop hot-path (ADR-005): one atomic.Load, then
+			// WriteRTP per listener. Connected tracks exercise the full SRTP path.
+			ls := *r.listeners.Load()
+			for _, e := range ls {
+				_ = e.l.WriteRTP(pkt)
+			}
 		}
-	}
+	})
 
-	b.StopTimer()
 	for _, pc := range pcs {
 		_ = pc.Close()
 	}
