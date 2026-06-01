@@ -87,6 +87,11 @@ type Server struct {
 	// on creation and deregisters on cleanup. Shutdown closes all tracked
 	// connections so hijacked WebSocket connections are not abandoned.
 	sessions map[string]*session
+
+	// codecHintStates holds per-room debounce state for CODEC_HINT emission
+	// (D13, ADR-021). Keys are room IDs; values are *codecHintState.
+	// sync.Map is safe for concurrent access from multiple listener goroutines.
+	codecHintStates sync.Map
 }
 
 // New creates a Server from cfg.
@@ -443,12 +448,17 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			s.sendError("track_error", "failed to create audio track")
 			return
 		}
-		if _, err := pc.AddTrack(audioTrack); err != nil {
+		sender, addErr := pc.AddTrack(audioTrack)
+		if addErr != nil {
 			s.sendError("track_error", "failed to add audio track to peer connection")
 			return
 		}
 		rm.AddListener(s.id, audioTrack)
 		s.srv.Metrics.ListenerCount.Add(1)
+
+		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (ADR-021).
+		hintState := s.srv.roomCodecHintState(claims.RoomID)
+		s.srv.startRTCPReader(sender, claims.RoomID, hintState)
 	}
 
 	offer := webrtc.SessionDescription{
