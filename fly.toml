@@ -1,5 +1,5 @@
 app = "pocketstation-relay"
-primary_region = "iad"  # US East (lowest NA latency)
+primary_region = "iad"
 
 [build]
 dockerfile = "Dockerfile"
@@ -7,16 +7,9 @@ dockerfile = "Dockerfile"
 [http_service]
 internal_port = 8080
 force_https = true
+min_machines_running = 1
 
-[[services.ports]]
-port = 80
-handlers = ["http"]
-
-[[services.ports]]
-port = 443
-handlers = ["tls", "http"]
-
-[services.concurrency]
+[http_service.concurrency]
 type = "connections"
 hard_limit = 500
 soft_limit = 400
@@ -25,12 +18,3 @@ soft_limit = 400
 memory = "512mb"
 cpu_kind = "shared"
 cpus = 1
-
-[http_service.concurrency]
-type = "connections"
-hard_limit = 500
-soft_limit = 400
-
-# Keep one machine warm per region — eliminates cold-start P95 spikes
-[http_service]
-min_machines_running = 1
