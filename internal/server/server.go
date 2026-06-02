@@ -85,6 +85,11 @@ type Config struct {
 	// the source (spec §10.4). Set to true when the relay's embedded TURN
 	// server is configured (TURN_PUBLIC_IP is set, ADR-023).
 	UseTURN bool
+	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
+	// candidates. Set to the relay's public IP when deployed behind NAT (e.g.
+	// Fly.io). Without this, Pion generates private/link-local candidates that
+	// remote peers cannot reach. Env: RELAY_PUBLIC_IPS (comma-separated).
+	NAT1To1IPs []string
 }
 
 // Server is the top-level relay server.
@@ -97,6 +102,7 @@ type Server struct {
 	webhookDispatcher  *webhook.Dispatcher
 	iceServers         []webrtc.ICEServer
 	iceTCPMux          pionIce.TCPMux
+	nat1to1IPs         []string
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
 	// Both are set once at construction and never written again.
@@ -162,6 +168,7 @@ func New(cfg Config) *Server {
 		webhookDispatcher:   cfg.WebhookDispatcher,
 		iceServers:          cfg.ICEServers,
 		iceTCPMux:           cfg.ICETCPMux,
+		nat1to1IPs:          cfg.NAT1To1IPs,
 		maxRooms:            maxRooms,
 		maxListenersPerRoom: maxListeners,
 		ipLimiter:           ipLim,
@@ -772,9 +779,13 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 		// Test path: use the injected loopback API as-is.
 		pc, err = s.srv.api.NewPeerConnection(pcCfg)
 	} else if s.srv.iceTCPMux != nil {
-		// Production with ICE-TCP: build a SettingEngine to add the TCP mux.
+		// Production with ICE-TCP: build a SettingEngine to add the TCP mux
+		// and announce the relay's public IP in host candidates.
 		se := webrtc.SettingEngine{}
 		se.SetICETCPMux(s.srv.iceTCPMux)
+		if len(s.srv.nat1to1IPs) > 0 {
+			se.SetNAT1To1IPs(s.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)
+		}
 		api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 		pc, err = api.NewPeerConnection(pcCfg)
 	} else {

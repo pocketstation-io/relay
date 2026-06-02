@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,6 +73,14 @@ func main() {
 		}
 		cfg.ICETCPMux = webrtc.NewICETCPMux(nil, ln, 8)
 		slog.Info("ICE-TCP mux started", "addr", tcpAddr)
+	}
+
+	// NAT1To1IPs: public IP(s) for ICE host candidates behind NAT (Fly.io).
+	// Set RELAY_PUBLIC_IPS to the relay's public IP so remote peers receive
+	// reachable ICE candidates. Multiple IPs are comma-separated.
+	if publicIPs := os.Getenv("RELAY_PUBLIC_IPS"); publicIPs != "" {
+		cfg.NAT1To1IPs = splitComma(publicIPs)
+		slog.Info("NAT1To1 public IPs configured", "ips", cfg.NAT1To1IPs)
 	}
 
 	s := server.New(cfg)
@@ -201,4 +210,16 @@ func getenvInt(k string, d int) int {
 		return d
 	}
 	return n
+}
+
+// splitComma splits a comma-separated string, trimming whitespace, dropping empties.
+func splitComma(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

@@ -4,6 +4,7 @@ primary_region = "iad"
 [build]
 dockerfile = "Dockerfile"
 
+# Signaling + control plane (WebSocket + HTTP)
 [http_service]
 internal_port = 8080
 force_https = true
@@ -13,6 +14,16 @@ min_machines_running = 1
 type = "connections"
 hard_limit = 500
 soft_limit = 400
+
+# ICE-TCP media plane — exposed as raw TCP (not HTTP)
+# Clients use this for WebRTC media when UDP is unavailable.
+# Port 8081 internal → port 8081 external (passthrough).
+[[services]]
+internal_port = 8081
+protocol = "tcp"
+
+  [[services.ports]]
+  port = 8081
 
 [[vm]]
 memory = "512mb"
