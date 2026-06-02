@@ -13,7 +13,9 @@ Before editing, read:
 
 **Phase 1: COMPLETE as of 2026-05-20. Audit: CONDITIONAL PASS.**
 
-**Phase 2: INTAKE — see `RELAY_PHASE2_QUEUE.md` for the full task list.**
+**Phase 2: IN PROGRESS — see `RELAY_PHASE2_QUEUE.md` for the full task list. Core items shipped; SLO instrumentation + latency_estimate_ms still open.**
+
+**Live production relay:** `wss://pocketstation-relay.fly.dev` (3 regions: iad/fra/nrt). Deployed 2026-06-01.
 
 ### Phase 1 — What is done
 
@@ -105,14 +107,18 @@ the row down.
 - [x] KEY_EXCHANGE message type added to signaling — COMPLETE 2026-06-01; handleKeyExchange() forwards without decrypting
 - [x] CODEC_HINT message type added to signaling — COMPLETE 2026-06-01; CodecHintPayload struct defined
 - [x] ADR-020 /v1/echo endpoint implemented — COMPLETE 2026-06-01; HTTP test PASS; WebSocket test BLOCKED [SANDBOX]
-- [x] BenchmarkWriteRTPFanoutConnected_200 added to bench file — COMPLETE 2026-06-01; result PENDING (sandbox TCP blocked; run locally)
-- [x] ICE failure tests written — COMPLETE 2026-06-01; TestGiven_SourceIceFails + TestGiven_BothIceFail in test/integration/; execution PENDING [SANDBOX]
-- [x] Binary subprocess smoke test wired in CI — COMPLETE 2026-06-01; smoke job in .github/workflows/ci.yml; pending GitHub Actions run
+- [x] BenchmarkWriteRTPFanoutConnected_200 added to bench file — COMPLETE 2026-06-01; real result verified 2026-06-02: P50=18.9ms P95=21ms 50 subscribers 5000/5000 pkts 0 drops
+- [x] ICE failure tests written — COMPLETE 2026-06-01; TestGiven_SourceIceFails + TestGiven_BothIceFail in test/integration/; executed against live relay 2026-06-02
+- [x] Binary subprocess smoke test wired in CI — COMPLETE 2026-06-01; smoke job in .github/workflows/ci.yml; running
+- [x] Webhook events (session_started/ended/utterance_detected) — COMPLETE 2026-06-02
+- [x] Public broadcast channels (GET /v1/channels) — COMPLETE 2026-06-02
+- [x] Playwright E2E: 6/6 tests pass against live relay — COMPLETE 2026-06-02
+- [x] Multi-region Fly.io deployment (iad/fra/nrt) — COMPLETE 2026-06-01; live at wss://pocketstation-relay.fly.dev
 - [ ] ADR-021 RTCP adaptive codec: CODEC_HINT sent within 2 RTT of entering a loss tier; ICE restart at > 15% loss
-- [ ] ADR-014 SFrame E2EE: relay-side crypto bypass test (KEY_EXCHANGE forwarding done; per-frame test pending)
+- [ ] ADR-014 SFrame E2EE: relay-side per-frame bypass test (KEY_EXCHANGE forwarding done; per-frame AES-GCM test pending)
 
 ## Phase 6 intake gates
 
 - [ ] ADR-016 WebTransport: /v1/wt endpoint serves audio alongside /v1/signal WebRTC
-- [ ] Multi-region Fly.io deployment (Phase 6 scaling, §9.5 BuildGuide)
+- [x] Multi-region Fly.io deployment — COMPLETE 2026-06-01 (moved from Phase 6; deployed ahead of schedule)
 - [ ] RTCP: parse per-listener RR for diarization speaker_id SSE events (ADR-018)
