@@ -24,6 +24,12 @@ const (
 	bitrateMediumKbps = 32
 	bitrateLowKbps    = 16
 
+	// lossLowLatencyThreshold is the upper loss boundary for 10ms frame mode.
+	// fraction_lost < 1% → prefer RESTRICTED_LOWDELAY 10ms frames for minimum
+	// algorithmic delay (RFC 6716 §3.1). Above this threshold, 20ms frames
+	// amortise FEC overhead more efficiently.
+	lossLowLatencyThreshold = 0.01
+
 	// lossMediumThreshold is the lower loss boundary for the medium tier.
 	// fraction_lost > 2% but ≤ 5% → 32 kbps with FEC.
 	lossMediumThreshold = 0.02
@@ -47,31 +53,51 @@ type codecHintState struct {
 
 // bitrateForLoss maps a 0.0–1.0 fraction-lost value (from RTCP RR FractionLost/256)
 // to a CodecHintPayload according to ADR-021 tier table.
+//
+// FrameMs follows the 10ms/20ms split described in ADR-021 §frame-mode:
+//   - loss < 1%: 10ms (RESTRICTED_LOWDELAY) — minimum algorithmic delay, clean link
+//   - loss ≥ 1%: 20ms — larger frame amortises FEC overhead more efficiently
 func bitrateForLoss(fractionLost float64) signaling.CodecHintPayload {
 	switch {
 	case fractionLost > lossHighThreshold:
 		// High loss / high RTT: drop bitrate aggressively, enable FEC + DTX.
+		// Use 20ms frames: larger frame size spreads FEC bytes over fewer packets.
 		return signaling.CodecHintPayload{
 			BitRateKbps: bitrateLowKbps,
 			Complexity:  3,
 			Fec:         true,
 			Dtx:         true,
+			FrameMs:     20,
 		}
 	case fractionLost > lossMediumThreshold:
 		// Moderate loss: reduce bitrate, enable FEC, keep DTX off.
+		// Use 20ms frames for the same FEC efficiency reason.
 		return signaling.CodecHintPayload{
 			BitRateKbps: bitrateMediumKbps,
 			Complexity:  5,
 			Fec:         true,
 			Dtx:         false,
+			FrameMs:     20,
 		}
-	default:
-		// Clean link: full quality.
+	case fractionLost > lossLowLatencyThreshold:
+		// Low-moderate loss (1–2%): maintain full quality but conservative frame
+		// size until the link is confirmed clean.
 		return signaling.CodecHintPayload{
 			BitRateKbps: bitrateHighKbps,
 			Complexity:  5,
 			Fec:         false,
 			Dtx:         false,
+			FrameMs:     20,
+		}
+	default:
+		// Clean link (loss < 1%): full quality + 10ms RESTRICTED_LOWDELAY frames.
+		// Saves ~10ms of algorithmic delay vs 20ms frames (RFC 6716 §3.1).
+		return signaling.CodecHintPayload{
+			BitRateKbps: bitrateHighKbps,
+			Complexity:  5,
+			Fec:         false,
+			Dtx:         false,
+			FrameMs:     10,
 		}
 	}
 }

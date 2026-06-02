@@ -57,6 +57,11 @@ type CodecHintPayload struct {
 	Fec bool `json:"fec"`
 	// Dtx enables or disables discontinuous transmission.
 	Dtx bool `json:"dtx"`
+	// FrameMs signals the Opus frame duration the source should use: 10 or 20.
+	// 10ms (RESTRICTED_LOWDELAY) is preferred on clean links (loss < 1%).
+	// 20ms is used when loss > 5% because the larger frame amortises FEC
+	// overhead per packet more efficiently (RFC 6716 §3.1).
+	FrameMs int `json:"frame_ms"`
 }
 
 type ClientMessage struct {
