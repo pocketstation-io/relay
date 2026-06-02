@@ -25,3 +25,12 @@ soft_limit = 400
 memory = "512mb"
 cpu_kind = "shared"
 cpus = 1
+
+[http_service.concurrency]
+type = "connections"
+hard_limit = 500
+soft_limit = 400
+
+# Keep one machine warm per region — eliminates cold-start P95 spikes
+[http_service]
+min_machines_running = 1
