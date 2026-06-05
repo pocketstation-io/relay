@@ -515,7 +515,7 @@ func TestSourceReconnectWithinWindow(t *testing.T) {
 	}
 
 	// Given — a room with a generous reconnect window and a listener.
-	const inactivity = time.Hour    // never fires during this test
+	const inactivity = time.Hour // never fires during this test
 	const reconnect = 200 * time.Millisecond
 	r := newWithTimeouts("reconnect-window-room", inactivity, reconnect)
 
@@ -573,7 +573,7 @@ func TestSourceReconnectWindowExpired(t *testing.T) {
 	}
 
 	// Given — a room with a short reconnect window.
-	const inactivity = time.Hour    // never fires during this test
+	const inactivity = time.Hour // never fires during this test
 	const reconnect = 50 * time.Millisecond
 	r := newWithTimeouts("reconnect-expired-room", inactivity, reconnect)
 

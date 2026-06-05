@@ -56,7 +56,7 @@ const reconnectDisconnectDwell = 5 * time.Second
 //
 // Full mode:  largest interval is 130 min → window = 150 min.
 // Short mode: largest interval is 130 s  → window = 10 min (generous margin).
-const reconnectWindowFull  = 150 * time.Minute
+const reconnectWindowFull = 150 * time.Minute
 const reconnectWindowShort = 10 * time.Minute
 
 // reconnectIntervals returns the three reconnect times scaled by environment.
@@ -136,9 +136,9 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	// connCleanup func) so each can be closed independently. Returns
 	// (nil, nil, nil, errorMessage) on failure.
 	type publisherHandles struct {
-		stopRTP  chan struct{}
-		closePC  func()
-		closeWS  func()
+		stopRTP chan struct{}
+		closePC func()
+		closeWS func()
 	}
 	connectPublisher := func(label string) (*publisherHandles, string) {
 		conn := dialWS(t, ts)

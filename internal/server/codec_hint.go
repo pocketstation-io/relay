@@ -182,4 +182,3 @@ func (s *Server) roomCodecHintState(roomID string) *codecHintState {
 	v, _ := s.codecHintStates.LoadOrStore(roomID, &codecHintState{})
 	return v.(*codecHintState)
 }
-
