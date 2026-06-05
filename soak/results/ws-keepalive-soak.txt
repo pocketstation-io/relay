@@ -1,0 +1,8 @@
+# WebSocket keepalive soak
+# Generated: 2026-06-05
+# Duration: 2m0s (RELAY_SOAK_FULL=)
+
+elapsed=2m0s
+relay_pings_received=4 expected_min=3
+ws_closed_unexpectedly=false
+VERDICT=PASS

@@ -1,0 +1,9 @@
+# Publisher reconnect soak
+# Generated: 2026-06-05
+# RELAY_SOAK_FULL: 
+# Total elapsed: 2m26s
+
+interval=reconnect-1@16s scheduled_at=16s reconnect_time=7ms verdict=PASS
+interval=reconnect-2@1m0s scheduled_at=1m5s reconnect_time=8ms verdict=PASS
+interval=reconnect-3@2m10s scheduled_at=2m20s reconnect_time=8ms verdict=PASS
+overall_verdict=PASS
