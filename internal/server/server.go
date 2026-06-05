@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,16 @@ import (
 // shutdownDrainTimeout is the maximum time Serve waits for in-flight HTTP
 // connections to complete after receiving a shutdown signal.
 const shutdownDrainTimeout = 5 * time.Second
+
+// wsKeepAlivePingInterval is how often the relay sends a WebSocket ping to
+// each connected peer. Browsers respond automatically with a pong.
+// This prevents Fly.io's proxy and home NAT devices from silently dropping
+// idle TCP connections after their inactivity timeout (~1 hour).
+const wsKeepAlivePingInterval = 30 * time.Second
+
+// wsKeepAliveTimeout is the maximum time the relay waits for a pong reply
+// before treating the connection as dead and closing it.
+const wsKeepAliveTimeout = 90 * time.Second
 
 // defaultMaxRooms is the default room-count limit when RELAY_MAX_ROOMS is unset.
 const defaultMaxRooms = 100
@@ -338,7 +349,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	s.rooms.GetOrCreate(id)
 	s.Metrics.RoomsActive.Add(1)
 	slog.Info("room created", "room_id", id)
-	sourceToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSource, 15*time.Minute)
+	sourceToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSource, 2*time.Hour)
 	if err != nil {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
@@ -404,17 +415,48 @@ type session struct {
 	wmu  sync.Mutex
 	conn *websocket.Conn
 
-	pc   *webrtc.PeerConnection
-	rm   *room.Room
-	role auth.Role
+	pc         *webrtc.PeerConnection
+	rm         *room.Room
+	role       auth.Role
+	pendingICE []string // ICE candidates received before PUBLISH/SUBSCRIBE
 }
 
 func (s *session) run() {
+	// WebSocket keepalive: browsers respond automatically to server pings with
+	// a pong. Without this, Fly.io's proxy and home NAT devices will silently
+	// drop idle connections after roughly 1 hour.
+	_ = s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
+	s.conn.SetPongHandler(func(string) error {
+		return s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
+	})
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(wsKeepAlivePingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.wmu.Lock()
+				err := s.conn.WriteMessage(websocket.PingMessage, nil)
+				s.wmu.Unlock()
+				if err != nil {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	for {
 		var msg signaling.ClientMessage
 		if err := s.conn.ReadJSON(&msg); err != nil {
 			return
 		}
+		// Any received message resets the read deadline.
+		_ = s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
 		switch msg.Type {
 		case signaling.TypePublish, signaling.TypeSubscribe:
 			s.handleJoin(msg)
@@ -568,6 +610,16 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		}
 		s.srv.Metrics.ListenerCount.Add(1)
 
+		// Late-join key delivery (ADR-014): if a KEY_EXCHANGE was received
+		// before this listener joined, forward the stored key immediately so
+		// this listener can decrypt from the first packet.
+		if existingKey := rm.GetKey(); existingKey != nil {
+			s.send(signaling.ServerMessage{
+				Type:      signaling.TypeKeyExchange,
+				SFrameKey: base64.StdEncoding.EncodeToString(existingKey),
+			})
+		}
+
 		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (ADR-021).
 		// Also track sustained high loss and emit ICE_RESTART when needed (spec §10.4).
 		hintState := s.srv.roomCodecHintState(claims.RoomID)
@@ -604,11 +656,20 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		ListenerCount: rm.ListenerCount(),
 		Codec:         "opus",
 	})
+
+	// Apply any ICE candidates that arrived before this PUBLISH/SUBSCRIBE
+	// was processed (browser ICE gathering can race the signaling message).
+	for _, c := range s.pendingICE {
+		_ = s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: c})
+	}
+	s.pendingICE = nil
 }
 
 func (s *session) handleICE(msg signaling.ClientMessage) {
 	if s.pc == nil {
-		s.sendError("not_joined", "join a room before sending ICE candidates")
+		// PUBLISH/SUBSCRIBE has not been processed yet. Queue the candidate
+		// so it can be applied once the peer connection is created.
+		s.pendingICE = append(s.pendingICE, msg.Candidate)
 		return
 	}
 	if err := s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: msg.Candidate}); err != nil {
@@ -646,11 +707,21 @@ func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 	}
 	s.srv.mu.Unlock()
 
-	// Deliver to all listener sessions in this room.
+	// Deliver to all current listener sessions in this room.
 	for _, sess := range sessions {
 		if sess.id != s.id && sess.rm != nil && sess.rm.ID == s.rm.ID &&
 			sess.role == auth.RoleListener {
 			sess.send(forward)
+		}
+	}
+
+	// Persist the key so late-joining listeners receive it immediately on
+	// SUBSCRIBE (ADR-014). Decode from base64 to raw bytes for storage;
+	// re-encode on delivery so the wire format is always base64.
+	if msg.SFrameKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(msg.SFrameKey)
+		if err == nil {
+			s.rm.SetKey(keyBytes)
 		}
 	}
 }
@@ -778,11 +849,15 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 	if s.srv.api != nil {
 		// Test path: use the injected loopback API as-is.
 		pc, err = s.srv.api.NewPeerConnection(pcCfg)
-	} else if s.srv.iceTCPMux != nil {
-		// Production with ICE-TCP: build a SettingEngine to add the TCP mux
-		// and announce the relay's public IP in host candidates.
+	} else if s.srv.iceTCPMux != nil || len(s.srv.nat1to1IPs) > 0 {
+		// Production path: build a SettingEngine when either ICE-TCP mux or
+		// NAT1To1 IP overrides are configured. Both may be set independently:
+		// NAT1To1IPs alone is used when RELAY_PUBLIC_IPS is set without
+		// ICE_TCP_PORT (e.g. E2E tests forcing loopback candidates).
 		se := webrtc.SettingEngine{}
-		se.SetICETCPMux(s.srv.iceTCPMux)
+		if s.srv.iceTCPMux != nil {
+			se.SetICETCPMux(s.srv.iceTCPMux)
+		}
 		if len(s.srv.nat1to1IPs) > 0 {
 			se.SetNAT1To1IPs(s.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)
 		}
