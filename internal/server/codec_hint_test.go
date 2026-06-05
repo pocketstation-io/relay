@@ -1,13 +1,23 @@
 package server
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/pocketstation-io/relay/internal/auth"
+	"github.com/pocketstation-io/relay/internal/room"
+	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
 // Pure-function unit tests for the D13 codec-hint logic (ADR-021).
-// Integration of maybeEmitCodecHint with live WebSocket sessions is covered
-// by test/integration/echo_test.go which already exercises the signaling path.
+// End-to-end WebSocket delivery is covered by
+// TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource.
 
 func TestGiven_ZeroLoss_When_BitrateForLoss_Then_HighTier(t *testing.T) {
 	hint := bitrateForLoss(0.0)
@@ -119,5 +129,142 @@ func TestGiven_TwoRooms_When_RoomCodecHintState_Then_DifferentPointers(t *testin
 	s2 := srv.roomCodecHintState("room-b")
 	if s1 == s2 {
 		t.Fatal("different rooms must have different *codecHintState instances")
+	}
+}
+
+// TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
+// verifies the end-to-end path from RTCP RR high-loss detection through
+// maybeEmitCodecHint to actual CODEC_HINT delivery on the source WebSocket.
+//
+// Setup: a real gorilla WebSocket pair (source side) is injected directly into
+// Server.sessions so the white-box call to maybeEmitCodecHint can find it.
+// The debounce is cleared (lastSent = zero) so the first call always emits.
+//
+// The RTCP→sender.ReadRTCP path that calls maybeEmitCodecHint is exercised via
+// startRTCPReader. Here we call maybeEmitCodecHint directly with the computed
+// CodecHintPayload for >5% loss, which is the value startRTCPReader would pass
+// after parsing a ReceiverReport with FractionLost > 13 (13/256 ≈ 5.1%).
+func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource(t *testing.T) {
+	const roomID = "room-codec-hint-e2e"
+
+	// --- Given: a WebSocket pair representing the source connection. ---
+	//
+	// We spin up a minimal HTTP server that upgrades the connection, capture
+	// the server-side *websocket.Conn, and inject it as the source session.
+	serverConnCh := make(chan *websocket.Conn, 1)
+	wsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnCh <- conn
+	})
+	// Use IPv4 listener explicitly: httptest.NewServer may prefer ::1 on macOS,
+	// which can be blocked in sandbox environments.
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	wsServer := httptest.NewUnstartedServer(wsHandler)
+	wsServer.Listener = l
+	wsServer.Start()
+	defer wsServer.Close()
+
+	u, _ := url.Parse(wsServer.URL)
+	u.Scheme = "ws"
+	clientConn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatalf("dial WebSocket: %v", err)
+	}
+	defer clientConn.Close()
+
+	serverConn := <-serverConnCh
+	defer serverConn.Close()
+
+	// Build a relay Server whose sessions map contains one source session
+	// backed by the server-side WebSocket conn.
+	srv := &Server{sessions: make(map[string]*session)}
+	rm := room.New(roomID)
+	defer rm.Close()
+
+	sourceSess := &session{
+		id:   "src-session-e2e",
+		srv:  srv,
+		conn: serverConn,
+		rm:   rm,
+		role: auth.RoleSource,
+	}
+	srv.mu.Lock()
+	srv.sessions[sourceSess.id] = sourceSess
+	srv.mu.Unlock()
+
+	// Drain source WebSocket messages into a buffered channel.
+	received := make(chan signaling.ServerMessage, 8)
+	var drainOnce sync.Once
+	go func() {
+		defer drainOnce.Do(func() { close(received) })
+		for {
+			var msg signaling.ServerMessage
+			if err := clientConn.ReadJSON(&msg); err != nil {
+				return
+			}
+			received <- msg
+		}
+	}()
+
+	// --- When: maybeEmitCodecHint is called with a high-loss CodecHintPayload
+	// and a cleared debounce state (simulating what startRTCPReader does after
+	// parsing a ReceiverReport where FractionLost/256 > lossHighThreshold). ---
+	//
+	// fractionLost = 14/256 ≈ 5.47% → above lossHighThreshold (5%) → low tier.
+	const rtcpFractionLost = uint8(14) // 14/256 ≈ 5.47%
+	fractionLost := float64(rtcpFractionLost) / 256.0
+	hint := bitrateForLoss(fractionLost)
+
+	state := &codecHintState{} // lastSent is zero → debounce not active
+	srv.maybeEmitCodecHint(roomID, hint, state)
+
+	// --- Then: the source WebSocket receives a CODEC_HINT with the low tier. ---
+	select {
+	case msg, ok := <-received:
+		if !ok {
+			t.Fatal("source WebSocket closed before receiving CODEC_HINT")
+		}
+		if msg.Type != signaling.TypeCodecHint {
+			t.Fatalf("want message type CODEC_HINT, got %q", msg.Type)
+		}
+		if msg.CodecHint == nil {
+			t.Fatal("CODEC_HINT message has nil codec_hint payload")
+		}
+		if msg.CodecHint.BitRateKbps != bitrateLowKbps {
+			t.Errorf("want bitrate %d kbps (low tier for >5%% loss), got %d",
+				bitrateLowKbps, msg.CodecHint.BitRateKbps)
+		}
+		if !msg.CodecHint.Fec {
+			t.Error("want fec=true at high loss tier")
+		}
+		if !msg.CodecHint.Dtx {
+			t.Error("want dtx=true at high loss tier")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for CODEC_HINT on source WebSocket")
+	}
+
+	// Verify the debounce state was updated: a second call within 2s must not
+	// emit another message.
+	srv.maybeEmitCodecHint(roomID, hint, state)
+	select {
+	case msg := <-received:
+		t.Fatalf("unexpected second CODEC_HINT within debounce window: %+v", msg)
+	case <-time.After(100 * time.Millisecond):
+		// Pass: no second message arrived.
+	}
+
+	// Close the server-side conn so the drain goroutine exits cleanly.
+	serverConn.Close()
+	clientConn.Close()
+
+	// Wait for the drain goroutine so the test does not exit with a live goroutine.
+	for range received {
 	}
 }

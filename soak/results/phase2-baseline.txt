@@ -1,11 +1,11 @@
 # Phase 2 soak baseline
-# Generated: 2026-06-01
+# Generated: 2026-06-05
 # Platform: darwin/arm64 (Apple M5)
 # Configuration: 1 publisher + 50 listeners, 30-minute run
 
-goroutines start=3270 5min=3267 15min=3267 30min=3266 delta(5→30)=-1
-rss_mb     start=93 5min=97 15min=102 30min=110 growth(5→30)=13.0%
-packets_forwarded=89435 packets_dropped=0 listener_count=0
+goroutines start=3321 5min=3318 15min=3318 30min=3318 delta(5→30)=0
+rss_mb     start=97 5min=97 15min=101 30min=101 growth(5→30)=4.2%
+packets_forwarded=90382 packets_dropped=0 listener_count=0
 race_detector=clean (enforced by -race flag)
-goroutine_leak=PASS (delta -1 <= limit 20)
+goroutine_leak=PASS (delta 0 <= limit 20)
 rss_growth=PASS

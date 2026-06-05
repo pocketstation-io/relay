@@ -11,12 +11,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -387,7 +389,7 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 	go func() {
 		var seq uint16
 		var ts uint32
-		ticker := time.NewTicker(10 * time.Millisecond)
+		ticker := time.NewTicker(1 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -409,9 +411,6 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 		}
 	}()
 	defer close(sendStop)
-
-	// Brief pause so the relay's forwardLoop starts before the subscriber dials.
-	time.Sleep(100 * time.Millisecond)
 
 	// --- Subscriber setup ---
 	subConn := dialSignal(t, ts)
@@ -485,6 +484,161 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 
 	_ = pubConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 	_ = subConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
+}
+
+// TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms
+// verifies the relay's per-packet forwarding latency by embedding a send
+// timestamp in the first 8 bytes of each RTP payload and measuring the delta
+// when the packet arrives at the subscriber. P99 must be under 1 ms for
+// loopback connections where SRTP crypto and UDP round-trips are all in-process.
+//
+// Warmup packets use a zero timestamp and are skipped by the receiver goroutine,
+// so a single ReadRTP loop is used throughout — no drain race.
+func TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
+	}
+	const (
+		warmupPackets   = 10
+		measuredPackets = 50
+		p99Gate         = time.Millisecond
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ts, clientAPI := newTestServer(t)
+
+	roomPayload := createRoom(t, ts)
+	sourceToken := roomPayload["source_token"]
+	listenerToken := roomPayload["listener_token"]
+
+	// --- Publisher ---
+	pubConn := dialSignal(t, ts)
+	pubMsgs := readServerMessages(pubConn)
+	pubPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create publisher PC: %v", err)
+	}
+	defer pubPC.Close()
+
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio", "latency-pub",
+	)
+	if err != nil {
+		t.Fatalf("create track: %v", err)
+	}
+	if _, err := pubPC.AddTrack(audioTrack); err != nil {
+		t.Fatalf("add track: %v", err)
+	}
+
+	doPublishHandshake(t, pubConn, pubPC, sourceToken, pubMsgs, 10*time.Second)
+	waitICEConnected(ctx, t, pubPC)
+
+	// --- Subscriber ---
+	subConn := dialSignal(t, ts)
+	subMsgs := readServerMessages(subConn)
+	subPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create subscriber PC: %v", err)
+	}
+	defer subPC.Close()
+
+	trackCh := make(chan *webrtc.TrackRemote, 1)
+	subPC.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		select {
+		case trackCh <- track:
+		default:
+		}
+	})
+
+	doSubscribeHandshake(t, subConn, subPC, listenerToken, subMsgs, 10*time.Second)
+	waitICEConnected(ctx, t, subPC)
+
+	// payload is re-used for every packet. The first 8 bytes hold the send
+	// timestamp (big-endian uint64 Unix-nano). Zero means "warmup — skip".
+	payload := make([]byte, 200)
+	var seq uint16
+	var rtpTS uint32
+
+	sendPacket := func(stampNs uint64) {
+		binary.BigEndian.PutUint64(payload[:8], stampNs)
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version: 2, PayloadType: 111,
+				SequenceNumber: seq, Timestamp: rtpTS,
+				SSRC: 0xCAFEBABE,
+			},
+			Payload: payload,
+		}
+		_ = audioTrack.WriteRTP(pkt)
+		seq++
+		rtpTS += 960
+	}
+
+	// Warmup: zero timestamp — triggers relay OnTrack/forwardLoop without
+	// polluting the latency sample set.
+	for i := 0; i < warmupPackets; i++ {
+		sendPacket(0)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Wait for relay OnTrack to fire (forwardLoop is now running).
+	var remoteTrack *webrtc.TrackRemote
+	select {
+	case remoteTrack = <-trackCh:
+	case <-ctx.Done():
+		t.Fatalf("OnTrack timeout waiting for warmup packets: %v", ctx.Err())
+	}
+
+	// Single receiver goroutine: skips zero-timestamp warmup packets and
+	// collects latencies for measured packets. No second goroutine reads
+	// remoteTrack, so there is no drain race.
+	latencies := make([]time.Duration, 0, measuredPackets)
+	recvDone := make(chan struct{})
+	go func() {
+		defer close(recvDone)
+		for len(latencies) < measuredPackets {
+			pkt, _, err := remoteTrack.ReadRTP()
+			if err != nil || len(pkt.Payload) < 8 {
+				return
+			}
+			sentNs := int64(binary.BigEndian.Uint64(pkt.Payload[:8]))
+			if sentNs == 0 {
+				continue // warmup packet — discard
+			}
+			latencies = append(latencies, time.Duration(time.Now().UnixNano()-sentNs))
+		}
+	}()
+
+	// Measurement phase: embed real send timestamps.
+	for i := 0; i < measuredPackets; i++ {
+		sendPacket(uint64(time.Now().UnixNano()))
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	select {
+	case <-recvDone:
+	case <-ctx.Done():
+		t.Fatalf("context expired collecting latency measurements: %v", ctx.Err())
+	}
+
+	if len(latencies) == 0 {
+		t.Fatal("no latency measurements collected")
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	p50 := latencies[len(latencies)/2]
+	p95 := latencies[int(float64(len(latencies))*0.95)]
+	p99 := latencies[int(float64(len(latencies))*0.99)]
+
+	t.Logf("RTP forwarding latency (loopback SRTP): N=%d P50=%v P95=%v P99=%v",
+		len(latencies), p50, p95, p99)
+
+	if p99 > p99Gate {
+		t.Errorf("P99 forwarding latency %v exceeds %v gate", p99, p99Gate)
+	}
 }
 
 // Ensure unused imports compile.
