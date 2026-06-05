@@ -8,7 +8,8 @@
 // for the relay forwarding path.
 //
 // What this measures:
-//   source_encode → local_send → relay_receive → relay_forward → local_receive
+//
+//	source_encode → local_send → relay_receive → relay_forward → local_receive
 //
 // What this does NOT claim:
 //   - Cross-machine one-way latency (needs NTP/PTP clock sync)
@@ -16,7 +17,8 @@
 //   - Competitor comparisons (that requires running under identical conditions)
 //
 // Usage:
-//   go run ./cmd/media-bench/ --relay https://pocketstation-relay.fly.dev
+//
+//	go run ./cmd/media-bench/ --relay https://pocketstation-relay.fly.dev
 package main
 
 import (
@@ -68,8 +70,8 @@ type sample struct {
 
 func main() {
 	relayBase := flag.String("relay", "http://localhost:8080", "relay base URL")
-	n         := flag.Int("n", 200, "RTP packets to measure (after warmup)")
-	fanout    := flag.Int("fanout", 1, "number of subscriber peers")
+	n := flag.Int("n", 200, "RTP packets to measure (after warmup)")
+	fanout := flag.Int("fanout", 1, "number of subscriber peers")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -79,8 +81,8 @@ func main() {
 
 	fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  PocketStation Real Media-Path Benchmark                          ║")
-	fmt.Printf( "║  Relay:   %s\n", *relayBase+"                             ║")
-	fmt.Printf( "║  Packets: %d measured + %d warmup  Fanout: %d subscriber(s)\n", *n, warmupPackets, *fanout)
+	fmt.Printf("║  Relay:   %s\n", *relayBase+"                             ║")
+	fmt.Printf("║  Packets: %d measured + %d warmup  Fanout: %d subscriber(s)\n", *n, warmupPackets, *fanout)
 	fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 	fmt.Println("  What is measured: source RTP send → relay forward → subscriber receive")
@@ -93,13 +95,13 @@ func main() {
 	fmt.Printf("  Room: %s\n\n", room)
 
 	total := warmupPackets + *n
-	sentTimes   := make(map[uint16]time.Time, total)
-	var sentMu  sync.Mutex
+	sentTimes := make(map[uint16]time.Time, total)
+	var sentMu sync.Mutex
 
 	// Collect one RTT sample per subscriber per packet seq
 	type subResult struct {
-		seq  uint16
-		rtt  time.Duration
+		seq uint16
+		rtt time.Duration
 	}
 	results := make([]time.Duration, 0, *n**fanout)
 	var resultsMu sync.Mutex
@@ -115,7 +117,9 @@ func main() {
 				var count int
 				for {
 					pkt, _, err := track.ReadRTP()
-					if err != nil { return }
+					if err != nil {
+						return
+					}
 					recvTime := time.Now()
 					seq := pkt.Header.SequenceNumber
 
@@ -123,13 +127,17 @@ func main() {
 					sent, ok := sentTimes[seq]
 					sentMu.Unlock()
 
-					if !ok || pkt.Header.SequenceNumber < uint16(warmupPackets) { continue }
+					if !ok || pkt.Header.SequenceNumber < uint16(warmupPackets) {
+						continue
+					}
 					rtt := recvTime.Sub(sent)
 					resultsMu.Lock()
 					results = append(results, rtt)
 					resultsMu.Unlock()
 					count++
-					if count >= *n { return }
+					if count >= *n {
+						return
+					}
 				}
 			})
 			subscribe(logger, pc, wsBase, room, lstToken)
@@ -153,7 +161,7 @@ func main() {
 
 	// Send packets
 	var seqNum uint16
-	var ts     uint32
+	var ts uint32
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 
@@ -196,7 +204,9 @@ func main() {
 		resultsMu.Lock()
 		done := len(results) >= *n**fanout
 		resultsMu.Unlock()
-		if done { break }
+		if done {
+			break
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -215,15 +225,17 @@ func main() {
 	sort.Slice(rtts, func(i, j int) bool { return rtts[i] < rtts[j] })
 	p := func(pct float64) time.Duration {
 		idx := int(math.Ceil(pct/100.0*float64(len(rtts)))) - 1
-		if idx < 0 { idx = 0 }
+		if idx < 0 {
+			idx = 0
+		}
 		return rtts[idx]
 	}
 
 	rttP50 := p(50)
 	rttP95 := p(95)
 	rttP99 := p(99)
-	owP50  := rttP50 / 2
-	owP95  := rttP95 / 2
+	owP50 := rttP50 / 2
+	owP95 := rttP95 / 2
 
 	fmt.Printf("  Packets received: %d / %d expected\n", len(rtts), *n**fanout)
 	fmt.Println()
@@ -275,7 +287,11 @@ func waitICE(pc *webrtc.PeerConnection) {
 	ch := make(chan struct{})
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		if s == webrtc.ICEConnectionStateConnected || s == webrtc.ICEConnectionStateCompleted {
-			select { case <-ch: default: close(ch) }
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
 		}
 	})
 	select {
@@ -288,7 +304,9 @@ func waitICE(pc *webrtc.PeerConnection) {
 
 func dialWS(wsBase, room, token, sdpOffer string) (*websocket.Conn, error) {
 	conn, _, err := websocket.DefaultDialer.Dial(wsBase+"/v1/signal", nil)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return conn, nil
 }
 
@@ -308,14 +326,18 @@ func publish(logger *slog.Logger, pc *webrtc.PeerConnection, wsBase, room, token
 	}), "send PUBLISH")
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil { return }
+		if c == nil {
+			return
+		}
 		conn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeIce, Candidate: c.ToJSON().Candidate})
 	})
 
 	go func() {
 		for {
 			var msg signaling.ServerMessage
-			if err := conn.ReadJSON(&msg); err != nil { return }
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
 			switch msg.Type {
 			case signaling.TypeSDPAnswer:
 				must(pc.SetRemoteDescription(webrtc.SessionDescription{
@@ -351,14 +373,18 @@ func subscribe(logger *slog.Logger, pc *webrtc.PeerConnection, wsBase, room, tok
 	}), "send SUBSCRIBE")
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil { return }
+		if c == nil {
+			return
+		}
 		conn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeIce, Candidate: c.ToJSON().Candidate})
 	})
 
 	go func() {
 		for {
 			var msg signaling.ServerMessage
-			if err := conn.ReadJSON(&msg); err != nil { return }
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
 			switch msg.Type {
 			case signaling.TypeSDPAnswer:
 				must(pc.SetRemoteDescription(webrtc.SessionDescription{
