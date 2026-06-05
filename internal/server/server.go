@@ -105,15 +105,15 @@ type Config struct {
 
 // Server is the top-level relay server.
 type Server struct {
-	rooms              *room.Manager
-	jwtSecret          []byte
-	api                *webrtc.API
-	Metrics            *metrics.Registry
-	callbackClient     *callback.Client
-	webhookDispatcher  *webhook.Dispatcher
-	iceServers         []webrtc.ICEServer
-	iceTCPMux          pionIce.TCPMux
-	nat1to1IPs         []string
+	rooms             *room.Manager
+	jwtSecret         []byte
+	api               *webrtc.API
+	Metrics           *metrics.Registry
+	callbackClient    *callback.Client
+	webhookDispatcher *webhook.Dispatcher
+	iceServers        []webrtc.ICEServer
+	iceTCPMux         pionIce.TCPMux
+	nat1to1IPs        []string
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
 	// Both are set once at construction and never written again.

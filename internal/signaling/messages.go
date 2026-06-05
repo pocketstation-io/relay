@@ -3,13 +3,13 @@ package signaling
 type MessageType string
 
 const (
-	TypePublish     MessageType = "PUBLISH"
-	TypeSubscribe   MessageType = "SUBSCRIBE"
-	TypeIce         MessageType = "ICE"
-	TypeLeave       MessageType = "LEAVE"
-	TypeSDPAnswer   MessageType = "SDP_ANSWER"
-	TypeRoomState   MessageType = "ROOM_STATE"
-	TypeError       MessageType = "ERROR"
+	TypePublish   MessageType = "PUBLISH"
+	TypeSubscribe MessageType = "SUBSCRIBE"
+	TypeIce       MessageType = "ICE"
+	TypeLeave     MessageType = "LEAVE"
+	TypeSDPAnswer MessageType = "SDP_ANSWER"
+	TypeRoomState MessageType = "ROOM_STATE"
+	TypeError     MessageType = "ERROR"
 	// TypeKeyExchange is sent by the source to distribute an SFrame encryption
 	// key to all listeners (ADR-014). The relay forwards the message to every
 	// listener in the room without reading the key material.
@@ -82,18 +82,18 @@ type ClientMessage struct {
 }
 
 type ServerMessage struct {
-	Type          MessageType       `json:"type"`
-	SDPAnswer     string            `json:"sdp_answer,omitempty"`
-	Candidate     string            `json:"candidate,omitempty"`
-	SourceActive  bool              `json:"source_active,omitempty"`
-	ListenerCount int               `json:"listener_count,omitempty"`
-	Codec         string            `json:"codec,omitempty"`
-	Code          string            `json:"code,omitempty"`
-	Message       string            `json:"message,omitempty"`
+	Type          MessageType `json:"type"`
+	SDPAnswer     string      `json:"sdp_answer,omitempty"`
+	Candidate     string      `json:"candidate,omitempty"`
+	SourceActive  bool        `json:"source_active,omitempty"`
+	ListenerCount int         `json:"listener_count,omitempty"`
+	Codec         string      `json:"codec,omitempty"`
+	Code          string      `json:"code,omitempty"`
+	Message       string      `json:"message,omitempty"`
 	// SFrameKey is populated on KEY_EXCHANGE forwards from source to listeners.
-	SFrameKey     string            `json:"sframe_key,omitempty"`
+	SFrameKey string `json:"sframe_key,omitempty"`
 	// CodecHint is populated on CODEC_HINT messages from relay to source.
-	CodecHint     *CodecHintPayload `json:"codec_hint,omitempty"`
+	CodecHint *CodecHintPayload `json:"codec_hint,omitempty"`
 	// UseTURN is set to true on ICE_RESTART messages when the relay has an
 	// embedded TURN server configured. The source should prefer TURN relay
 	// candidates on the next ICE negotiation (spec §10.4, ADR-023).

@@ -20,14 +20,14 @@ import (
 )
 
 const (
-	defaultURL      = "ws://localhost:8080/v1/echo"
-	defaultN        = 200
-	defaultP95Gate  = 250 * time.Millisecond
+	defaultURL     = "ws://localhost:8080/v1/echo"
+	defaultN       = 200
+	defaultP95Gate = 250 * time.Millisecond
 )
 
 func main() {
-	url     := flag.String("url", defaultURL, "relay echo WebSocket URL")
-	n       := flag.Int("n", defaultN, "number of round trips")
+	url := flag.String("url", defaultURL, "relay echo WebSocket URL")
+	n := flag.Int("n", defaultN, "number of round trips")
 	p95gate := flag.Duration("p95-gate", defaultP95Gate, "fail if P95 RTT exceeds this")
 	flag.Parse()
 

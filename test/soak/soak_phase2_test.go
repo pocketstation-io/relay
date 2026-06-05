@@ -46,7 +46,7 @@ func newIPv4Server(handler http.Handler) *httptest.Server {
 const (
 	phase2ListenerCount   = 50
 	phase2SoakDuration    = 30 * time.Minute
-	phase2GoroutineSlop   = 20  // larger window: 50 PCs have more variance than 1
+	phase2GoroutineSlop   = 20 // larger window: 50 PCs have more variance than 1
 	phase2RSSGrowthBudget = 0.20
 )
 
