@@ -238,6 +238,11 @@ type Room struct {
 	// createdAt records when the room was created. Set once in newWithTimeouts.
 	createdAt time.Time
 
+	// keyMu guards currentKey for SFrame E2EE (ADR-014).
+	// Separate from listenersMu so key reads never contend with listener I/O.
+	keyMu      sync.RWMutex
+	currentKey []byte
+
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
@@ -596,6 +601,30 @@ func (r *Room) RecordLatency(captureMs, encodeMs, relayRttMs, jitterBufferMs, de
 // GetLatencyStats returns the current rolling P50 latency statistics for the room.
 func (r *Room) GetLatencyStats() LatencyStats {
 	return r.latency.stats()
+}
+
+// SetKey stores the SFrame room key received via KEY_EXCHANGE (ADR-014).
+// The relay stores the key opaquely so late-joining listeners can receive it.
+// The relay does NOT interpret or decrypt with this key.
+func (r *Room) SetKey(key []byte) {
+	r.keyMu.Lock()
+	defer r.keyMu.Unlock()
+	cp := make([]byte, len(key))
+	copy(cp, key)
+	r.currentKey = cp
+}
+
+// GetKey returns a copy of the current SFrame room key, or nil if no key has
+// been received yet. The caller owns the returned slice.
+func (r *Room) GetKey() []byte {
+	r.keyMu.RLock()
+	defer r.keyMu.RUnlock()
+	if r.currentKey == nil {
+		return nil
+	}
+	cp := make([]byte, len(r.currentKey))
+	copy(cp, r.currentKey)
+	return cp
 }
 
 // CloseAll closes every active room and removes it from the manager.

@@ -716,3 +716,76 @@ func TestLatencyReportRollingWindowEvictsOldestSamples(t *testing.T) {
 		t.Errorf("SampleCount = %d, want %d", stats.SampleCount, latencyWindowSize)
 	}
 }
+
+// TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy verifies that
+// SetKey stores the key and GetKey returns an independent copy (ADR-014).
+func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy(t *testing.T) {
+	// Given
+	r := New("key-room")
+	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+
+	// When
+	r.SetKey(want)
+	got := r.GetKey()
+
+	// Then — value matches.
+	if len(got) != len(want) {
+		t.Fatalf("GetKey length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("GetKey[%d] = %#x, want %#x", i, got[i], want[i])
+		}
+	}
+
+	// Then — mutating the returned slice does not affect the stored key.
+	got[0] = 0xff
+	second := r.GetKey()
+	if second[0] == 0xff {
+		t.Error("GetKey returned a reference to the internal slice; expected an independent copy")
+	}
+}
+
+// TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil verifies that GetKey
+// returns nil before any KEY_EXCHANGE has been received (ADR-014).
+func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
+	// Given / When
+	r := New("no-key-room")
+
+	// Then
+	if got := r.GetKey(); got != nil {
+		t.Errorf("GetKey = %v, want nil", got)
+	}
+}
+
+// TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable
+// verifies the end-to-end room-level contract: after SetKey is called,
+// GetKey returns the key so server.go can forward it to late-joining listeners.
+func TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable(t *testing.T) {
+	// Given — a key has been stored before the listener joins.
+	r := New("late-join-room")
+	key := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe,
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	r.SetKey(key)
+
+	// When — a listener joins after the key has been stored.
+	l := &mockListener{}
+	if err := r.AddListener("late-peer", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
+
+	// Then — GetKey returns the stored key so the server can forward it.
+	retrieved := r.GetKey()
+	if retrieved == nil {
+		t.Fatal("GetKey returned nil; late-joining listener would not receive key")
+	}
+	if len(retrieved) != len(key) {
+		t.Fatalf("GetKey length = %d, want %d", len(retrieved), len(key))
+	}
+	for i := range key {
+		if retrieved[i] != key[i] {
+			t.Errorf("GetKey[%d] = %#x, want %#x", i, retrieved[i], key[i])
+		}
+	}
+}
