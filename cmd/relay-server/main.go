@@ -41,7 +41,7 @@ func main() {
 	iceServers, turnSrv := setupTURN(jwtSecret)
 	useTURN := len(iceServers) > 0
 
-	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)            // 0 → package default (30 min)
+	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)              // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
 	maxListenersPerRoom := getenvInt("MAX_LISTENERS_PER_ROOM", 0)     // 0 → unlimited
 
