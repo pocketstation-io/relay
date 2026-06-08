@@ -422,33 +422,11 @@ type session struct {
 }
 
 func (s *session) run() {
-	// WebSocket keepalive: browsers respond automatically to server pings with
-	// a pong. Without this, Fly.io's proxy and home NAT devices will silently
-	// drop idle connections after roughly 1 hour.
 	_ = s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
-	s.conn.SetPongHandler(func(string) error {
-		return s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
-	})
 
 	done := make(chan struct{})
 	defer close(done)
-	go func() {
-		ticker := time.NewTicker(wsKeepAlivePingInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.wmu.Lock()
-				err := s.conn.WriteMessage(websocket.PingMessage, nil)
-				s.wmu.Unlock()
-				if err != nil {
-					return
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
+	startKeepalive(s.conn, &s.wmu, done)
 
 	for {
 		var msg signaling.ClientMessage
@@ -674,55 +652,6 @@ func (s *session) handleICE(msg signaling.ClientMessage) {
 	}
 	if err := s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: msg.Candidate}); err != nil {
 		s.sendError("ice_error", err.Error())
-	}
-}
-
-// handleKeyExchange forwards an SFrame KEY_EXCHANGE message from the source to
-// all listeners in the room (ADR-014). The relay does NOT read the key material:
-// it copies SFrameKey verbatim into a ServerMessage and sends it to every
-// current listener session. This preserves the SFrame guarantee that the relay
-// is never in possession of plaintext audio.
-//
-// Invariant: only the source role may send KEY_EXCHANGE. Listener-sourced
-// KEY_EXCHANGE messages are rejected with a role_mismatch error.
-func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
-	if s.role != auth.RoleSource {
-		s.sendError("role_mismatch", "KEY_EXCHANGE requires a source token")
-		return
-	}
-	if s.rm == nil {
-		s.sendError("not_joined", "join a room before sending KEY_EXCHANGE")
-		return
-	}
-
-	forward := signaling.ServerMessage{
-		Type:      signaling.TypeKeyExchange,
-		SFrameKey: msg.SFrameKey,
-	}
-
-	s.srv.mu.Lock()
-	sessions := make([]*session, 0, len(s.srv.sessions))
-	for _, sess := range s.srv.sessions {
-		sessions = append(sessions, sess)
-	}
-	s.srv.mu.Unlock()
-
-	// Deliver to all current listener sessions in this room.
-	for _, sess := range sessions {
-		if sess.id != s.id && sess.rm != nil && sess.rm.ID == s.rm.ID &&
-			sess.role == auth.RoleListener {
-			sess.send(forward)
-		}
-	}
-
-	// Persist the key so late-joining listeners receive it immediately on
-	// SUBSCRIBE (ADR-014). Decode from base64 to raw bytes for storage;
-	// re-encode on delivery so the wire format is always base64.
-	if msg.SFrameKey != "" {
-		keyBytes, err := base64.StdEncoding.DecodeString(msg.SFrameKey)
-		if err == nil {
-			s.rm.SetKey(keyBytes)
-		}
 	}
 }
 
