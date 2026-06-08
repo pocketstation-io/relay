@@ -16,3 +16,5 @@ fake-source
 relay-server
 benchmark
 media-bench
+.claude/
+soak/results/
