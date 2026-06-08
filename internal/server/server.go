@@ -32,14 +32,13 @@ import (
 // connections to complete after receiving a shutdown signal.
 const shutdownDrainTimeout = 5 * time.Second
 
-// wsKeepAlivePingInterval is how often the relay sends a WebSocket ping to
-// each connected peer. Browsers respond automatically with a pong.
-// This prevents Fly.io's proxy and home NAT devices from silently dropping
-// idle TCP connections after their inactivity timeout (~1 hour).
+// wsKeepAlivePingInterval is how often the relay sends a WebSocket ping.
+// 30 s is a conservative default that fits well inside the 60 s–2 min idle-
+// eviction window common on NAT devices, load balancers, and reverse proxies.
 const wsKeepAlivePingInterval = 30 * time.Second
 
-// wsKeepAliveTimeout is the maximum time the relay waits for a pong reply
-// before treating the connection as dead and closing it.
+// wsKeepAliveTimeout is the maximum time allowed between a sent ping and the
+// expected pong reply. Connection is treated as dead after this deadline.
 const wsKeepAliveTimeout = 90 * time.Second
 
 // defaultMaxRooms is the default room-count limit when RELAY_MAX_ROOMS is unset.
@@ -422,11 +421,34 @@ type session struct {
 }
 
 func (s *session) run() {
+	// WebSocket keepalive — NAT devices and reverse proxies evict idle TCP
+	// connections (typically 60 s–a few hours). Sending a ping every
+	// wsKeepAlivePingInterval forces a round-trip that resets those timers.
+	// Browsers and most WebSocket clients respond to server pings automatically.
+	// TODO(phase-5): expose PingInterval + PongTimeout via Config.
 	_ = s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
-
+	s.conn.SetPongHandler(func(string) error {
+		return s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
+	})
 	done := make(chan struct{})
 	defer close(done)
-	startKeepalive(s.conn, &s.wmu, done)
+	go func() {
+		ticker := time.NewTicker(wsKeepAlivePingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.wmu.Lock()
+				err := s.conn.WriteMessage(websocket.PingMessage, nil)
+				s.wmu.Unlock()
+				if err != nil {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	for {
 		var msg signaling.ClientMessage
