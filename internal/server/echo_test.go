@@ -13,7 +13,7 @@ import (
 )
 
 // TestGiven_EchoEndpoint_When_SendTimestamp_Then_Reflected verifies the /v1/echo
-// endpoint (ADR-020): sends a send_timestamp_ns and asserts the relay reflects
+// endpoint (RELAY-020): sends a send_timestamp_ns and asserts the relay reflects
 // it back alongside a recv_timestamp_ns that is >= send_timestamp_ns.
 func TestGiven_EchoEndpoint_When_SendTimestamp_Then_Reflected(t *testing.T) {
 	// Given
