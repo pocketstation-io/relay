@@ -13,7 +13,7 @@ import (
 
 // TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned verifies
 // that POST /v1/rooms includes the ice_servers field when the server is
-// configured with ICE servers (ADR-023).
+// configured with ICE servers (RELAY-023).
 func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing.T) {
 	// Given — server with TURN ice servers configured
 	turnServers := []webrtc.ICEServer{
@@ -57,7 +57,7 @@ func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing
 	}
 	rawICE, ok := body["ice_servers"]
 	if !ok {
-		t.Fatal("response missing ice_servers field (ADR-023: TURN servers not returned)")
+		t.Fatal("response missing ice_servers field (RELAY-023: TURN servers not returned)")
 	}
 
 	var iceList []map[string]any

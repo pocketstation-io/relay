@@ -144,7 +144,7 @@ type Source interface {
 
 // Listener is the write-side of a delivered audio stream.
 // *webrtc.TrackLocalStaticRTP satisfies this interface directly.
-// The interface boundary also enables ADR-009 benchmarking with mock listeners.
+// The interface boundary also enables RELAY-009 benchmarking with mock listeners.
 type Listener interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
@@ -175,7 +175,7 @@ type listenerEntry struct {
 //
 // Ownership: Room is created open. Callers call Close to terminate it.
 // Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
-// Phase scope: ADR-005 copy-on-write + room expiry + source reconnect (Phase 2).
+// Phase scope: RELAY-005 copy-on-write + room expiry + source reconnect (Phase 2).
 //
 // Intentionally not implemented: automatic room cleanup on last-peer-leave.
 type Room struct {
@@ -238,7 +238,7 @@ type Room struct {
 	// createdAt records when the room was created. Set once in newWithTimeouts.
 	createdAt time.Time
 
-	// keyMu guards currentKey for SFrame E2EE (ADR-014).
+	// keyMu guards currentKey for SFrame E2EE (RELAY-014).
 	// Separate from listenersMu so key reads never contend with listener I/O.
 	keyMu      sync.RWMutex
 	currentKey []byte
@@ -415,7 +415,7 @@ func (r *Room) Close() {
 // returns an error or the room is closed. loopDone is closed when the
 // goroutine exits, allowing SetSource to synchronise on reconnect.
 //
-// Hot-path invariants (ADR-005, ADR-009):
+// Hot-path invariants (RELAY-005, RELAY-009):
 //   - One atomic.Load per packet; no lock held during WriteRTP.
 //   - No heap allocation beyond what the loaded slice pointer itself costs.
 //
@@ -470,7 +470,7 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 		r.PacketCount.Add(1)
 		r.ByteCount.Add(uint64(len(pkt.Payload)))
 
-		// ADR-005: one atomic load; no lock held during WriteRTP.
+		// RELAY-005: one atomic load; no lock held during WriteRTP.
 		ls := *r.listeners.Load()
 		for _, e := range ls {
 			if err := e.l.WriteRTP(pkt); err != nil {
@@ -603,7 +603,7 @@ func (r *Room) GetLatencyStats() LatencyStats {
 	return r.latency.stats()
 }
 
-// SetKey stores the SFrame room key received via KEY_EXCHANGE (ADR-014).
+// SetKey stores the SFrame room key received via KEY_EXCHANGE (RELAY-014).
 // The relay stores the key opaquely so late-joining listeners can receive it.
 // The relay does NOT interpret or decrypt with this key.
 func (r *Room) SetKey(key []byte) {

@@ -1,4 +1,4 @@
-# ADR-007-capability-negotiation — Capability Negotiation
+# RELAY-008-workspace-release-sequencing — Workspace Release Sequencing
 
 ## Status
 Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
@@ -7,7 +7,7 @@ Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
 PocketStation v2.3 requires this ADR before implementation lands. See `docs/architecture/pocketstation-v2.3.md`.
 
 ## Decision
-Auto-insert adapter nodes such as ResampleNode and MonoMixNode, but expose NegotiatedCapability to the caller.
+Publish crates in dependency order with retry/backoff. One root tag, same workspace version.
 
 ## Options considered
 

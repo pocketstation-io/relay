@@ -28,7 +28,7 @@ DEFERRED    Intentionally postponed; ADR or phase plan justifies it
 | In-process token store (relay) | DEFERRED | internal/room/room.go Manager | Persistent store; rooms lost on restart | Phase 3 | DB / Durable Objects deployment infra decision not made; carry to Phase 3 when deployment target is chosen |
 | TURN configuration | DEFERRED | cmd/relay-server/main.go | Production TURN credentials; STUN-only fails behind symmetric NAT | Phase 3 | TURN provider decision pending; see docs/architecture/ for open decision |
 | SFrame E2EE | DEFERRED | relay + SDKs | Frame-layer encryption per RFC 9605 | Phase 3 | ADR for per-platform insertion point |
-| latency_estimate_ms metric | DEFERRED | internal/metrics/metrics.go | Per-packet latency measurement requires clock sync | Phase 3 | ADR-006 (clock sync) deferred to Phase 3 |
+| latency_estimate_ms metric | DEFERRED | internal/metrics/metrics.go | Per-packet latency measurement requires clock sync | Phase 3 | RELAY-006 (clock sync) deferred to Phase 3 |
 
 ---
 
@@ -36,7 +36,7 @@ DEFERRED    Intentionally postponed; ADR or phase plan justifies it
 
 | Component | Replaced by | Finding |
 |---|---|---|
-| Pion WriteRTP connected bench | `BenchmarkWriteRTPFanoutConnected_{1,10,50}` in `internal/room/forward_bench_test.go` — real loopback Pion pair, DTLS/SRTP path | SRTP: ~7.7 µs/op, 11 allocs/op at fanout 1 (~297x vs disconnected); linear scaling; within Phase 2 budget. ADR-009 decision: acceptable. See `benches/results/phase2-baseline.txt`. |
+| Pion WriteRTP connected bench | `BenchmarkWriteRTPFanoutConnected_{1,10,50}` in `internal/room/forward_bench_test.go` — real loopback Pion pair, DTLS/SRTP path | SRTP: ~7.7 µs/op, 11 allocs/op at fanout 1 (~297x vs disconnected); linear scaling; within Phase 2 budget. RELAY-009 decision: acceptable. See `benches/results/phase2-baseline.txt`. |
 
 ## Phase 1 burns (completed 2026-05-20)
 
@@ -65,19 +65,19 @@ These never become production — they exist for testing and development.
 
 | Artifact | Status | Location | Replace by | Notes |
 |---|---|---|---|---|
-| SFrame E2EE relay endpoint | PARTIAL | internal/signaling/messages.go | Phase 5 | ADR-014; KEY_EXCHANGE forwarding done; per-frame test pending |
-| RTCP adaptive codec feedback | PENDING | internal/rtcp/ + signaling CODEC_HINT | Phase 5 | ADR-021; signaling type done; RTCP→CODEC_HINT logic not wired |
-| Capture-to-cloud benchmark CLI | PENDING | cmd/benchmark/ | Phase 5 | ADR-020; /v1/echo done; cmd/benchmark CLI not yet implemented |
+| SFrame E2EE relay endpoint | PARTIAL | internal/signaling/messages.go | Phase 5 | RELAY-014; KEY_EXCHANGE forwarding done; per-frame test pending |
+| RTCP adaptive codec feedback | PENDING | internal/rtcp/ + signaling CODEC_HINT | Phase 5 | RELAY-021; signaling type done; RTCP→CODEC_HINT logic not wired |
+| Capture-to-cloud benchmark CLI | PENDING | cmd/benchmark/ | Phase 5 | RELAY-020; /v1/echo done; cmd/benchmark CLI not yet implemented |
 
 ## Phase 5 burns (completed 2026-06-01)
 
 | Artifact | Burned by | Evidence |
 |---|---|---|
-| Embedded TURN server (pion/turn) | ADR-023 impl | internal/turn/; cmd/relay-server/main.go; 8 tests pass; on main |
-| ICE-TCP mux | ADR-023 impl | server.Config.ICETCPMux; ICE_TCP_PORT env var |
-| Relay echo endpoint | ADR-020 partial | /v1/echo WebSocket; HTTP test PASS |
-| KEY_EXCHANGE signaling type | ADR-014 partial | internal/signaling/messages.go; handleKeyExchange() in server |
-| CODEC_HINT signaling type | ADR-021 partial | internal/signaling/messages.go; CodecHintPayload struct |
+| Embedded TURN server (pion/turn) | RELAY-023 impl | internal/turn/; cmd/relay-server/main.go; 8 tests pass; on main |
+| ICE-TCP mux | RELAY-023 impl | server.Config.ICETCPMux; ICE_TCP_PORT env var |
+| Relay echo endpoint | RELAY-020 partial | /v1/echo WebSocket; HTTP test PASS |
+| KEY_EXCHANGE signaling type | RELAY-014 partial | internal/signaling/messages.go; handleKeyExchange() in server |
+| CODEC_HINT signaling type | RELAY-021 partial | internal/signaling/messages.go; CodecHintPayload struct |
 | BenchmarkWriteRTPFanoutConnected_200 | P5-PROD-002 | internal/room/forward_bench_test.go; result pending local run |
 | ICE failure integration tests | P5-PROD-003 | test/integration/ice_failure_test.go; execution pending local run |
 | Binary smoke test CI job | P5-PROD-004 | .github/workflows/ci.yml smoke job |
@@ -87,7 +87,7 @@ These never become production — they exist for testing and development.
 
 | Artifact | Status | Location | Replace by | Notes |
 |---|---|---|---|---|
-| WebTransport endpoint | PENDING | internal/webtransport/ | Phase 6 | ADR-016; /v1/wt; quic-go; ICE-free |
+| WebTransport endpoint | PENDING | internal/webtransport/ | Phase 6 | RELAY-016; /v1/wt; quic-go; ICE-free |
 | Multi-region routing | PENDING | Phase 6 scaling | Phase 6 | Fly.io edge nodes; EU/US/APAC |
 
 ## How to use this file in a PR

@@ -1,4 +1,4 @@
-# ADR-009-pion-writertp-profile — Pion WriteRTP Allocation Profile
+# RELAY-009-pion-writertp-profile — Pion WriteRTP Allocation Profile
 
 ## Status
 Accepted. Phase 1 baseline measurements taken 2026-05-20 (see `benches/results/phase1-baseline.txt`). Disconnected-track WriteRTP: 0 alloc/op at ~26 ns/op. Connected-track (SRTP path) measured 2026-05-21 (see `benches/results/phase2-baseline.txt` and "Phase 2 Measurement" section below). No zero-allocation claim is made for the connected relay path; SRTP overhead is accepted as within budget for Phase 2 scale targets.
