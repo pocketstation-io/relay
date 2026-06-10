@@ -1,4 +1,4 @@
-# ADR-013-internal-format-channel-layout — Internal Sample Format and Channel Layout
+# RELAY-007-capability-negotiation — Capability Negotiation
 
 ## Status
 Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
@@ -7,7 +7,7 @@ Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
 PocketStation v2.3 requires this ADR before implementation lands. See `docs/architecture/pocketstation-v2.3.md`.
 
 ## Decision
-Internal format: interleaved f32, little-endian, normalized [-1.0,1.0], 48kHz. Voice mono, music stereo, broadcast configurable.
+Auto-insert adapter nodes such as ResampleNode and MonoMixNode, but expose NegotiatedCapability to the caller.
 
 ## Options considered
 

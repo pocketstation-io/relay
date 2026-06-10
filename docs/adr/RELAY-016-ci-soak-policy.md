@@ -1,4 +1,4 @@
-# ADR-016 — CI Soak Policy
+# RELAY-016 — CI Soak Policy
 
 ## Status
 

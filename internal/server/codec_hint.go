@@ -1,6 +1,6 @@
 package server
 
-// D13 — RTCP RR → CODEC_HINT adaptive bitrate feedback (ADR-021).
+// D13 — RTCP RR → CODEC_HINT adaptive bitrate feedback (RELAY-021).
 //
 // Each listener PeerConnection sends RTCP Receiver Reports back to the relay
 // describing packet-loss fraction on the relay→listener leg. This file reads
@@ -18,7 +18,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-// ADR-021 bitrate tiers and thresholds.
+// RELAY-021 bitrate tiers and thresholds.
 const (
 	bitrateHighKbps   = 64
 	bitrateMediumKbps = 32
@@ -52,9 +52,9 @@ type codecHintState struct {
 }
 
 // bitrateForLoss maps a 0.0–1.0 fraction-lost value (from RTCP RR FractionLost/256)
-// to a CodecHintPayload according to ADR-021 tier table.
+// to a CodecHintPayload according to RELAY-021 tier table.
 //
-// FrameMs follows the 10ms/20ms split described in ADR-021 §frame-mode:
+// FrameMs follows the 10ms/20ms split described in RELAY-021 §frame-mode:
 //   - loss < 1%: 10ms (RESTRICTED_LOWDELAY) — minimum algorithmic delay, clean link
 //   - loss ≥ 1%: 20ms — larger frame amortises FEC overhead more efficiently
 func bitrateForLoss(fractionLost float64) signaling.CodecHintPayload {

@@ -1,13 +1,13 @@
-# ADR-011-spsc-ring — SPSC Ring Buffer Choice
+# RELAY-005-relay-listener-slice — Relay Listener Slice Model
 
 ## Status
-Accepted for v2.3 scaffold. Reversal requires Phase 0/1 measurement data.
+Accepted. Phase 1 used RWMutex per ADR decision. Phase 2 copy-on-write migration complete 2026-05-20: `sync/atomic.Pointer[[]listenerEntry]` replaces the mutex in `internal/room/room.go`. No lock is held during WriteRTP on the hot path.
 
 ## Context
 PocketStation v2.3 requires this ADR before implementation lands. See `docs/architecture/pocketstation-v2.3.md`.
 
 ## Decision
-Use rtrb by default: fixed capacity, allocation at construction, lock-free/wait-free reads and writes.
+Phase 1 may use RWMutex around the listener slice. Phase 2 migrates to copy-on-write atomic pointer to avoid per-packet lock contention.
 
 ## Options considered
 

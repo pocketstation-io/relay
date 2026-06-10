@@ -15,7 +15,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-// Pure-function unit tests for the D13 codec-hint logic (ADR-021).
+// Pure-function unit tests for the D13 codec-hint logic (RELAY-021).
 // End-to-end WebSocket delivery is covered by
 // TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource.
 
