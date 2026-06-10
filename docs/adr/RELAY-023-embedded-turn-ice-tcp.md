@@ -1,4 +1,4 @@
-# ADR-023-embedded-turn-ice-tcp — Embedded TURN + ICE-TCP, Zero External Provider
+# RELAY-023-embedded-turn-ice-tcp — Embedded TURN + ICE-TCP, Zero External Provider
 
 ## Status
 
@@ -172,10 +172,10 @@ forwarding path. The relay is never a TURN client — only a TURN server.
 - Fails for strict enterprise deep-packet-inspection firewalls (~2% of connections).
 - Retained as complement to TURN, not replacement.
 
-**E) WebTransport (ADR-016)**
+**E) WebTransport (RELAY-016)**
 - Eliminates ICE/STUN/TURN entirely — the long-term architectural endgame.
 - quic-go/webtransport-go is draft-02 spec, not finalized.
-- Phase 6 scope per ADR-016.
+- Phase 6 scope per RELAY-016.
 - Retained on roadmap; does not replace this ADR for Phase 5.
 
 ## Consequences

@@ -9,6 +9,6 @@ Phase 1 relay MVP task queue. One item per commit. Checked off when the commit l
 - [x] 5. Implement WebSocket signaling skeleton (all message types dispatched)
 - [x] 6. Implement Pion v4 peer connection skeleton (SDP offer/answer, ICE exchange)
 - [x] 7. Implement RTP forwarding scaffold (forwardLoop with done channel, listener snapshot)
-- [x] 8. Add WriteRTP allocation/mutation benchmark — ADR-009
+- [x] 8. Add WriteRTP allocation/mutation benchmark — RELAY-009
 - [x] 9. Add tests for room lifecycle and token validation
 - [x] 10. Final relay audit (gofmt, go test ./..., go test -race ./...)

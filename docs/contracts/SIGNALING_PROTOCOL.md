@@ -117,7 +117,7 @@ WebRTC ICE candidate trickle. Direction depends on `type` field context.
 
 ### KEY_EXCHANGE (source → relay → listeners)
 
-SFrame end-to-end encryption key distribution (ADR-014).
+SFrame end-to-end encryption key distribution (RELAY-014).
 
 | Field      | Value                           |
 |------------|---------------------------------|
@@ -154,7 +154,7 @@ See `FAKE_SCAFFOLD_INVENTORY.md` entry `HIDDEN-003`.
 
 ### CODEC_HINT (relay → source)
 
-Adaptive bitrate hint based on RTCP Receiver Reports (ADR-021).
+Adaptive bitrate hint based on RTCP Receiver Reports (RELAY-021).
 
 | Field                      | Value                        |
 |----------------------------|------------------------------|
@@ -181,7 +181,7 @@ indicates ICE path degradation (spec §10.4).
 | Field    | Value          |
 |----------|----------------|
 | type     | `"ICE_RESTART"` |
-| use_turn | true if relay has embedded TURN configured (ADR-023) |
+| use_turn | true if relay has embedded TURN configured (RELAY-023) |
 
 Source calls `RTCPeerConnection.restartIce()` on receipt. When `use_turn=true`,
 source should prefer TURN relay candidates on the next ICE negotiation.

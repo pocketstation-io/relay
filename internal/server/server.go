@@ -80,7 +80,7 @@ type Config struct {
 	// ICEServers replaces the default STUN-only ICE server list. When non-empty,
 	// these servers are used for all PeerConnections. The createRoom response
 	// also returns this list as ice_servers so clients can configure their own
-	// PeerConnections with the same TURN credentials. See ADR-023.
+	// PeerConnections with the same TURN credentials. See RELAY-023.
 	// When nil or empty, the relay falls back to stun.l.google.com:19302.
 	ICEServers []webrtc.ICEServer
 	// ICETCPMux, when non-nil, enables ICE-TCP candidates for PeerConnections
@@ -93,7 +93,7 @@ type Config struct {
 	RoomConfig room.ManagerConfig
 	// UseTURN, when true, sets use_turn=true in ICE_RESTART messages sent to
 	// the source (spec §10.4). Set to true when the relay's embedded TURN
-	// server is configured (TURN_PUBLIC_IP is set, ADR-023).
+	// server is configured (TURN_PUBLIC_IP is set, RELAY-023).
 	UseTURN bool
 	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
 	// candidates. Set to the relay's public IP when deployed behind NAT (e.g.
@@ -133,7 +133,7 @@ type Server struct {
 	sessions map[string]*session
 
 	// codecHintStates holds per-room debounce state for CODEC_HINT emission
-	// (D13, ADR-021). Keys are room IDs; values are *codecHintState.
+	// (D13, RELAY-021). Keys are room IDs; values are *codecHintState.
 	// sync.Map is safe for concurrent access from multiple listener goroutines.
 	codecHintStates sync.Map
 
@@ -144,7 +144,7 @@ type Server struct {
 
 	// useTURN is true when the relay's embedded TURN server is configured.
 	// Propagated into ICE_RESTART messages so the source knows to prefer TURN
-	// relay candidates on the next ICE negotiation (spec §10.4, ADR-023).
+	// relay candidates on the next ICE negotiation (spec §10.4, RELAY-023).
 	// Set once at construction time from Config.UseTURN.
 	useTURN bool
 }
@@ -272,7 +272,7 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// echo implements the /v1/echo WebSocket endpoint (ADR-020).
+// echo implements the /v1/echo WebSocket endpoint (RELAY-020).
 //
 // Clients send JSON messages of the form {"send_timestamp_ns": <int64>}.
 // The relay echoes each message back with the relay's receive timestamp added:
@@ -364,7 +364,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		"listener_token": listenerToken,
 		"qr_url":         "/listen?room=" + id,
 	}
-	// Include ICE server configuration when TURN is enabled (ADR-023).
+	// Include ICE server configuration when TURN is enabled (RELAY-023).
 	// Clients pass this list directly to RTCPeerConnection so they use the
 	// relay's embedded TURN server without hardcoding any addresses.
 	if len(s.iceServers) > 0 {
@@ -610,7 +610,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		}
 		s.srv.Metrics.ListenerCount.Add(1)
 
-		// Late-join key delivery (ADR-014): if a KEY_EXCHANGE was received
+		// Late-join key delivery (RELAY-014): if a KEY_EXCHANGE was received
 		// before this listener joined, forward the stored key immediately so
 		// this listener can decrypt from the first packet.
 		if existingKey := rm.GetKey(); existingKey != nil {
@@ -620,7 +620,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			})
 		}
 
-		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (ADR-021).
+		// D13: read RTCP RR from this listener and forward CODEC_HINT to source (RELAY-021).
 		// Also track sustained high loss and emit ICE_RESTART when needed (spec §10.4).
 		hintState := s.srv.roomCodecHintState(claims.RoomID)
 		restartState := s.srv.roomICERestartState(claims.RoomID)
@@ -774,7 +774,7 @@ func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request, roomID stri
 // forwarding to the WebSocket peer.
 //
 // ICE server list: uses s.srv.iceServers when set (STUN + embedded TURN per
-// ADR-023). Falls back to stun.l.google.com when no servers are configured
+// RELAY-023). Falls back to stun.l.google.com when no servers are configured
 // (dev mode / tests).
 //
 // ICE-TCP mux: when s.srv.iceTCPMux is non-nil, TCP ICE candidates are added

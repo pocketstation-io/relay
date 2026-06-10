@@ -8,7 +8,7 @@ import (
 )
 
 // handleKeyExchange forwards an SFrame KEY_EXCHANGE message from the source to
-// all listeners in the room (ADR-014). The relay does NOT read the key material:
+// all listeners in the room (RELAY-014). The relay does NOT read the key material:
 // it copies SFrameKey verbatim into a ServerMessage and sends it to every
 // current listener session. This preserves the SFrame guarantee that the relay
 // is never in possession of plaintext audio.
@@ -46,7 +46,7 @@ func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 	}
 
 	// Persist the key so late-joining listeners receive it immediately on
-	// SUBSCRIBE (ADR-014). Decode from base64 to raw bytes for storage;
+	// SUBSCRIBE (RELAY-014). Decode from base64 to raw bytes for storage;
 	// re-encode on delivery so the wire format is always base64.
 	if msg.SFrameKey != "" {
 		keyBytes, err := base64.StdEncoding.DecodeString(msg.SFrameKey)

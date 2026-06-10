@@ -1,4 +1,4 @@
-# ADR-014 — Phase 1 Token Authority
+# RELAY-014 — Phase 1 Token Authority
 
 ## Status
 
@@ -32,13 +32,13 @@ Relay would need to detect the token format (JWT prefix vs hex length), branch o
 Would require api-server to import `auth.Sign` and share the secret before the cross-service contract is designed. This leaks relay implementation details into api-server and creates an untested dependency in Phase 1.
 
 **Option C — Relay owns token issuance for Phase 1; api-server upgraded in Phase 2 (selected).**
-Cleanest boundary. Phase 1 has a single authoritative token issuer. Phase 2 upgrades api-server to call `auth.Sign(sharedSecret, id, role, ttl)` with the same `POCKETSTATION_JWT_SECRET`. A cross-service integration test is required before Phase 2 exit. Documented as ADR-015 on the api-server side.
+Cleanest boundary. Phase 1 has a single authoritative token issuer. Phase 2 upgrades api-server to call `auth.Sign(sharedSecret, id, role, ttl)` with the same `POCKETSTATION_JWT_SECRET`. A cross-service integration test is required before Phase 2 exit. Documented as RELAY-015 on the api-server side.
 
 ## Consequences
 
 - Any client presenting an api-server hex token to relay `/v1/signal` receives a `bad_token` error. This is documented Phase 1 behavior.
 - The relay's `POST /v1/rooms` endpoint is the canonical room creation path for all Phase 1 clients, including the fake-source binary.
-- Phase 2 must not exit until api-server JWT upgrade is complete and a cross-service integration test (`TestGiven_RelayRoom_When_ApiServerToken_Then_Accepted` or equivalent) passes. See ADR-015 in api-server.
+- Phase 2 must not exit until api-server JWT upgrade is complete and a cross-service integration test (`TestGiven_RelayRoom_When_ApiServerToken_Then_Accepted` or equivalent) passes. See RELAY-015 in api-server.
 - Reversal requires the Phase 2 api-server JWT upgrade to be complete and the cross-service integration test to pass.
 
 ## Test / measurement plan

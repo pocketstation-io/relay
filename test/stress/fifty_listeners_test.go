@@ -5,7 +5,7 @@
 //	go test -race -run TestFiftyListeners ./test/stress/
 //
 // The test uses the room package directly — no real WebRTC, no network.
-// It verifies the copy-on-write listener slice (ADR-005) is free of data
+// It verifies the copy-on-write listener slice (RELAY-005) is free of data
 // races and that the room reaches a clean steady state after 50 concurrent
 // join/leave cycles.
 package stress

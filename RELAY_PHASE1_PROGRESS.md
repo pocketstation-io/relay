@@ -3,7 +3,7 @@
 ## PHASE 1 COMPLETE — 2026-05-20. Audit: CONDITIONAL PASS.
 
 All tests pass: auth (6), room (15), integration (2), soak (5 min, race-clean).
-CI fixed: unit tests run with `-short`; soak runs only on push to main (ADR-016).
+CI fixed: unit tests run with `-short`; soak runs only on push to main (RELAY-016).
 Phase 2 intake tracked in RELAY_PHASE2_QUEUE.md.
 
 ---
@@ -20,7 +20,7 @@ Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentional
 - **RTP forwarding scaffold** (`internal/room/room.go`): forwardLoop reads from Source, snapshots listeners under read lock, writes to each Listener. Counters (PacketCount, ByteCount) are atomic. Goroutine teardown: returns on ReadRTP error or done channel close.
 - **WebSocket signaling skeleton** (`cmd/relay-server/main.go`): all message types dispatched; session struct with wmu-serialised writes; cleanup deferred.
 - **Pion v4 peer connection skeleton** (`cmd/relay-server/main.go`): PC created on PUBLISH/SUBSCRIBE after JWT verification; OnTrack wires source to room; TrackLocalStaticRTP wired for listeners; SDP offer/answer exchange; ICE candidate forwarding via OnICECandidate.
-- **ADR-009 benchmark** (`internal/room/forward_bench_test.go`): benchmarks dispatch loop with 1/10/100 mock listeners; documents that real Pion WriteRTP measurement is required before Phase 1 exit.
+- **RELAY-009 benchmark** (`internal/room/forward_bench_test.go`): benchmarks dispatch loop with 1/10/100 mock listeners; documents that real Pion WriteRTP measurement is required before Phase 1 exit.
 
 ## What is partial (and what would finish it)
 
@@ -30,8 +30,8 @@ Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentional
 
 ## What is fake/mock/scaffold
 
-- **ADR-009 benchmark uses mock Listener** (`discardListener`), not `*webrtc.TrackLocalStaticRTP`. The allocation profile of Pion's WriteRTP is therefore unmeasured. No zero-alloc claim is made.
-- **ADR-010 jitter buffer**: not implemented. RTP packets are forwarded immediately with no adaptive buffering. ADR-010 defers this to measurement data.
+- **RELAY-009 benchmark uses mock Listener** (`discardListener`), not `*webrtc.TrackLocalStaticRTP`. The allocation profile of Pion's WriteRTP is therefore unmeasured. No zero-alloc claim is made.
+- **RELAY-010 jitter buffer**: not implemented. RTP packets are forwarded immediately with no adaptive buffering. RELAY-010 defers this to measurement data.
 
 ## What is blocked
 
@@ -39,8 +39,8 @@ Nothing is currently blocked. All tooling checks passed (2026-05-20).
 
 ## What needs human decision
 
-- ADR-009: a human must run `go test -bench=BenchmarkWriteRTP -benchmem ./internal/room/` against real Pion tracks before the relay makes any latency or allocation claims.
-- ADR-010: adaptive jitter buffer target depth needs a measurement plan for Phase 1.
+- RELAY-009: a human must run `go test -bench=BenchmarkWriteRTP -benchmem ./internal/room/` against real Pion tracks before the relay makes any latency or allocation claims.
+- RELAY-010: adaptive jitter buffer target depth needs a measurement plan for Phase 1.
 
 ---
 
@@ -74,7 +74,7 @@ Nothing is currently blocked. All tooling checks passed (2026-05-20).
 
 - Smallest correct design: yes — Source/Listener interfaces introduced to allow unit testing without Pion; Manager.Delete added; no speculative abstractions.
 - Tests added or updated: yes — 15 tests in room_test.go covering create, add/remove listeners, forwarding, counter increment, EOF cleanup, Manager CRUD.
-- Hot-path safe: yes — forwardLoop uses atomic counters; only allocates a snapshot slice per forwarded packet (consistent with ADR-009 pending measurement).
+- Hot-path safe: yes — forwardLoop uses atomic counters; only allocates a snapshot slice per forwarded packet (consistent with RELAY-009 pending measurement).
 - Public API changed: yes — SetSource now takes `room.Source` interface instead of `*webrtc.TrackRemote`; AddListener now takes `(peerID string, l room.Listener)`. Both are new in Phase 1; no downstream consumers yet.
 - New dependency: no — removed pion/webrtc from room.go; now only pion/rtp.
 - Phase scope respected: yes.
@@ -131,11 +131,11 @@ Nothing is currently blocked. All tooling checks passed (2026-05-20).
 - New dependency: no.
 - Phase scope respected: yes.
 - Unsafe added: no.
-- Remaining risk: snapshot slice allocation per packet. ADR-009 measurement pending.
+- Remaining risk: snapshot slice allocation per packet. RELAY-009 measurement pending.
 
 ---
 
-### Staff Bar Self-Check — Task 8: WriteRTP benchmark (ADR-009)
+### Staff Bar Self-Check — Task 8: WriteRTP benchmark (RELAY-009)
 
 - Smallest correct design: yes — three benchmark functions (1/10/100 listeners) + discardListener; mirrors forwardLoop dispatch exactly.
 - Tests added or updated: yes — benchmark in forward_bench_test.go.
@@ -170,12 +170,12 @@ Nothing is currently blocked. All tooling checks passed (2026-05-20).
 - go test -race ./...: PASS — auth (1.616 s), room (1.361 s); no data races detected.
 - Smallest correct design: yes.
 - Tests added or updated: yes — 15 room + 6 auth.
-- Hot-path safe: yes — no locks held during WriteRTP; atomic counters; one slice alloc per forward tick pending ADR-009 measurement.
+- Hot-path safe: yes — no locks held during WriteRTP; atomic counters; one slice alloc per forward tick pending RELAY-009 measurement.
 - Public API changed: no.
 - New dependency: no.
 - Phase scope respected: yes.
 - Unsafe added: no.
-- Remaining risk: ADR-009 Pion WriteRTP allocation profile unmeasured (mock listeners only). ADR-010 jitter buffer not implemented. Both are explicit Phase 1 deferred items.
+- Remaining risk: RELAY-009 Pion WriteRTP allocation profile unmeasured (mock listeners only). RELAY-010 jitter buffer not implemented. Both are explicit Phase 1 deferred items.
 
 ---
 

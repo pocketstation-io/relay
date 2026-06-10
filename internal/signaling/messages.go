@@ -11,11 +11,11 @@ const (
 	TypeRoomState MessageType = "ROOM_STATE"
 	TypeError     MessageType = "ERROR"
 	// TypeKeyExchange is sent by the source to distribute an SFrame encryption
-	// key to all listeners (ADR-014). The relay forwards the message to every
+	// key to all listeners (RELAY-014). The relay forwards the message to every
 	// listener in the room without reading the key material.
 	TypeKeyExchange MessageType = "KEY_EXCHANGE"
 	// TypeCodecHint is sent by the relay to the source when RTCP Receiver
-	// Reports indicate a change in packet-loss tier (ADR-021). The source
+	// Reports indicate a change in packet-loss tier (RELAY-021). The source
 	// adjusts its Opus encoder parameters on receipt.
 	TypeCodecHint MessageType = "CODEC_HINT"
 	// TypeLatencyReport is sent by source or listener clients to report
@@ -96,6 +96,6 @@ type ServerMessage struct {
 	CodecHint *CodecHintPayload `json:"codec_hint,omitempty"`
 	// UseTURN is set to true on ICE_RESTART messages when the relay has an
 	// embedded TURN server configured. The source should prefer TURN relay
-	// candidates on the next ICE negotiation (spec §10.4, ADR-023).
+	// candidates on the next ICE negotiation (spec §10.4, RELAY-023).
 	UseTURN bool `json:"use_turn,omitempty"`
 }

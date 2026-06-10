@@ -6,7 +6,7 @@ Phase 2 relay hardening. Started 2026-05-20.
 
 ## Tasks completed (2026-05-20)
 
-### Task 1 — Copy-on-write listener slice (ADR-005)
+### Task 1 — Copy-on-write listener slice (RELAY-005)
 
 **What changed:** `internal/room/room.go`
 
@@ -131,7 +131,7 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 - Hot-path safe: yes — one `atomic.Load` per packet, no lock during `WriteRTP`.
 - Public API changed: yes — `SetSource` signature changed (see Task 4 note).
 - New dependency: no.
-- Phase scope respected: yes — ADR-005 Phase 2.
+- Phase scope respected: yes — RELAY-005 Phase 2.
 - Unsafe added: no.
 - Remaining risk: `listenerEntry` interface field still carries two words; no
   additional allocation vs. the old map-snapshot path.
@@ -229,7 +229,7 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 - `NAT1To1IPs` populated from `FLY_PUBLIC_IP` env var on startup
 - ICE-TCP mux on port 8081; clients now traverse corporate firewalls
 - HMAC-SHA1 TURN credentials issued by POST /v1/rooms (via api-server)
-- pion/turn embedded in relay process (ADR-023)
+- pion/turn embedded in relay process (RELAY-023)
 - Deployed to 3 Fly.io regions: iad, fra, nrt at `wss://pocketstation-relay.fly.dev`
 
 ---
@@ -260,16 +260,16 @@ Also fixed pre-existing `go vet` warning: `metrics.WriteTo` renamed to
 - RTT P50: 18.9 ms, P95: 21 ms
 - Measurement tool: `BenchmarkWriteRTPFanoutConnected_200` (relay bench suite)
 
-This supersedes the Phase 1 mock-listener benchmark (discardListener). ADR-009 real-Pion measurement gate is now satisfied.
+This supersedes the Phase 1 mock-listener benchmark (discardListener). RELAY-009 real-Pion measurement gate is now satisfied.
 
 ---
 
 ## Deferred items
 
-- `RELAY_PHASE2_QUEUE.md` items still OPEN: SLO instrumentation, latency_estimate_ms metric (ADR-006).
+- `RELAY_PHASE2_QUEUE.md` items still OPEN: SLO instrumentation, latency_estimate_ms metric (RELAY-006).
 - Rate limit boundary race (see Task 5 risk): acceptable for Phase 2.
-- ADR-021 RTCP adaptive codec: CODEC_HINT within 2 RTT of loss tier — Phase 5.
-- ADR-014 SFrame per-frame relay-side bypass test: KEY_EXCHANGE forwarding verified, per-frame crypto test pending.
+- RELAY-021 RTCP adaptive codec: CODEC_HINT within 2 RTT of loss tier — Phase 5.
+- RELAY-014 SFrame per-frame relay-side bypass test: KEY_EXCHANGE forwarding verified, per-frame crypto test pending.
 
 ---
 

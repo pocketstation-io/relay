@@ -718,7 +718,7 @@ func TestLatencyReportRollingWindowEvictsOldestSamples(t *testing.T) {
 }
 
 // TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy verifies that
-// SetKey stores the key and GetKey returns an independent copy (ADR-014).
+// SetKey stores the key and GetKey returns an independent copy (RELAY-014).
 func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy(t *testing.T) {
 	// Given
 	r := New("key-room")
@@ -748,7 +748,7 @@ func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy(t *testing.T) {
 }
 
 // TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil verifies that GetKey
-// returns nil before any KEY_EXCHANGE has been received (ADR-014).
+// returns nil before any KEY_EXCHANGE has been received (RELAY-014).
 func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
 	// Given / When
 	r := New("no-key-room")
