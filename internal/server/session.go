@@ -501,23 +501,30 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 	if s.srv.api != nil {
 		// Test path: use the injected loopback API as-is.
 		pc, err = s.srv.api.NewPeerConnection(pcCfg)
-	} else if s.srv.iceTCPMux != nil || len(s.srv.nat1to1IPs) > 0 {
-		// Production path: build a SettingEngine when either ICE-TCP mux or
-		// NAT1To1 IP overrides are configured. Both may be set independently:
-		// NAT1To1IPs alone is used when RELAY_PUBLIC_IPS is set without
-		// ICE_TCP_PORT (e.g. E2E tests forcing loopback candidates).
+	} else if s.srv.iceTCPMux != nil || s.srv.iceUDPMux != nil || len(s.srv.nat1to1IPs) > 0 {
+		// Production path: build a SettingEngine when an ICE-TCP mux, ICE-UDP
+		// mux, or NAT1To1 IP override is configured. These may be set
+		// independently: NAT1To1IPs alone is used when RELAY_PUBLIC_IPS is set
+		// without ICE_TCP_PORT (e.g. E2E tests forcing loopback candidates).
 		se := webrtc.SettingEngine{}
+		if s.srv.iceUDPMux != nil {
+			// Single shared UDP socket for all media. Prevents pion from
+			// gathering multiple UDP host candidates (one per interface/NAT IP)
+			// and egressing media from a socket the peer never consented to,
+			// which dropped ~50% of RTP on multi-homed hosts.
+			se.SetICEUDPMux(s.srv.iceUDPMux)
+		}
 		if s.srv.iceTCPMux != nil {
+			// Offer ICE-TCP as a fallback candidate for NAT/firewall traversal,
+			// but do NOT restrict the network type to TCP. Real-time Opus must
+			// travel over UDP: TCP guarantees in-order delivery, so a single
+			// delayed packet stalls every packet behind it (head-of-line
+			// blocking). The browser's jitter buffer then conceals the resulting
+			// gaps — the audible "radio glitch". Chrome already ranks UDP host
+			// candidates above TCP, so leaving both available lets it nominate
+			// the UDP pair when reachable and fall back to TCP only when UDP
+			// cannot connect.
 			se.SetICETCPMux(s.srv.iceTCPMux)
-			if s.role == auth.RoleListener {
-				// Chrome assigns higher ICE priority to UDP host candidates
-				// (~126×2²⁴) than TCP (~75×2²⁴), so it nominates the UDP pair even
-				// when TCP is available. macOS drops ~50% of RTP UDP packets on
-				// loopback at 50 pkt/s. Restricting to TCP-only for listener
-				// sessions forces Chrome onto the TCP mux. Source sessions (CLI)
-				// keep UDP — Rust WebRTC does not support TCP ICE.
-				se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeTCP4})
-			}
 		}
 		if len(s.srv.nat1to1IPs) > 0 {
 			se.SetNAT1To1IPs(s.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)

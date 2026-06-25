@@ -257,19 +257,6 @@ type Room struct {
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
 
-	// relaySeq and relayTS are relay-local monotonic counters used to
-	// resequence forwarded RTP packets. They persist across source reconnects
-	// so listeners never see a sequence number or timestamp discontinuity.
-	//
-	// Why this is necessary: pion rewrites the SSRC of forwarded packets to
-	// match the relay track's SDP SSRC. When the CLI source reconnects (new
-	// str0m session = new random initial sequence number), Chrome sees one
-	// continuous SSRC with a large sequence number gap — interpreted as ~47%
-	// packet loss. Relay-local resequencing makes the RTP stream appear
-	// continuous across source reconnects from Chrome's perspective.
-	relaySeq atomic.Uint64
-	relayTS  atomic.Uint64
-
 	// latency holds rolling per-segment latency samples submitted via
 	// LATENCY_REPORT WebSocket messages (spec §13.4).
 	latency *latencyStore
@@ -552,14 +539,29 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 		r.ByteCount.Add(uint64(len(pkt.Payload)))
 		diagPktSinceLog++
 
-		// Relay-local resequencing: overwrite the source's RTP sequence number
-		// and timestamp with relay-local monotonically increasing values.
-		// relaySeq wraps correctly via uint16 cast (modular arithmetic).
-		// relayTS advances by 960 per 20 ms Opus frame at 48 kHz.
-		// Both counters are stored as uint64 so they never overflow in practice;
-		// the casts to uint16/uint32 produce the RFC 3550 wrapping behaviour.
-		pkt.SequenceNumber = uint16(r.relaySeq.Add(1) - 1)
-		pkt.Timestamp = uint32(r.relayTS.Add(960) - 960)
+		// Forward the source's RTP sequence number and timestamp UNCHANGED.
+		// The source (str0m) already emits monotonic, correctly-spaced values
+		// (seq +1, timestamp +960 per 20 ms Opus frame). A relay must preserve
+		// them: the receiver's jitter buffer reconstructs playout timing from
+		// these fields. Rewriting them with relay-local counters distorted the
+		// timeline — a 55 s session arrived stamped as ~104 s, so the browser's
+		// NetEQ treated half the audio as missing and concealed it (~47%),
+		// producing the "radio glitch". Standard SFU behaviour is passthrough.
+
+		// Normalise RTP padding before forwarding. pion's rtp.Packet.Unmarshal
+		// strips the trailing padding bytes out of Payload but leaves
+		// Header.Padding=true (and records the count in PaddingSize). Forwarding
+		// that packet verbatim emits one whose padding bit is set yet which carries
+		// no padding bytes. A receiver (Chrome, and pion) reads the last byte of
+		// the now-unpadded payload as the padding length and discards the packet
+		// whenever that value exceeds the payload size — which, for arbitrary Opus
+		// payloads (~97-151 bytes), happens for roughly half of them. That silent
+		// ~47% drop was the "radio glitch": packets arrive at the receiver's ICE
+		// transport but never become RTP, surfacing as packetsLost with
+		// packetsDiscarded=0. The relay has no reason to re-pad Opus, so clear the
+		// padding state to keep the forwarded packet self-consistent.
+		pkt.Header.Padding = false
+		pkt.PaddingSize = 0
 
 		// RELAY-005: one atomic load; no lock held during WriteRTP.
 		ls := *r.listeners.Load()

@@ -418,55 +418,104 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 	r.Close()
 }
 
-// TestGiven_SourceReconnects_When_NewSessionHasDifferentInitialSeq_Then_RelaySeqIsMonotonic
-// verifies that relay-local resequencing prevents sequence number gaps when the
-// CLI source reconnects (new str0m session = new random initial RTP sequence).
-// This is the root cause of the 47% apparent packet loss observed in Chrome's
-// WebRTC stats: pion rewrites the SSRC to the relay track's SSRC, so Chrome sees
-// one continuous SSRC with a sequence gap — interpreted as massive packet loss.
-func TestGiven_SourceReconnects_When_NewSessionHasDifferentInitialSeq_Then_RelaySeqIsMonotonic(t *testing.T) {
-	r := New("reseq-room")
+// TestGiven_SourceForwards_When_PacketsForwarded_Then_SeqAndTimestampPassThroughUnchanged
+// verifies the relay forwards each packet's RTP sequence number and timestamp
+// EXACTLY as the source produced them. A relay/SFU must not rewrite these fields:
+// the receiver's jitter buffer reconstructs playout timing from them. An earlier
+// implementation overwrote them with relay-local counters; that distorted the
+// timeline (a 55 s session arrived stamped as ~104 s), so the browser's NetEQ
+// concealed ~47% of the audio as "missing" — the measured "radio glitch".
+func TestGiven_SourceForwards_When_PacketsForwarded_Then_SeqAndTimestampPassThroughUnchanged(t *testing.T) {
+	r := New("passthrough-room")
 	l := &mockListener{}
 	if err := r.AddListener("peer-1", l); err != nil {
 		t.Fatalf("AddListener: %v", err)
 	}
 
-	// Source 1 sends 3 packets with a high initial sequence number (e.g., str0m random start).
-	src1 := newMockSource()
-	r.SetSource(src1, func() { src1.close() })
+	// Source sends packets with a realistic str0m stream: a random initial
+	// sequence number and timestamp, advancing by 1 and 960 per 20 ms frame.
+	src := newMockSource()
+	r.SetSource(src, func() { src.close() })
 
-	for seq := uint16(50000); seq < 50003; seq++ {
-		src1.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq, Timestamp: uint32(seq) * 960}})
+	const startSeq = uint16(50000)
+	const startTS = uint32(123456)
+	want := make([]rtp.Header, 0, 5)
+	for i := 0; i < 5; i++ {
+		h := rtp.Header{
+			SequenceNumber: startSeq + uint16(i),
+			Timestamp:      startTS + uint32(i)*960,
+		}
+		want = append(want, h)
+		src.send(&rtp.Packet{Header: h})
 	}
-	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 3 })
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 5 })
 
-	// Source 2 reconnects with a new random initial sequence (0 — far from 50002).
-	src2 := newMockSource()
-	r.SetSource(src2, nil)
-	for seq := uint16(0); seq < 3; seq++ {
-		src2.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq, Timestamp: uint32(seq) * 960}})
-	}
-	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 6 })
-
-	// Then — all 6 packets arrive at the listener with relay-local monotonically
-	// increasing sequence numbers (0, 1, 2, 3, 4, 5). No gap of ~50000 between
-	// the two source sessions.
+	// Then — the listener receives the source's seq/timestamp verbatim. No
+	// rewriting, no relay-local counter, no gaps introduced.
 	pkts := l.received()
 	for i, pkt := range pkts {
-		if pkt.SequenceNumber != uint16(i) {
-			t.Errorf("packet[%d]: got SequenceNumber=%d, want %d", i, pkt.SequenceNumber, i)
+		if pkt.SequenceNumber != want[i].SequenceNumber {
+			t.Errorf("packet[%d]: got SequenceNumber=%d, want %d (passthrough)",
+				i, pkt.SequenceNumber, want[i].SequenceNumber)
+		}
+		if pkt.Timestamp != want[i].Timestamp {
+			t.Errorf("packet[%d]: got Timestamp=%d, want %d (passthrough)",
+				i, pkt.Timestamp, want[i].Timestamp)
 		}
 	}
 
-	// Verify monotonic timestamp (960 samples per 20ms Opus frame at 48 kHz).
-	for i, pkt := range pkts {
-		wantTS := uint32(i) * 960
-		if pkt.Timestamp != wantTS {
-			t.Errorf("packet[%d]: got Timestamp=%d, want %d", i, pkt.Timestamp, wantTS)
+	src.close()
+	r.Close()
+}
+
+// TestGiven_SourcePadsPackets_When_Forwarded_Then_PaddingBitCleared verifies the
+// relay strips the RTP padding state from forwarded packets. pion's
+// rtp.Packet.Unmarshal removes the trailing padding bytes from Payload but leaves
+// Header.Padding=true (and records PaddingSize). Forwarding that verbatim emits a
+// packet whose padding bit is set while no padding bytes are present; the receiver
+// then reads the last payload byte as the padding count and discards the packet
+// whenever that value exceeds the payload length — for arbitrary Opus payloads,
+// roughly half the time. That silent ~47% drop was the measured "radio glitch".
+func TestGiven_SourcePadsPackets_When_Forwarded_Then_PaddingBitCleared(t *testing.T) {
+	r := New("padding-room")
+	l := &mockListener{}
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
+
+	src := newMockSource()
+	r.SetSource(src, func() { src.close() })
+
+	// Source emits packets in the exact state pion leaves them after Unmarshal of
+	// a padded RTP packet: Padding bit set, PaddingSize recorded, but Payload
+	// already stripped of the padding bytes. The last payload byte (0x7f = 127)
+	// would be misread as a padding length far beyond the 3-byte payload.
+	const sendCount = 5
+	for i := 0; i < sendCount; i++ {
+		src.send(&rtp.Packet{
+			Header: rtp.Header{
+				SequenceNumber: uint16(1000 + i),
+				Padding:        true,
+			},
+			PaddingSize: 4,
+			Payload:     []byte{0x10, 0x20, 0x7f},
+		})
+	}
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == sendCount })
+
+	// Then — every forwarded packet is self-consistent: padding bit cleared and
+	// PaddingSize zeroed, so the receiver never misinterprets a payload byte as a
+	// padding count.
+	for i, pkt := range l.received() {
+		if pkt.Header.Padding {
+			t.Errorf("packet[%d]: Header.Padding still set; receiver will misread payload as padding", i)
+		}
+		if pkt.PaddingSize != 0 {
+			t.Errorf("packet[%d]: PaddingSize=%d, want 0", i, pkt.PaddingSize)
 		}
 	}
 
-	src2.close()
+	src.close()
 	r.Close()
 }
 
