@@ -126,8 +126,9 @@ func (s *Server) maybeEmitICERestart(roomID string, fractionLost float64, state 
 	if sourceSess == nil {
 		return
 	}
-	sourceSess.send(signaling.ServerMessage{
+	_ = sourceSess.send(signaling.ServerMessage{
 		Type:    signaling.TypeICERestart,
 		UseTURN: s.useTURN,
 	})
+	s.Metrics.ICERestartTotal.Add(1)
 }

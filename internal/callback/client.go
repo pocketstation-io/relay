@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -57,7 +58,16 @@ func (c *Client) PushSourceActive(roomID string, active bool) {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/internal/rooms/%s/source-active", c.baseURL, roomID)
-	resp, err := c.http.Post(url, "application/json", bytes.NewReader(body)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("callback: build request error", "event", "source_active", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret := os.Getenv("INTERNAL_SECRET"); secret != "" {
+		req.Header.Set("X-Internal-Secret", secret)
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		slog.Warn("callback: POST failed", "event", "source_active", "room_id", roomID, "active", active, "error", err)
 		return
@@ -78,7 +88,16 @@ func (c *Client) PushListenerLeave(roomID string) {
 		return
 	}
 	url := fmt.Sprintf("%s/v1/internal/rooms/%s/listener-leave", c.baseURL, roomID)
-	resp, err := c.http.Post(url, "application/json", http.NoBody) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, url, http.NoBody)
+	if err != nil {
+		slog.Warn("callback: build request error", "event", "listener_leave", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret := os.Getenv("INTERNAL_SECRET"); secret != "" {
+		req.Header.Set("X-Internal-Secret", secret)
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		slog.Warn("callback: POST failed", "event", "listener_leave", "room_id", roomID, "error", err)
 		return

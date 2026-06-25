@@ -13,9 +13,11 @@ import (
 
 // TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned verifies
 // that POST /v1/rooms includes the ice_servers field when the server is
-// configured with ICE servers (RELAY-023).
+// configured with client ICE servers (RELAY-023).
 func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing.T) {
-	// Given — server with TURN ice servers configured
+	// Given — server with TURN client ICE servers configured.
+	// ClientICEServers are returned to connecting clients; ICEServers is left
+	// nil so the relay's own Pion does not self-STUN via the embedded TURN.
 	turnServers := []webrtc.ICEServer{
 		{URLs: []string{"stun:relay.example.com:3478"}},
 		{
@@ -26,8 +28,8 @@ func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing
 		},
 	}
 	srv := server.New(server.Config{
-		JWTSecret:  []byte("test-secret"),
-		ICEServers: turnServers,
+		JWTSecret:        []byte("test-secret"),
+		ClientICEServers: turnServers,
 	})
 
 	// When — call handler directly via ResponseRecorder (no TCP binding needed)
