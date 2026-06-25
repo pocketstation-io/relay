@@ -4,6 +4,17 @@ primary_region = "iad"
 [build]
 dockerfile = "Dockerfile"
 
+# Non-sensitive runtime configuration.
+# Secrets (POCKETSTATION_JWT_SECRET) are set via `fly secrets set`.
+[env]
+  PORT             = "8080"
+  ICE_TCP_PORT     = "8081"
+  RELAY_PUBLIC_IPS = "66.241.125.128"
+  TURN_PUBLIC_IP   = "66.241.125.128"
+  TURN_UDP_PORT    = "3478"
+  TURN_TCP_PORT    = "3478"
+  TURN_REALM       = "pocketstation.io"
+
 # Signaling + control plane (WebSocket + HTTP)
 [http_service]
 internal_port = 8080
@@ -15,8 +26,8 @@ type = "connections"
 hard_limit = 500
 soft_limit = 400
 
-# ICE-TCP media plane — exposed as raw TCP (not HTTP)
-# Clients use this for WebRTC media when UDP is unavailable.
+# ICE-TCP media plane — single multiplexed TCP port for all WebRTC peers.
+# Clients behind NAT use this when direct UDP to the relay is blocked.
 # Port 8081 internal → port 8081 external (passthrough).
 [[services]]
 internal_port = 8081
@@ -24,6 +35,26 @@ protocol = "tcp"
 
   [[services.ports]]
   port = 8081
+
+# TURN/STUN UDP — standard port for STUN reflexive discovery and TURN/UDP.
+# Note: TURN relay-address allocations (dynamic ephemeral ports) are not
+# accessible on Fly.io shared anycast without a dedicated IPv4 block.
+# STUN and TURN control-plane work; ICE-TCP (port 8081) handles the media
+# path for peers behind strict NAT.
+[[services]]
+internal_port = 3478
+protocol = "udp"
+
+  [[services.ports]]
+  port = 3478
+
+# TURN/TCP — TURN over plain TCP for clients where UDP:3478 is filtered.
+[[services]]
+internal_port = 3478
+protocol = "tcp"
+
+  [[services.ports]]
+  port = 3478
 
 [[vm]]
 memory = "512mb"

@@ -1,8 +1,6 @@
 package server
 
 import (
-	"encoding/base64"
-
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -17,11 +15,11 @@ import (
 // KEY_EXCHANGE messages are rejected with a role_mismatch error.
 func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 	if s.role != auth.RoleSource {
-		s.sendError("role_mismatch", "KEY_EXCHANGE requires a source token")
+		s.sendError(signaling.ErrCodeRoleMismatch, "KEY_EXCHANGE requires a source token")
 		return
 	}
 	if s.rm == nil {
-		s.sendError("not_joined", "join a room before sending KEY_EXCHANGE")
+		s.sendError(signaling.ErrCodeNotJoined, "join a room before sending KEY_EXCHANGE")
 		return
 	}
 
@@ -30,28 +28,30 @@ func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 		SFrameKey: msg.SFrameKey,
 	}
 
-	s.srv.mu.Lock()
+	// TODO(Phase 3, RELAY-014): Room should own its listener session map; see handleKeyExchange O(N) note.
+	s.srv.mu.RLock()
 	sessions := make([]*session, 0, len(s.srv.sessions))
 	for _, sess := range s.srv.sessions {
 		sessions = append(sessions, sess)
 	}
-	s.srv.mu.Unlock()
+	s.srv.mu.RUnlock()
 
 	// Deliver to all current listener sessions in this room.
 	for _, sess := range sessions {
 		if sess.id != s.id && sess.rm != nil && sess.rm.ID == s.rm.ID &&
 			sess.role == auth.RoleListener {
-			sess.send(forward)
+			_ = sess.send(forward)
 		}
 	}
 
+	// Count the successful forward regardless of individual send errors; the
+	// metric tracks KEY_EXCHANGE dispatch attempts, not per-listener delivery.
+	s.srv.Metrics.KeyExchangeTotal.Add(1)
+
 	// Persist the key so late-joining listeners receive it immediately on
-	// SUBSCRIBE (RELAY-014). Decode from base64 to raw bytes for storage;
-	// re-encode on delivery so the wire format is always base64.
+	// SUBSCRIBE (RELAY-014). Store the opaque base64 string as-is; the relay
+	// never decodes it to raw key material so it never holds plaintext bytes.
 	if msg.SFrameKey != "" {
-		keyBytes, err := base64.StdEncoding.DecodeString(msg.SFrameKey)
-		if err == nil {
-			s.rm.SetKey(keyBytes)
-		}
+		s.rm.SetKey(msg.SFrameKey)
 	}
 }

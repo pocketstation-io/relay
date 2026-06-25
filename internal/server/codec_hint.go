@@ -170,7 +170,7 @@ func (s *Server) maybeEmitCodecHint(
 	if sourceSess == nil {
 		return
 	}
-	sourceSess.send(signaling.ServerMessage{
+	_ = sourceSess.send(signaling.ServerMessage{
 		Type:      signaling.TypeCodecHint,
 		CodecHint: &hint,
 	})

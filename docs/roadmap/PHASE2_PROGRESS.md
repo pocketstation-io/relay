@@ -273,6 +273,286 @@ This supersedes the Phase 1 mock-listener benchmark (discardListener). RELAY-009
 
 ---
 
+---
+
+## Wave 6 — Code quality hardening (2026-06-11)
+
+Fixes 0 through 10 applied to `pocketstation-io/relay/`.
+
+### Fix 0 — Remove duplicate handleKeyExchange
+
+**What changed:** `internal/server/server.go`
+
+Removed the duplicate `handleKeyExchange` method that had drifted into `server.go`
+alongside the canonical implementation in `sframe_handler.go`. The `sframe_handler.go`
+version (RELAY-014 architectural home) is the only definition.
+
+### Staff Bar Self-Check — Fix 0: Remove duplicate handleKeyExchange
+
+- Smallest correct design: yes — single definition in dedicated file.
+- Tests added or updated: no — existing tests already covered the behaviour.
+- Hot-path safe: yes — no hot-path change.
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: none.
+
+---
+
+### Fix 0b — broadcast.sh health check
+
+**What changed:** `scripts/broadcast.sh`
+
+Replaced the `kill -0 $RELAY_PID` check (detects only the go run launcher, not
+port binding) with a `wait_for_port 8080` poll (up to 15 s). Added
+`--skip-relay-start` flag for when the relay is already running.
+
+### Staff Bar Self-Check — Fix 0b: broadcast.sh health check
+
+- Smallest correct design: yes — `nc -z` poll is portable and idiomatic.
+- Tests added or updated: not applicable (shell script, no Go tests).
+- Hot-path safe: not applicable.
+- Public API changed: no — `--relay-url` still works; new `--skip-relay-start` is additive.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: `nc` may not be present on minimal Linux containers; fallback could use `/dev/tcp`.
+
+---
+
+### Step 1 — Split session.go out of server.go
+
+**What changed:** `internal/server/server.go` → new `internal/server/session.go`
+
+Moved `session` struct and all its methods (`run`, `cleanup`, `closeConn`,
+`handleJoin`, `handleICE`, `handleLatencyReport`, `newPeerConnection`,
+`send`, `sendError`, `trackSource`) into a dedicated file.
+`server.go` now contains only `Server`, `New`, `Handler`, `Serve`, `Shutdown`,
+route handlers, and `newID`. No behaviour change.
+
+### Staff Bar Self-Check — Step 1: Split session.go
+
+- Smallest correct design: yes — file split at the exact `Server` / `session` boundary.
+- Tests added or updated: no — pure refactor; existing tests verify preservation.
+- Hot-path safe: yes — no logic change.
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes — refactor only.
+- Unsafe added: no.
+- Remaining risk: none; all existing tests pass.
+
+---
+
+### Step 2 — Fix room.Public race
+
+**What changed:** `internal/room/room.go`, `internal/server/session.go`,
+`internal/room/public_channels_test.go`
+
+Changed `Public bool` to `Public atomic.Bool`. All reads updated to
+`.Load()`; all writes updated to `.Store(true)`. `ListPublic` uses the
+atomic read under the manager's `RLock`; `handleJoin` uses `.Store(true)`.
+
+### Staff Bar Self-Check — Step 2: room.Public race
+
+- Smallest correct design: yes — `atomic.Bool` is the idiomatic zero-overhead solution.
+- Tests added or updated: yes — test file updated to use `.Store()`/`.Load()`.
+- Hot-path safe: yes — `atomic.Bool.Load` is a single atomic read, cheaper than a mutex.
+- Public API changed: yes — `Room.Public` type changed from `bool` to `atomic.Bool`.
+  Callers outside this package (tests, session.go) updated. No external consumers.
+- New dependency: no (stdlib `sync/atomic`).
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: none.
+
+---
+
+### Step 3 — Go 1.22 ServeMux path parameters
+
+**What changed:** `internal/server/server.go`
+
+Replaced the manual `roomsSubrouter` string-parsing function with
+`mux.HandleFunc("GET /v1/rooms/{id}/latency", s.roomLatency)`.
+`roomLatency` now extracts the room ID via `r.PathValue("id")`.
+`roomsSubrouter` deleted entirely. Method guard (`GET` only) is now
+enforced by the pattern itself.
+
+### Staff Bar Self-Check — Step 3: ServeMux path parameters
+
+- Smallest correct design: yes — stdlib-only; removes 20 lines of manual parsing.
+- Tests added or updated: no — existing latency tests still pass.
+- Hot-path safe: yes — request parsing is not the hot path.
+- Public API changed: no — HTTP API surface unchanged.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: Go 1.22+ required (go.mod declares `go 1.26`, satisfied).
+
+---
+
+### Step 4 — Typed error codes
+
+**What changed:** `internal/signaling/errors.go` (new),
+`internal/server/session.go`, `internal/server/sframe_handler.go`
+
+Added `signaling.ErrorCode` type and 12 named constants. `sendError` signature
+changed to `(code signaling.ErrorCode, message string)`. All call sites updated.
+`ServerMessage.Code` remains `string` for JSON wire compatibility — documented
+with a one-line comment in `sendError`.
+
+### Staff Bar Self-Check — Step 4: Typed error codes
+
+- Smallest correct design: yes — `type ErrorCode string` with constants; no registry or factory.
+- Tests added or updated: no — error code values are unchanged; existing tests verify them.
+- Hot-path safe: yes — cast `string(code)` is zero-cost.
+- Public API changed: yes — `sendError` is an unexported method; no external impact.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: `RELAY_SHUTTING_DOWN` in Shutdown is a raw string — not a signaling error, acceptable.
+
+---
+
+### Step 5 — Fix silent write failure in send()
+
+**What changed:** `internal/server/session.go`, `internal/server/server.go`,
+`internal/server/codec_hint.go`, `internal/server/ice_restart.go`,
+`internal/server/sframe_handler.go`
+
+`send()` now returns `error` and logs write failures via `slog.Warn`. All call
+sites updated to explicit `_ = s.send(...)`. ICE candidate callback logs
+failures; read loop detects dead connection naturally.
+
+### Staff Bar Self-Check — Step 5: Fix silent write failure
+
+- Smallest correct design: yes — log-and-return-error is the minimal correct contract.
+- Tests added or updated: no — write failure paths are exercised by shutdown tests.
+- Hot-path safe: yes — `WriteJSON` is in the signaling path, not the RTP path.
+- Public API changed: no — `send` is unexported.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: ICE candidate send failures are logged but the session is not torn down
+  immediately; the read loop will detect the dead connection on the next read. Acceptable.
+
+---
+
+### Step 6 — handleKeyExchange uses RLock
+
+**What changed:** `internal/server/sframe_handler.go`, `internal/server/server.go`
+
+`handleKeyExchange` snapshot now uses `s.srv.mu.RLock()`/`RUnlock()` instead of
+a write lock, since it only reads the sessions map. `s.srv.mu` promoted from
+`sync.Mutex` to `sync.RWMutex` to enable this. Added TODO comment for Phase 3
+room-owned listener map.
+
+### Staff Bar Self-Check — Step 6: handleKeyExchange RLock
+
+- Smallest correct design: yes — read lock is sufficient for a snapshot read.
+- Tests added or updated: no — race detector covers this; key exchange test validates fanout.
+- Hot-path safe: yes — KEY_EXCHANGE is rare signaling; even the write lock was acceptable.
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: O(N) scan over all sessions is documented in TODO. Acceptable for Phase 2.
+
+---
+
+### Step 7 — Add missing metrics
+
+**What changed:** `internal/metrics/metrics.go`, `internal/server/ice_restart.go`,
+`internal/server/sframe_handler.go`, `internal/server/server.go`
+
+Added `ICERestartTotal`, `WebhookErrorsTotal`, `KeyExchangeTotal` to `Registry`.
+Incremented at the correct call sites. Exposed via `WritePrometheus`.
+`metricsHandler` snapshots `WebhookErrorsTotal` from the dispatcher at scrape time.
+
+### Staff Bar Self-Check — Step 7: Add missing metrics
+
+- Smallest correct design: yes — `atomic.Int64` fields; no locking.
+- Tests added or updated: no — Prometheus output format tests are not present;
+  the increment paths are covered by existing integration tests.
+- Hot-path safe: yes — metrics are on the signaling path, not the RTP path.
+- Public API changed: yes — `Registry` gains 3 new fields. No external consumers.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: `WebhookErrorsTotal` is snapshotted at scrape time from
+  `dispatcher.ErrorsTotal()`, not incremented directly in the registry.
+  Both counters stay in sync as long as no parallel implementation exists.
+
+---
+
+### Step 8 — Log webhook delivery failures
+
+**What changed:** `internal/webhook/webhook.go`, `internal/server/server.go`
+
+All failure paths in `Dispatcher.Send` goroutine now log a structured
+`slog.Warn("webhook delivery failed", ...)` with `event_type`, `room_id`,
+`session_id`, and `error`. Added `errorsTotal atomic.Int64` to `Dispatcher`
+and exposed via `ErrorsTotal()`. Relay `metricsHandler` snapshots it.
+
+### Staff Bar Self-Check — Step 8: Log webhook delivery failures
+
+- Smallest correct design: yes — counter on the dispatcher; no registry coupling.
+- Tests added or updated: no — existing webhook tests exercise error paths;
+  the new log lines don't break them.
+- Hot-path safe: yes — webhook goroutines are off the audio path.
+- Public API changed: yes — `Dispatcher` gains `ErrorsTotal() int64`. Additive.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: none.
+
+---
+
+### Step 9 — KEY_EXCHANGE fan-out integration test
+
+**What changed:** `test/integration/key_exchange_test.go` (new)
+
+Added `TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey`.
+Verifies: (1) 3 listeners receive the key, (2) source does not receive the key
+back, (3) a 4th listener joining after the key was sent receives it immediately
+(late-join path). Uses a `fanOutMessages` helper to route WebSocket messages to
+separate channels for ICE handshake and KEY_EXCHANGE assertions.
+
+### Staff Bar Self-Check — Step 9: KEY_EXCHANGE integration test
+
+- Smallest correct design: yes — reuses existing test infrastructure
+  (`newTestServer`, `doPublishHandshake`, `doSubscribeHandshake`).
+- Tests added or updated: yes — new test file.
+- Hot-path safe: not applicable (test code).
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes — behaviour test for existing RELAY-014 feature.
+- Unsafe added: no.
+- Remaining risk: `fanOutMessages` channels are buffered (64/8); in theory a
+  flood of messages could overflow the buffer, but signaling is low-volume.
+
+---
+
+### Step 10 — Document room_id format
+
+**What changed:** `docs/contracts/SIGNALING_PROTOCOL.md`
+
+Added "Room creation" section with `POST /v1/rooms` response structure and
+explicit `room_id` format specification: UUID v4, RFC 4122, lowercase hex with
+hyphens. Clients must treat it as an opaque string.
+
+### Staff Bar Self-Check — Step 10: Document room_id format
+
+- Smallest correct design: yes — documentation only.
+- Tests added or updated: not applicable.
+- Hot-path safe: not applicable.
+- Public API changed: no.
+- New dependency: no.
+- Phase scope respected: yes.
+- Unsafe added: no.
+- Remaining risk: none.
+
+---
+
 ### Production Bar Phase Exit Self-Check (2026-06-02)
 
 - Product flow runs end-to-end against real code: YES — 5000/5000 packets, 0 drops, live relay.

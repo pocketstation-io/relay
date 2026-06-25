@@ -57,6 +57,35 @@ Every message carries a `type` field. Unknown types are silently discarded.
 
 ---
 
+## Room creation
+
+### POST /v1/rooms — response
+
+```json
+{
+  "room_id":        "<string>",
+  "source_token":   "<JWT>",
+  "listener_token": "<JWT>",
+  "qr_url":         "/listen?room=<room_id>",
+  "ice_servers":    [ ... ]
+}
+```
+
+#### room_id format
+
+`room_id` is a UUID v4 string (RFC 4122, lowercase hex with hyphens, e.g.
+`550e8400-e29b-41d4-a716-446655440000`). Clients must treat it as an opaque
+string and must not parse its structure.
+
+The relay mints `room_id` values using `crypto/rand` with version 4 bits set
+(`b[6] & 0x0f | 0x40`) and variant bits set (`b[8] & 0x3f | 0x80`).
+
+`ice_servers` is only present in the response when the relay has embedded TURN
+configured (RELAY-023). When absent, clients should fall back to their own STUN
+configuration.
+
+---
+
 ## Message types
 
 ### PUBLISH (client → relay)

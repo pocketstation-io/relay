@@ -418,6 +418,58 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 	r.Close()
 }
 
+// TestGiven_SourceReconnects_When_NewSessionHasDifferentInitialSeq_Then_RelaySeqIsMonotonic
+// verifies that relay-local resequencing prevents sequence number gaps when the
+// CLI source reconnects (new str0m session = new random initial RTP sequence).
+// This is the root cause of the 47% apparent packet loss observed in Chrome's
+// WebRTC stats: pion rewrites the SSRC to the relay track's SSRC, so Chrome sees
+// one continuous SSRC with a sequence gap — interpreted as massive packet loss.
+func TestGiven_SourceReconnects_When_NewSessionHasDifferentInitialSeq_Then_RelaySeqIsMonotonic(t *testing.T) {
+	r := New("reseq-room")
+	l := &mockListener{}
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
+
+	// Source 1 sends 3 packets with a high initial sequence number (e.g., str0m random start).
+	src1 := newMockSource()
+	r.SetSource(src1, func() { src1.close() })
+
+	for seq := uint16(50000); seq < 50003; seq++ {
+		src1.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq, Timestamp: uint32(seq) * 960}})
+	}
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 3 })
+
+	// Source 2 reconnects with a new random initial sequence (0 — far from 50002).
+	src2 := newMockSource()
+	r.SetSource(src2, nil)
+	for seq := uint16(0); seq < 3; seq++ {
+		src2.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq, Timestamp: uint32(seq) * 960}})
+	}
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 6 })
+
+	// Then — all 6 packets arrive at the listener with relay-local monotonically
+	// increasing sequence numbers (0, 1, 2, 3, 4, 5). No gap of ~50000 between
+	// the two source sessions.
+	pkts := l.received()
+	for i, pkt := range pkts {
+		if pkt.SequenceNumber != uint16(i) {
+			t.Errorf("packet[%d]: got SequenceNumber=%d, want %d", i, pkt.SequenceNumber, i)
+		}
+	}
+
+	// Verify monotonic timestamp (960 samples per 20ms Opus frame at 48 kHz).
+	for i, pkt := range pkts {
+		wantTS := uint32(i) * 960
+		if pkt.Timestamp != wantTS {
+			t.Errorf("packet[%d]: got Timestamp=%d, want %d", i, pkt.Timestamp, wantTS)
+		}
+	}
+
+	src2.close()
+	r.Close()
+}
+
 // TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace
 // verifies that concurrent AddListener calls and forwardLoop do not race.
 // Run with -race; the race detector fires immediately on any unsynchronised
@@ -717,45 +769,34 @@ func TestLatencyReportRollingWindowEvictsOldestSamples(t *testing.T) {
 	}
 }
 
-// TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy verifies that
-// SetKey stores the key and GetKey returns an independent copy (RELAY-014).
-func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy(t *testing.T) {
-	// Given
+// TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsBase64 verifies that
+// SetKey stores the opaque base64 string and GetKey returns it unchanged (RELAY-014).
+// The relay stores the raw base64 it received from the source without decoding,
+// so it never holds raw key material.
+func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsBase64(t *testing.T) {
+	// Given — a base64-encoded key as received over the wire.
 	r := New("key-room")
-	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	want := "AQIDBAUGBwgJCgsMDQ4PEA==" // base64 of 0x01..0x10
 
 	// When
 	r.SetKey(want)
 	got := r.GetKey()
 
-	// Then — value matches.
-	if len(got) != len(want) {
-		t.Fatalf("GetKey length = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("GetKey[%d] = %#x, want %#x", i, got[i], want[i])
-		}
-	}
-
-	// Then — mutating the returned slice does not affect the stored key.
-	got[0] = 0xff
-	second := r.GetKey()
-	if second[0] == 0xff {
-		t.Error("GetKey returned a reference to the internal slice; expected an independent copy")
+	// Then — returned string matches exactly what was stored.
+	if got != want {
+		t.Fatalf("GetKey = %q, want %q", got, want)
 	}
 }
 
-// TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil verifies that GetKey
-// returns nil before any KEY_EXCHANGE has been received (RELAY-014).
-func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
+// TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsEmpty verifies that GetKey
+// returns "" before any KEY_EXCHANGE has been received (RELAY-014).
+func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsEmpty(t *testing.T) {
 	// Given / When
 	r := New("no-key-room")
 
 	// Then
-	if got := r.GetKey(); got != nil {
-		t.Errorf("GetKey = %v, want nil", got)
+	if got := r.GetKey(); got != "" {
+		t.Errorf("GetKey = %q, want empty string", got)
 	}
 }
 
@@ -765,8 +806,7 @@ func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
 func TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable(t *testing.T) {
 	// Given — a key has been stored before the listener joins.
 	r := New("late-join-room")
-	key := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe,
-		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	key := "3q2+78r+ur4BAgMEBQYHCA==" // base64 of 0xde 0xad 0xbe 0xef ... 0x08
 	r.SetKey(key)
 
 	// When — a listener joins after the key has been stored.
@@ -777,15 +817,10 @@ func TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable(t *t
 
 	// Then — GetKey returns the stored key so the server can forward it.
 	retrieved := r.GetKey()
-	if retrieved == nil {
-		t.Fatal("GetKey returned nil; late-joining listener would not receive key")
+	if retrieved == "" {
+		t.Fatal("GetKey returned empty string; late-joining listener would not receive key")
 	}
-	if len(retrieved) != len(key) {
-		t.Fatalf("GetKey length = %d, want %d", len(retrieved), len(key))
-	}
-	for i := range key {
-		if retrieved[i] != key[i] {
-			t.Errorf("GetKey[%d] = %#x, want %#x", i, retrieved[i], key[i])
-		}
+	if retrieved != key {
+		t.Errorf("GetKey = %q, want %q", retrieved, key)
 	}
 }
