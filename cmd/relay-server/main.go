@@ -93,6 +93,35 @@ func main() {
 		slog.Info("NAT1To1 public IPs configured", "ips", cfg.NAT1To1IPs)
 	}
 
+	// ICE-UDP mux: force ALL UDP media through a single socket so the relay
+	// gathers exactly one UDP host candidate. Without this, pion binds one
+	// socket per local interface (and per NAT1To1 IP); media then egresses from
+	// a socket the remote peer never consented to and is dropped.
+	//
+	// Bind the socket to the SPECIFIC advertised IP (RELAY_PUBLIC_IPS), not
+	// 0.0.0.0. On a multi-homed host (e.g. a LAN IP plus a VM/bridge interface),
+	// a 0.0.0.0 socket lets the kernel choose the egress interface per
+	// destination, so media can leave from an interface that does not match the
+	// advertised host candidate — the listener's nominated pair then receives
+	// zero media. Pinning the socket to the advertised IP makes egress match the
+	// candidate. Falls back to 0.0.0.0 when no public IP is configured.
+	udpBindIP := net.IPv4zero
+	if len(cfg.NAT1To1IPs) > 0 {
+		if ip := net.ParseIP(cfg.NAT1To1IPs[0]); ip != nil {
+			udpBindIP = ip
+		}
+	}
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   udpBindIP,
+		Port: getenvInt("ICE_UDP_PORT", 0),
+	})
+	if err != nil {
+		slog.Error("failed to bind ICE-UDP socket", "error", err)
+		os.Exit(1)
+	}
+	cfg.ICEUDPMux = webrtc.NewICEUDPMux(nil, udpConn)
+	slog.Info("ICE-UDP mux started", "addr", udpConn.LocalAddr().String())
+
 	s := server.New(cfg)
 
 	const defaultShutdownGraceSec = 30

@@ -94,6 +94,13 @@ type Config struct {
 	// created by this server. Production: SetICETCPMux(tcpMux) on port 443.
 	// Tests: leave nil; the loopback ICE API handles connectivity.
 	ICETCPMux pionIce.TCPMux
+	// ICEUDPMux, when non-nil, forces ALL UDP ICE traffic through a single
+	// shared socket. Without it, pion gathers one UDP host candidate per local
+	// interface (and per NAT1To1 IP), so media can egress from a socket the
+	// remote peer never consented to — the peer then drops those packets. On a
+	// multi-homed host this caused ~50% RTP loss. A single mux guarantees one
+	// egress port matching the nominated candidate pair.
+	ICEUDPMux pionIce.UDPMux
 	// RoomConfig sets per-room inactivity timeout and source reconnect window.
 	// Zero values in RoomConfig use package defaults (30 min / 60 s).
 	// Read from ROOM_EXPIRY_MINUTES and SOURCE_RECONNECT_WINDOW_SEC env vars.
@@ -120,6 +127,7 @@ type Server struct {
 	iceServers        []webrtc.ICEServer // relay's own Pion PeerConnections
 	clientICEServers  []webrtc.ICEServer // returned to clients in createRoom
 	iceTCPMux         pionIce.TCPMux
+	iceUDPMux         pionIce.UDPMux
 	nat1to1IPs        []string
 
 	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
@@ -187,6 +195,7 @@ func New(cfg Config) *Server {
 		iceServers:          cfg.ICEServers,
 		clientICEServers:    cfg.ClientICEServers,
 		iceTCPMux:           cfg.ICETCPMux,
+		iceUDPMux:           cfg.ICEUDPMux,
 		nat1to1IPs:          cfg.NAT1To1IPs,
 		maxRooms:            maxRooms,
 		maxListenersPerRoom: maxListeners,
