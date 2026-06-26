@@ -439,16 +439,45 @@ func (s *session) handleLatencyReport(msg signaling.ClientMessage) {
 	}
 }
 
-// newMediaEngineWithAudioNACK returns a MediaEngine with default codecs registered
-// and NACK feedback enabled for audio tracks. In pion v4, NACK is only registered
-// for video by default; enabling it for audio allows the relay to request
-// retransmission of dropped audio packets.
+// opusPayloadType is the RTP payload type the relay registers Opus under. 111 is
+// the de-facto WebRTC default (matches pion's RegisterDefaultCodecs and Chrome).
+const opusPayloadType = 111
+
+// opusStereoFmtp is the SDP fmtp line the relay advertises for Opus. Per RFC 7587,
+// the relay (which forwards stereo Opus from the source to the browser as an SFU,
+// without transcoding) must signal stereo on BOTH negotiated legs or libwebrtc
+// silently downmixes music to mono:
+//   - stereo=1        — the relay accepts/decodes stereo (receive direction)
+//   - sprop-stereo=1  — the relay will send stereo (send direction)
+//   - useinbandfec=1  — accept Opus in-band FEC (loss concealment)
+//   - maxaveragebitrate — receive-side cap (128 kbps, the transparent music bar)
+// These are orthogonal between offer and answer (RFC 7587 §6.1), so the relay
+// declares its own; the source declares sprop-stereo and the browser declares
+// stereo on their sides.
+const opusStereoFmtp = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=131072"
+
+// newMediaEngineWithAudioNACK returns an audio-only MediaEngine that registers a
+// stereo-capable Opus (48 kHz, 2 channels) with the stereo fmtp above and NACK
+// feedback. The relay is an Opus-only audio SFU, so registering just Opus (rather
+// than RegisterDefaultCodecs) keeps negotiation minimal and lets the answer carry
+// the stereo fmtp — RegisterDefaultCodecs would register a mono-fmtp Opus at the
+// same payload type and cannot be amended. NACK lets the relay request
+// retransmission of dropped audio packets (pion enables NACK only for video by
+// default).
 func newMediaEngineWithAudioNACK() (*webrtc.MediaEngine, error) {
 	m := &webrtc.MediaEngine{}
-	if err := m.RegisterDefaultCodecs(); err != nil {
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeOpus,
+			ClockRate:    48000,
+			Channels:     2,
+			SDPFmtpLine:  opusStereoFmtp,
+			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}},
+		},
+		PayloadType: opusPayloadType,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	m.RegisterFeedback(webrtc.RTCPFeedback{Type: "nack"}, webrtc.RTPCodecTypeAudio)
 	return m, nil
 }
 
