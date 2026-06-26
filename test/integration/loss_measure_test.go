@@ -30,7 +30,7 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 	}
 
 	const (
-		sendCount  = 500              // 500 packets ...
+		sendCount  = 500                   // 500 packets ...
 		sendPeriod = 20 * time.Millisecond // ... at 50 pkt/s = 10 s of audio
 	)
 

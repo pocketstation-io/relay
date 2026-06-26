@@ -52,19 +52,19 @@ func must(err error, ctx string) {
 
 // Artifact is the JSON proof file written at the end of the run.
 type Artifact struct {
-	Relay             string    `json:"relay"`
-	Workers           int       `json:"workers"`
-	Target            int64     `json:"target"`
-	PacketsSent       int64     `json:"packets_sent"`
-	PacketsForwarded  int64     `json:"packets_forwarded_relay_counter"`
-	ElapsedSeconds    float64   `json:"elapsed_seconds"`
-	AvgRatePerSec     float64   `json:"avg_rate_pkt_per_sec"`
-	PacketsDropped    int64     `json:"packets_dropped_relay_counter"`
-	RoomsActive       int64     `json:"rooms_active_at_end"`
-	SessionsTotal     int64     `json:"sessions_total"`
-	StartedAt         time.Time `json:"started_at"`
-	CompletedAt       time.Time `json:"completed_at"`
-	ReachedTarget     bool      `json:"reached_target"`
+	Relay            string    `json:"relay"`
+	Workers          int       `json:"workers"`
+	Target           int64     `json:"target"`
+	PacketsSent      int64     `json:"packets_sent"`
+	PacketsForwarded int64     `json:"packets_forwarded_relay_counter"`
+	ElapsedSeconds   float64   `json:"elapsed_seconds"`
+	AvgRatePerSec    float64   `json:"avg_rate_pkt_per_sec"`
+	PacketsDropped   int64     `json:"packets_dropped_relay_counter"`
+	RoomsActive      int64     `json:"rooms_active_at_end"`
+	SessionsTotal    int64     `json:"sessions_total"`
+	StartedAt        time.Time `json:"started_at"`
+	CompletedAt      time.Time `json:"completed_at"`
+	ReachedTarget    bool      `json:"reached_target"`
 }
 
 func main() {
