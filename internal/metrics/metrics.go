@@ -9,11 +9,14 @@ import (
 // Registry holds all Prometheus-text-format counters/gauges for the relay.
 // All fields are safe for concurrent access.
 type Registry struct {
-	PacketsForwarded atomic.Uint64
-	PacketsDropped   atomic.Uint64
-	ListenerCount    atomic.Int64
-	RoomsActive      atomic.Int64
-	SessionsTotal    atomic.Uint64
+	PacketsForwarded   atomic.Uint64
+	PacketsDropped     atomic.Uint64
+	ListenerCount      atomic.Int64
+	RoomsActive        atomic.Int64
+	SessionsTotal      atomic.Uint64
+	ICERestartTotal    atomic.Int64
+	WebhookErrorsTotal atomic.Int64
+	KeyExchangeTotal   atomic.Int64
 }
 
 // New returns an initialized Registry.
@@ -32,4 +35,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeI("relay_listener_count", "Current number of active listeners.", "gauge", r.ListenerCount.Load())
 	writeI("relay_rooms_active", "Current number of active rooms.", "gauge", r.RoomsActive.Load())
 	write("relay_sessions_total", "Total WebSocket sessions created.", "counter", r.SessionsTotal.Load())
+	writeI("relay_ice_restart_total", "Total ICE restart messages sent to sources.", "counter", r.ICERestartTotal.Load())
+	writeI("relay_webhook_errors_total", "Total webhook delivery failures (non-2xx or transport error).", "counter", r.WebhookErrorsTotal.Load())
+	writeI("relay_key_exchange_total", "Total KEY_EXCHANGE messages successfully forwarded to listeners.", "counter", r.KeyExchangeTotal.Load())
 }

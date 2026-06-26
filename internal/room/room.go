@@ -2,6 +2,7 @@ package room
 
 import (
 	"errors"
+	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -144,7 +145,7 @@ type Source interface {
 
 // Listener is the write-side of a delivered audio stream.
 // *webrtc.TrackLocalStaticRTP satisfies this interface directly.
-// The interface boundary also enables ADR-009 benchmarking with mock listeners.
+// The interface boundary also enables RELAY-009 benchmarking with mock listeners.
 type Listener interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
@@ -175,7 +176,7 @@ type listenerEntry struct {
 //
 // Ownership: Room is created open. Callers call Close to terminate it.
 // Failure: forwardLoop exits on source EOF or done close; source is cleared atomically.
-// Phase scope: ADR-005 copy-on-write + room expiry + source reconnect (Phase 2).
+// Phase scope: RELAY-005 copy-on-write + room expiry + source reconnect (Phase 2).
 //
 // Intentionally not implemented: automatic room cleanup on last-peer-leave.
 type Room struct {
@@ -230,18 +231,27 @@ type Room struct {
 	// Zero means unlimited. Set once at creation from ManagerConfig.MaxListeners.
 	maxListeners int
 
+	// pendingSlots counts listeners that have sent SUBSCRIBE but whose DTLS
+	// handshake has not yet completed. These are counted alongside active
+	// listeners for capacity checks so concurrent SUBSCRIBE bursts cannot
+	// bypass the per-room limit. Managed by TryReserveSlot / ReleaseSlot.
+	pendingSlots atomic.Int32
+
 	// Public marks this room as a public broadcast channel (spec §3.1).
-	// Set once at creation time when the PUBLISH message carries "public": true.
-	// Readable by multiple goroutines; written once before any concurrent access.
-	Public bool
+	// Set via the PUBLISH message when "public": true.
+	// Uses atomic.Bool so concurrent reads from ListPublic and writes from the
+	// signal handler are race-free without requiring listenersMu or sourceMu.
+	Public atomic.Bool
 
 	// createdAt records when the room was created. Set once in newWithTimeouts.
 	createdAt time.Time
 
-	// keyMu guards currentKey for SFrame E2EE (ADR-014).
+	// keyMu guards currentKey for SFrame E2EE (RELAY-014).
 	// Separate from listenersMu so key reads never contend with listener I/O.
+	// currentKey stores the opaque base64 string received from the source;
+	// the relay never decodes it to raw key material.
 	keyMu      sync.RWMutex
-	currentKey []byte
+	currentKey string
 
 	PacketCount     atomic.Uint64
 	ByteCount       atomic.Uint64
@@ -385,6 +395,42 @@ func (r *Room) RemoveListener(peerID string) {
 	r.listeners.Store(&next)
 }
 
+// TryReserveSlot atomically reserves a pending listener slot.
+//
+// A slot counts toward the per-room limit alongside already-active listeners,
+// preventing concurrent SUBSCRIBE bursts from bypassing the capacity check
+// during the ICE/DTLS window (before AddListener is called).
+//
+// Returns false if active+pending listeners would equal or exceed max.
+// max <= 0 means unlimited — the slot is always granted.
+//
+// The caller must call ReleaseSlot exactly once: either when AddListener
+// succeeds (converting the reservation to an active entry) or when the session
+// is cleaned up without DTLS completing.
+func (r *Room) TryReserveSlot(max int) bool {
+	if max <= 0 {
+		r.pendingSlots.Add(1)
+		return true
+	}
+	for {
+		pending := r.pendingSlots.Load()
+		active := int32(r.ListenerCount())
+		if int(pending+active) >= max {
+			return false
+		}
+		if r.pendingSlots.CompareAndSwap(pending, pending+1) {
+			return true
+		}
+	}
+}
+
+// ReleaseSlot decrements the pending slot counter.
+// Must be called exactly once for each successful TryReserveSlot call,
+// whether or not AddListener was subsequently called.
+func (r *Room) ReleaseSlot() {
+	r.pendingSlots.Add(-1)
+}
+
 // ListenerCount returns the current number of registered listeners.
 func (r *Room) ListenerCount() int {
 	return len(*r.listeners.Load())
@@ -415,7 +461,7 @@ func (r *Room) Close() {
 // returns an error or the room is closed. loopDone is closed when the
 // goroutine exits, allowing SetSource to synchronise on reconnect.
 //
-// Hot-path invariants (ADR-005, ADR-009):
+// Hot-path invariants (RELAY-005, RELAY-009):
 //   - One atomic.Load per packet; no lock held during WriteRTP.
 //   - No heap allocation beyond what the loaded slice pointer itself costs.
 //
@@ -455,6 +501,28 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 		}
 	}()
 
+	// maxConsecutiveWriteRTPErrors is the number of consecutive WriteRTP errors
+	// on a single listener before it is evicted from the room. Five errors at
+	// 50 pkt/s is ~100 ms of continuous failure — long enough to distinguish a
+	// transient glitch from a dead connection.
+	const maxConsecutiveWriteRTPErrors = 5
+
+	var diagPktSinceLog uint64
+	const diagLogEvery = 100 // log every N packets (~2 s at 50 pkt/s)
+
+	// errCounts tracks consecutive WriteRTP failures per listener peer ID.
+	// Reset to 0 on a successful write.
+	errCounts := make(map[string]int)
+	// deadListeners accumulates peer IDs to evict after each packet fanout.
+	// Reused across iterations to avoid per-packet allocation.
+	var deadListeners []string
+
+	// listenerWritten tracks cumulative nil-return WriteRTP calls per listener.
+	// This is distinct from PacketDropCount (which only counts non-nil errors).
+	// Comparing listenerWritten against room total reveals srtpWriterFuture
+	// silent drops: if written << (total - join_offset), SRTP is not sending.
+	listenerWritten := make(map[string]uint64)
+
 	for {
 		pkt, err := src.ReadRTP()
 		if err != nil {
@@ -469,13 +537,77 @@ func (r *Room) forwardLoop(src Source, loopDone chan struct{}) {
 
 		r.PacketCount.Add(1)
 		r.ByteCount.Add(uint64(len(pkt.Payload)))
+		diagPktSinceLog++
 
-		// ADR-005: one atomic load; no lock held during WriteRTP.
+		// Forward the source's RTP sequence number and timestamp UNCHANGED.
+		// The source (str0m) already emits monotonic, correctly-spaced values
+		// (seq +1, timestamp +960 per 20 ms Opus frame). A relay must preserve
+		// them: the receiver's jitter buffer reconstructs playout timing from
+		// these fields. Rewriting them with relay-local counters distorted the
+		// timeline — a 55 s session arrived stamped as ~104 s, so the browser's
+		// NetEQ treated half the audio as missing and concealed it (~47%),
+		// producing the "radio glitch". Standard SFU behaviour is passthrough.
+
+		// Normalise RTP padding before forwarding. pion's rtp.Packet.Unmarshal
+		// strips the trailing padding bytes out of Payload but leaves
+		// Header.Padding=true (and records the count in PaddingSize). Forwarding
+		// that packet verbatim emits one whose padding bit is set yet which carries
+		// no padding bytes. A receiver (Chrome, and pion) reads the last byte of
+		// the now-unpadded payload as the padding length and discards the packet
+		// whenever that value exceeds the payload size — which, for arbitrary Opus
+		// payloads (~97-151 bytes), happens for roughly half of them. That silent
+		// ~47% drop was the "radio glitch": packets arrive at the receiver's ICE
+		// transport but never become RTP, surfacing as packetsLost with
+		// packetsDiscarded=0. The relay has no reason to re-pad Opus, so clear the
+		// padding state to keep the forwarded packet self-consistent.
+		pkt.Header.Padding = false
+		pkt.PaddingSize = 0
+
+		// RELAY-005: one atomic load; no lock held during WriteRTP.
 		ls := *r.listeners.Load()
 		for _, e := range ls {
-			if err := e.l.WriteRTP(pkt); err != nil {
+			if wErr := e.l.WriteRTP(pkt); wErr != nil {
 				r.PacketDropCount.Add(1)
+				slog.Warn("WriteRTP error", "room_id", r.ID, "peer_id", e.peerID, "err", wErr)
+				errCounts[e.peerID]++
+				if errCounts[e.peerID] >= maxConsecutiveWriteRTPErrors {
+					deadListeners = append(deadListeners, e.peerID)
+				}
+			} else {
+				errCounts[e.peerID] = 0
+				listenerWritten[e.peerID]++
 			}
+		}
+
+		// Evict listeners that have accumulated too many consecutive errors.
+		for _, id := range deadListeners {
+			r.RemoveListener(id)
+			delete(errCounts, id)
+			delete(listenerWritten, id)
+			slog.Warn("evicted dead listener", "room_id", r.ID, "listener_id", id)
+		}
+		deadListeners = deadListeners[:0]
+
+		if diagPktSinceLog >= diagLogEvery {
+			total := r.PacketCount.Load()
+			slog.Info("fwd",
+				"room", r.ID[:8],
+				"total", total,
+				"drop", r.PacketDropCount.Load(),
+				"listeners", len(ls),
+				"seq", pkt.Header.SequenceNumber,
+			)
+			// Per-listener write diagnostic: written < (total - join_offset)
+			// means srtpWriterFuture is silently dropping packets for that listener.
+			for _, e := range ls {
+				slog.Info("fwd_peer",
+					"room", r.ID[:8],
+					"peer", e.peerID[:8],
+					"written", listenerWritten[e.peerID],
+					"room_total", total,
+				)
+			}
+			diagPktSinceLog = 0
 		}
 	}
 }
@@ -603,28 +735,23 @@ func (r *Room) GetLatencyStats() LatencyStats {
 	return r.latency.stats()
 }
 
-// SetKey stores the SFrame room key received via KEY_EXCHANGE (ADR-014).
-// The relay stores the key opaquely so late-joining listeners can receive it.
-// The relay does NOT interpret or decrypt with this key.
-func (r *Room) SetKey(key []byte) {
+// SetKey stores the SFrame room key received via KEY_EXCHANGE (RELAY-014).
+// keyBase64 must be the exact base64 string received from the source; the relay
+// stores it opaquely and never decodes it to raw key material, preserving the
+// SFrame guarantee that the relay never holds plaintext key bytes.
+func (r *Room) SetKey(keyBase64 string) {
 	r.keyMu.Lock()
 	defer r.keyMu.Unlock()
-	cp := make([]byte, len(key))
-	copy(cp, key)
-	r.currentKey = cp
+	r.currentKey = keyBase64
 }
 
-// GetKey returns a copy of the current SFrame room key, or nil if no key has
-// been received yet. The caller owns the returned slice.
-func (r *Room) GetKey() []byte {
+// GetKey returns the opaque base64 SFrame key string, or "" if no key has been
+// received yet. The returned string is the same base64 value the source sent and
+// is safe to forward directly to listeners without re-encoding.
+func (r *Room) GetKey() string {
 	r.keyMu.RLock()
 	defer r.keyMu.RUnlock()
-	if r.currentKey == nil {
-		return nil
-	}
-	cp := make([]byte, len(r.currentKey))
-	copy(cp, r.currentKey)
-	return cp
+	return r.currentKey
 }
 
 // CloseAll closes every active room and removes it from the manager.
@@ -657,7 +784,7 @@ func (m *Manager) ListPublic() []RoomSummary {
 
 	result := make([]RoomSummary, 0)
 	for _, r := range m.rooms {
-		if !r.Public {
+		if !r.Public.Load() {
 			continue
 		}
 		result = append(result, RoomSummary{
