@@ -451,6 +451,7 @@ const opusPayloadType = 111
 //   - sprop-stereo=1  — the relay will send stereo (send direction)
 //   - useinbandfec=1  — accept Opus in-band FEC (loss concealment)
 //   - maxaveragebitrate — receive-side cap (128 kbps, the transparent music bar)
+//
 // These are orthogonal between offer and answer (RFC 7587 §6.1), so the relay
 // declares its own; the source declares sprop-stereo and the browser declares
 // stereo on their sides.
