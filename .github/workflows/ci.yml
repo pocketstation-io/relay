@@ -1,5 +1,8 @@
 name: ci-go
-on: [pull_request, push]
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   go:
     runs-on: ubuntu-latest
