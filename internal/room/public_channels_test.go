@@ -14,7 +14,7 @@ func TestListPublicChannels_ReturnsOnlyPublicRooms(t *testing.T) {
 	// Given: a manager with one public room and one private room
 	m := NewManager()
 	pub := m.GetOrCreate("pub-room")
-	pub.Public = true
+	pub.Public.Store(true)
 	_ = m.GetOrCreate("priv-room") // Public defaults to false
 
 	// When: ListPublic is called
@@ -40,7 +40,7 @@ func TestPublicRoomAppearsInChannelsList(t *testing.T) {
 	// Given: a manager with a public room that has a listener
 	m := NewManager()
 	rm := m.GetOrCreate("broadcast-room")
-	rm.Public = true
+	rm.Public.Store(true)
 	_ = rm.AddListener("peer-1", &mockListener{})
 
 	// When: ListPublic is called
@@ -73,9 +73,9 @@ func TestPrivateRoomExcludedFromChannelsList(t *testing.T) {
 	// Given: a manager with only private rooms
 	m := NewManager()
 	priv1 := m.GetOrCreate("priv-1")
-	priv1.Public = false
+	priv1.Public.Store(false)
 	priv2 := m.GetOrCreate("priv-2")
-	priv2.Public = false
+	priv2.Public.Store(false)
 	_ = priv2.AddListener("peer-x", &mockListener{})
 
 	// When: ListPublic is called

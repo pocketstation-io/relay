@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,6 +46,10 @@ type Event struct {
 type Dispatcher struct {
 	url    string
 	client *http.Client
+
+	// errorsTotal counts non-2xx responses and transport errors for observability.
+	// Exposed via ErrorsTotal() so the relay metrics registry can snapshot it.
+	errorsTotal atomic.Int64
 }
 
 // New returns a Dispatcher that POSTs events to webhookURL.
@@ -53,6 +59,15 @@ func New(webhookURL string) *Dispatcher {
 		url:    webhookURL,
 		client: &http.Client{Timeout: dispatchTimeout},
 	}
+}
+
+// ErrorsTotal returns the cumulative count of delivery failures (non-2xx or
+// transport error). Safe to call concurrently with Send.
+func (d *Dispatcher) ErrorsTotal() int64 {
+	if d == nil {
+		return 0
+	}
+	return d.errorsTotal.Load()
 }
 
 // Send posts the event asynchronously (fire-and-forget with dispatchTimeout).
@@ -70,25 +85,49 @@ func (d *Dispatcher) Send(event Event) {
 	go func() {
 		body, err := json.Marshal(e)
 		if err != nil {
-			slog.Warn("webhook: marshal error", "event_type", e.Type, "error", err)
+			slog.Warn("webhook delivery failed",
+				"event_type", e.Type,
+				"room_id", e.RoomID,
+				"session_id", e.SessionID,
+				"error", err,
+			)
+			d.errorsTotal.Add(1)
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.url, bytes.NewReader(body))
 		if err != nil {
-			slog.Warn("webhook: build request error", "event_type", e.Type, "error", err)
+			slog.Warn("webhook delivery failed",
+				"event_type", e.Type,
+				"room_id", e.RoomID,
+				"session_id", e.SessionID,
+				"error", err,
+			)
+			d.errorsTotal.Add(1)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := d.client.Do(req)
 		if err != nil {
-			slog.Warn("webhook: POST failed", "event_type", e.Type, "room_id", e.RoomID, "error", err)
+			slog.Warn("webhook delivery failed",
+				"event_type", e.Type,
+				"room_id", e.RoomID,
+				"session_id", e.SessionID,
+				"error", err,
+			)
+			d.errorsTotal.Add(1)
 			return
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			slog.Warn("webhook: unexpected status", "event_type", e.Type, "room_id", e.RoomID, "status", resp.StatusCode)
+			slog.Warn("webhook delivery failed",
+				"event_type", e.Type,
+				"room_id", e.RoomID,
+				"session_id", e.SessionID,
+				"error", fmt.Errorf("unexpected HTTP status %d", resp.StatusCode),
+			)
+			d.errorsTotal.Add(1)
 		}
 	}()
 }

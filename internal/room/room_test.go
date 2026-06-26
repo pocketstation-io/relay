@@ -418,6 +418,107 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_ListenerReceivesRTPAf
 	r.Close()
 }
 
+// TestGiven_SourceForwards_When_PacketsForwarded_Then_SeqAndTimestampPassThroughUnchanged
+// verifies the relay forwards each packet's RTP sequence number and timestamp
+// EXACTLY as the source produced them. A relay/SFU must not rewrite these fields:
+// the receiver's jitter buffer reconstructs playout timing from them. An earlier
+// implementation overwrote them with relay-local counters; that distorted the
+// timeline (a 55 s session arrived stamped as ~104 s), so the browser's NetEQ
+// concealed ~47% of the audio as "missing" — the measured "radio glitch".
+func TestGiven_SourceForwards_When_PacketsForwarded_Then_SeqAndTimestampPassThroughUnchanged(t *testing.T) {
+	r := New("passthrough-room")
+	l := &mockListener{}
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
+
+	// Source sends packets with a realistic str0m stream: a random initial
+	// sequence number and timestamp, advancing by 1 and 960 per 20 ms frame.
+	src := newMockSource()
+	r.SetSource(src, func() { src.close() })
+
+	const startSeq = uint16(50000)
+	const startTS = uint32(123456)
+	want := make([]rtp.Header, 0, 5)
+	for i := 0; i < 5; i++ {
+		h := rtp.Header{
+			SequenceNumber: startSeq + uint16(i),
+			Timestamp:      startTS + uint32(i)*960,
+		}
+		want = append(want, h)
+		src.send(&rtp.Packet{Header: h})
+	}
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == 5 })
+
+	// Then — the listener receives the source's seq/timestamp verbatim. No
+	// rewriting, no relay-local counter, no gaps introduced.
+	pkts := l.received()
+	for i, pkt := range pkts {
+		if pkt.SequenceNumber != want[i].SequenceNumber {
+			t.Errorf("packet[%d]: got SequenceNumber=%d, want %d (passthrough)",
+				i, pkt.SequenceNumber, want[i].SequenceNumber)
+		}
+		if pkt.Timestamp != want[i].Timestamp {
+			t.Errorf("packet[%d]: got Timestamp=%d, want %d (passthrough)",
+				i, pkt.Timestamp, want[i].Timestamp)
+		}
+	}
+
+	src.close()
+	r.Close()
+}
+
+// TestGiven_SourcePadsPackets_When_Forwarded_Then_PaddingBitCleared verifies the
+// relay strips the RTP padding state from forwarded packets. pion's
+// rtp.Packet.Unmarshal removes the trailing padding bytes from Payload but leaves
+// Header.Padding=true (and records PaddingSize). Forwarding that verbatim emits a
+// packet whose padding bit is set while no padding bytes are present; the receiver
+// then reads the last payload byte as the padding count and discards the packet
+// whenever that value exceeds the payload length — for arbitrary Opus payloads,
+// roughly half the time. That silent ~47% drop was the measured "radio glitch".
+func TestGiven_SourcePadsPackets_When_Forwarded_Then_PaddingBitCleared(t *testing.T) {
+	r := New("padding-room")
+	l := &mockListener{}
+	if err := r.AddListener("peer-1", l); err != nil {
+		t.Fatalf("AddListener: %v", err)
+	}
+
+	src := newMockSource()
+	r.SetSource(src, func() { src.close() })
+
+	// Source emits packets in the exact state pion leaves them after Unmarshal of
+	// a padded RTP packet: Padding bit set, PaddingSize recorded, but Payload
+	// already stripped of the padding bytes. The last payload byte (0x7f = 127)
+	// would be misread as a padding length far beyond the 3-byte payload.
+	const sendCount = 5
+	for i := 0; i < sendCount; i++ {
+		src.send(&rtp.Packet{
+			Header: rtp.Header{
+				SequenceNumber: uint16(1000 + i),
+				Padding:        true,
+			},
+			PaddingSize: 4,
+			Payload:     []byte{0x10, 0x20, 0x7f},
+		})
+	}
+	waitFor(t, 100*time.Millisecond, func() bool { return len(l.received()) == sendCount })
+
+	// Then — every forwarded packet is self-consistent: padding bit cleared and
+	// PaddingSize zeroed, so the receiver never misinterprets a payload byte as a
+	// padding count.
+	for i, pkt := range l.received() {
+		if pkt.Header.Padding {
+			t.Errorf("packet[%d]: Header.Padding still set; receiver will misread payload as padding", i)
+		}
+		if pkt.PaddingSize != 0 {
+			t.Errorf("packet[%d]: PaddingSize=%d, want 0", i, pkt.PaddingSize)
+		}
+	}
+
+	src.close()
+	r.Close()
+}
+
 // TestGiven_CopyOnWriteListeners_When_ConcurrentAddAndForward_Then_NoRace
 // verifies that concurrent AddListener calls and forwardLoop do not race.
 // Run with -race; the race detector fires immediately on any unsynchronised
@@ -717,45 +818,34 @@ func TestLatencyReportRollingWindowEvictsOldestSamples(t *testing.T) {
 	}
 }
 
-// TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy verifies that
-// SetKey stores the key and GetKey returns an independent copy (ADR-014).
-func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsCopy(t *testing.T) {
-	// Given
+// TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsBase64 verifies that
+// SetKey stores the opaque base64 string and GetKey returns it unchanged (RELAY-014).
+// The relay stores the raw base64 it received from the source without decoding,
+// so it never holds raw key material.
+func TestGiven_KeyExchangeStored_When_GetKey_Then_ReturnsBase64(t *testing.T) {
+	// Given — a base64-encoded key as received over the wire.
 	r := New("key-room")
-	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	want := "AQIDBAUGBwgJCgsMDQ4PEA==" // base64 of 0x01..0x10
 
 	// When
 	r.SetKey(want)
 	got := r.GetKey()
 
-	// Then — value matches.
-	if len(got) != len(want) {
-		t.Fatalf("GetKey length = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("GetKey[%d] = %#x, want %#x", i, got[i], want[i])
-		}
-	}
-
-	// Then — mutating the returned slice does not affect the stored key.
-	got[0] = 0xff
-	second := r.GetKey()
-	if second[0] == 0xff {
-		t.Error("GetKey returned a reference to the internal slice; expected an independent copy")
+	// Then — returned string matches exactly what was stored.
+	if got != want {
+		t.Fatalf("GetKey = %q, want %q", got, want)
 	}
 }
 
-// TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil verifies that GetKey
-// returns nil before any KEY_EXCHANGE has been received (ADR-014).
-func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
+// TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsEmpty verifies that GetKey
+// returns "" before any KEY_EXCHANGE has been received (RELAY-014).
+func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsEmpty(t *testing.T) {
 	// Given / When
 	r := New("no-key-room")
 
 	// Then
-	if got := r.GetKey(); got != nil {
-		t.Errorf("GetKey = %v, want nil", got)
+	if got := r.GetKey(); got != "" {
+		t.Errorf("GetKey = %q, want empty string", got)
 	}
 }
 
@@ -765,8 +855,7 @@ func TestGiven_NoKeyExchangeYet_When_GetKey_Then_ReturnsNil(t *testing.T) {
 func TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable(t *testing.T) {
 	// Given — a key has been stored before the listener joins.
 	r := New("late-join-room")
-	key := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe,
-		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	key := "3q2+78r+ur4BAgMEBQYHCA==" // base64 of 0xde 0xad 0xbe 0xef ... 0x08
 	r.SetKey(key)
 
 	// When — a listener joins after the key has been stored.
@@ -777,15 +866,10 @@ func TestGiven_KeyExchangeStored_When_ListenerJoinsLate_Then_KeyRetrievable(t *t
 
 	// Then — GetKey returns the stored key so the server can forward it.
 	retrieved := r.GetKey()
-	if retrieved == nil {
-		t.Fatal("GetKey returned nil; late-joining listener would not receive key")
+	if retrieved == "" {
+		t.Fatal("GetKey returned empty string; late-joining listener would not receive key")
 	}
-	if len(retrieved) != len(key) {
-		t.Fatalf("GetKey length = %d, want %d", len(retrieved), len(key))
-	}
-	for i := range key {
-		if retrieved[i] != key[i] {
-			t.Errorf("GetKey[%d] = %#x, want %#x", i, retrieved[i], key[i])
-		}
+	if retrieved != key {
+		t.Errorf("GetKey = %q, want %q", retrieved, key)
 	}
 }

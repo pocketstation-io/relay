@@ -1,10 +1,10 @@
 // Benchmarks for the RTP forward path.
 //
-// ADR-009: no zero-alloc claim for the relay is permitted until the
+// RELAY-009: no zero-alloc claim for the relay is permitted until the
 // *webrtc.TrackLocalStaticRTP write path has been measured with a connected
 // peer. These benchmarks use a discard Listener to isolate room dispatch
 // overhead; BenchmarkWriteRTPFanoutConnected provides the companion measurement
-// using a real connected Pion pair (SRTP path) per ADR-009 Phase 2 requirement.
+// using a real connected Pion pair (SRTP path) per RELAY-009 Phase 2 requirement.
 //
 // Run with:
 //
@@ -30,9 +30,9 @@ func BenchmarkWriteRTPToListeners_100(b *testing.B) { benchmarkForward(b, 100) }
 // from forwardLoop with n mock listeners. This isolates room dispatch from any
 // allocation inside *webrtc.TrackLocalStaticRTP.WriteRTP.
 //
-// ADR-005: the hot path uses one atomic.Load; no lock is held during WriteRTP.
+// RELAY-005: the hot path uses one atomic.Load; no lock is held during WriteRTP.
 //
-// Phase 2 (ADR-009): the companion benchmark with real connected Pion instances
+// Phase 2 (RELAY-009): the companion benchmark with real connected Pion instances
 // is implemented below as BenchmarkWriteRTPFanoutConnected.
 func benchmarkForward(b *testing.B, n int) {
 	b.Helper()
@@ -47,7 +47,7 @@ func benchmarkForward(b *testing.B, n int) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		// Mirror exactly the hot path in forwardLoop (ADR-005 copy-on-write).
+		// Mirror exactly the hot path in forwardLoop (RELAY-005 copy-on-write).
 		ls := *r.listeners.Load()
 		for _, e := range ls {
 			_ = e.l.WriteRTP(pkt)
@@ -61,7 +61,7 @@ type discardListener struct{}
 func (discardListener) WriteRTP(_ *rtp.Packet) error { return nil }
 
 // BenchmarkWriteRTPToPionTrack measures alloc/ns for WriteRTP on a real
-// *webrtc.TrackLocalStaticRTP. This is the ADR-009 measurement.
+// *webrtc.TrackLocalStaticRTP. This is the RELAY-009 measurement.
 // Run: go test -bench=BenchmarkWriteRTPToPionTrack -benchmem ./internal/room/
 //
 // To get alloc count per op, run:
@@ -85,7 +85,7 @@ func BenchmarkWriteRTPToPionTrack(b *testing.B) {
 	}
 }
 
-// BenchmarkWriteRTPFanoutConnected is the ADR-009 Phase 2 measurement.
+// BenchmarkWriteRTPFanoutConnected is the RELAY-009 Phase 2 measurement.
 // It creates fanout N real Pion loopback pairs (sender TrackLocalStaticRTP →
 // receiver PeerConnection) and measures WriteRTP through the live SRTP path.
 //
@@ -165,7 +165,7 @@ func benchmarkForwardConnected(b *testing.B, n int) {
 	b.Run("write", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			// Mirror the forwardLoop hot-path (ADR-005): one atomic.Load, then
+			// Mirror the forwardLoop hot-path (RELAY-005): one atomic.Load, then
 			// WriteRTP per listener. Connected tracks exercise the full SRTP path.
 			ls := *r.listeners.Load()
 			for _, e := range ls {

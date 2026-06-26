@@ -1,5 +1,10 @@
 name: ci-go
-on: [pull_request, push]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 jobs:
   go:
     runs-on: ubuntu-latest

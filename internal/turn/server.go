@@ -18,8 +18,8 @@ import (
 // Invariant: Secret must be the same value used by Credentials so that
 // credentials issued by the relay server validate against this server.
 //
-// Ownership: Server owns the UDP PacketConn and TLS Listener; both are closed
-// by Stop.
+// Ownership: Server owns the UDP PacketConn, TCP Listener, and TLS Listener;
+// all are closed by Stop.
 //
 // Failure behavior: Start returns an error if the listeners cannot be bound.
 // Stop is a no-op if Start was never called or already returned an error.
@@ -35,6 +35,10 @@ type ServerConfig struct {
 
 	// UDPPort is the port for TURN/UDP (standard: 3478). Zero disables UDP.
 	UDPPort int
+
+	// TCPPort is the port for TURN/TCP (standard: 3478). Zero disables plain TCP.
+	// Enables the ?transport=tcp TURN URL variant without TLS overhead.
+	TCPPort int
 
 	// TLSPort is the port for TURNS/TLS. Zero disables TLS TURN.
 	TLSPort int
@@ -55,16 +59,16 @@ type Server struct {
 
 // Start binds the configured listeners and starts the TURN server.
 //
-// TURN/UDP and TURNS/TLS listeners are started according to cfg. At least one
-// of UDPPort or TLSPort must be non-zero.
+// TURN/UDP, TURN/TCP, and TURNS/TLS listeners are started according to cfg.
+// At least one of UDPPort, TCPPort, or TLSPort must be non-zero.
 //
 // Returns an error if no listeners could be bound.
 func Start(cfg ServerConfig) (*Server, error) {
 	if cfg.PublicIP == nil {
 		return nil, fmt.Errorf("turn.Start: PublicIP is required")
 	}
-	if cfg.UDPPort == 0 && cfg.TLSPort == 0 {
-		return nil, fmt.Errorf("turn.Start: at least one of UDPPort or TLSPort must be set")
+	if cfg.UDPPort == 0 && cfg.TCPPort == 0 && cfg.TLSPort == 0 {
+		return nil, fmt.Errorf("turn.Start: at least one of UDPPort, TCPPort, or TLSPort must be set")
 	}
 
 	realm := cfg.Realm
@@ -91,6 +95,19 @@ func Start(cfg ServerConfig) (*Server, error) {
 			RelayAddressGenerator: relayGen,
 		})
 		slog.Info("turn UDP listener started", "addr", udpAddr)
+	}
+
+	if cfg.TCPPort > 0 {
+		tcpAddr := fmt.Sprintf("0.0.0.0:%d", cfg.TCPPort)
+		ln, err := net.Listen("tcp4", tcpAddr)
+		if err != nil {
+			return nil, fmt.Errorf("turn.Start: bind TURN/TCP %s: %w", tcpAddr, err)
+		}
+		listeners = append(listeners, pionTurn.ListenerConfig{
+			Listener:              ln,
+			RelayAddressGenerator: relayGen,
+		})
+		slog.Info("turn TCP listener started", "addr", tcpAddr)
 	}
 
 	if cfg.TLSPort > 0 {

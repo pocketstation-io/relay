@@ -22,7 +22,12 @@ import (
 )
 
 func main() {
-	jwtSecret := []byte(getenv("POCKETSTATION_JWT_SECRET", "dev-secret-change-me"))
+	jwtSecretStr := os.Getenv("POCKETSTATION_JWT_SECRET")
+	if jwtSecretStr == "" {
+		slog.Warn("POCKETSTATION_JWT_SECRET not set, using insecure default — set this env var in production")
+		jwtSecretStr = "dev-secret-change-me"
+	}
+	jwtSecret := []byte(jwtSecretStr)
 
 	var cbClient *callback.Client
 	if apiURL := os.Getenv("RELAY_API_SERVER_URL"); apiURL != "" {
@@ -38,8 +43,13 @@ func main() {
 
 	// Build ICE server list and start embedded TURN if configured (ADR-023).
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
-	iceServers, turnSrv := setupTURN(jwtSecret)
-	useTURN := len(iceServers) > 0
+	//
+	// clientICEServers is what clients receive in createRoom so they can reach
+	// the relay's TURN server. The relay's own Pion peers use ICEServers=nil
+	// (falls back to stun.l.google.com when NAT1To1IPs is unset, or no STUN at
+	// all when NAT1To1IPs is set) to avoid self-STUN via the embedded TURN.
+	clientICEServers, turnSrv := setupTURN(jwtSecret)
+	useTURN := len(clientICEServers) > 0
 
 	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)              // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
@@ -52,7 +62,7 @@ func main() {
 		MaxRoomsPerIPPerMinute: getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
 		CallbackClient:         cbClient,
 		WebhookDispatcher:      whDispatcher,
-		ICEServers:             iceServers,
+		ClientICEServers:       clientICEServers,
 		UseTURN:                useTURN,
 		RoomConfig: room.ManagerConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
@@ -71,7 +81,7 @@ func main() {
 			slog.Error("failed to bind ICE-TCP listener", "addr", tcpAddr, "error", err)
 			os.Exit(1)
 		}
-		cfg.ICETCPMux = webrtc.NewICETCPMux(nil, ln, 8)
+		cfg.ICETCPMux = webrtc.NewICETCPMux(nil, ln, 512)
 		slog.Info("ICE-TCP mux started", "addr", tcpAddr)
 	}
 
@@ -82,6 +92,35 @@ func main() {
 		cfg.NAT1To1IPs = splitComma(publicIPs)
 		slog.Info("NAT1To1 public IPs configured", "ips", cfg.NAT1To1IPs)
 	}
+
+	// ICE-UDP mux: force ALL UDP media through a single socket so the relay
+	// gathers exactly one UDP host candidate. Without this, pion binds one
+	// socket per local interface (and per NAT1To1 IP); media then egresses from
+	// a socket the remote peer never consented to and is dropped.
+	//
+	// Bind the socket to the SPECIFIC advertised IP (RELAY_PUBLIC_IPS), not
+	// 0.0.0.0. On a multi-homed host (e.g. a LAN IP plus a VM/bridge interface),
+	// a 0.0.0.0 socket lets the kernel choose the egress interface per
+	// destination, so media can leave from an interface that does not match the
+	// advertised host candidate — the listener's nominated pair then receives
+	// zero media. Pinning the socket to the advertised IP makes egress match the
+	// candidate. Falls back to 0.0.0.0 when no public IP is configured.
+	udpBindIP := net.IPv4zero
+	if len(cfg.NAT1To1IPs) > 0 {
+		if ip := net.ParseIP(cfg.NAT1To1IPs[0]); ip != nil {
+			udpBindIP = ip
+		}
+	}
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   udpBindIP,
+		Port: getenvInt("ICE_UDP_PORT", 0),
+	})
+	if err != nil {
+		slog.Error("failed to bind ICE-UDP socket", "error", err)
+		os.Exit(1)
+	}
+	cfg.ICEUDPMux = webrtc.NewICEUDPMux(nil, udpConn)
+	slog.Info("ICE-UDP mux started", "addr", udpConn.LocalAddr().String())
 
 	s := server.New(cfg)
 
@@ -102,7 +141,9 @@ func main() {
 		}
 	}()
 
-	if err := s.Serve(":8080"); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	httpAddr := ":" + strconv.Itoa(getenvInt("PORT", 4800))
+	slog.Info("relay listening", "addr", httpAddr)
+	if err := s.Serve(httpAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("relay serve error", "error", err)
 		os.Exit(1)
 	}
@@ -120,6 +161,7 @@ func main() {
 //
 //	TURN_PUBLIC_IP   — server's public IP (required to enable TURN)
 //	TURN_UDP_PORT    — UDP TURN port (default 3478)
+//	TURN_TCP_PORT    — plain TCP TURN port (default 3478; enables ?transport=tcp)
 //	TURN_TLS_PORT    — TURNS/TLS port (default 0 = disabled; set to 443 or 5349)
 //	TURN_REALM       — STUN realm (default "pocketstation.io")
 func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.Server) {
@@ -136,6 +178,7 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.
 	}
 
 	udpPort := getenvInt("TURN_UDP_PORT", 3478)
+	tcpPort := getenvInt("TURN_TCP_PORT", 3478)
 	tlsPort := getenvInt("TURN_TLS_PORT", 0)
 	realm := getenv("TURN_REALM", "pocketstation.io")
 
@@ -143,6 +186,7 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.
 		PublicIP: publicIP,
 		Secret:   jwtSecret,
 		UDPPort:  udpPort,
+		TCPPort:  tcpPort,
 		TLSPort:  tlsPort,
 		Realm:    realm,
 	}
@@ -162,7 +206,7 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.
 	iceServers = []webrtc.ICEServer{
 		{URLs: []string{"stun:" + net.JoinHostPort(turnHost, strconv.Itoa(udpPort))}},
 		{
-			URLs:           turnURLs(turnHost, udpPort, tlsPort),
+			URLs:           turnURLs(turnHost, udpPort, tcpPort, tlsPort),
 			Username:       turnUser,
 			Credential:     turnPass,
 			CredentialType: webrtc.ICECredentialTypePassword,
@@ -172,21 +216,28 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.
 	slog.Info("embedded TURN started",
 		"public_ip", publicIPStr,
 		"udp_port", udpPort,
+		"tcp_port", tcpPort,
 		"tls_port", tlsPort,
 	)
 	return iceServers, srv
 }
 
 // turnURLs builds the TURN URL list from configured ports.
+// Includes TURN/TCP (?transport=tcp) only when tcpPort > 0 (a TCP listener is running).
 // Includes TURNS (TLS) URL only when tlsPort > 0.
-func turnURLs(host string, udpPort, tlsPort int) []string {
+func turnURLs(host string, udpPort, tcpPort, tlsPort int) []string {
 	urls := []string{
 		"turn:" + net.JoinHostPort(host, strconv.Itoa(udpPort)),
-		"turn:" + net.JoinHostPort(host, strconv.Itoa(udpPort)) + "?transport=tcp",
+	}
+	if tcpPort > 0 {
+		urls = append(urls, "turn:"+net.JoinHostPort(host, strconv.Itoa(tcpPort))+"?transport=tcp")
+		slog.Info("TURN transport active", "transport", "tcp", "port", tcpPort)
 	}
 	if tlsPort > 0 {
 		urls = append(urls, "turns:"+net.JoinHostPort(host, strconv.Itoa(tlsPort)))
+		slog.Info("TURN transport active", "transport", "tls", "port", tlsPort)
 	}
+	slog.Info("TURN transport active", "transport", "udp", "port", udpPort)
 	return urls
 }
 
