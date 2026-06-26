@@ -1,0 +1,51 @@
+package server
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/pion/webrtc/v4"
+)
+
+// TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus is the
+// relay-side Stage-B gate for the stereo music pipeline. Per RFC 7587, the relay
+// (an Opus-only SFU that forwards stereo without transcoding) must advertise
+// stereo in its SDP on both legs or libwebrtc downmixes music to mono. This
+// verifies the registered Opus codec surfaces stereo=1 and sprop-stereo=1 in a
+// generated offer, at 48 kHz / 2 channels.
+func TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus(t *testing.T) {
+	m, err := newMediaEngineWithAudioNACK()
+	if err != nil {
+		t.Fatalf("newMediaEngineWithAudioNACK: %v", err)
+	}
+
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+
+	if _, err := pc.AddTransceiverFromKind(
+		webrtc.RTPCodecTypeAudio,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv},
+	); err != nil {
+		t.Fatalf("AddTransceiverFromKind: %v", err)
+	}
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	sdp := offer.SDP
+
+	for _, want := range []string{
+		"opus/48000/2",   // 48 kHz, 2 channels
+		"stereo=1",       // relay accepts stereo (receive)
+		"sprop-stereo=1", // relay will send stereo
+	} {
+		if !strings.Contains(sdp, want) {
+			t.Errorf("offer SDP must contain %q for stereo Opus negotiation; SDP:\n%s", want, sdp)
+		}
+	}
+}
