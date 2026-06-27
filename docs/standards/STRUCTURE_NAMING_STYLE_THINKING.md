@@ -221,7 +221,7 @@ PluginHostSource
 BroadcastExtensionSource
 ```
 
-Avoid (until they're real, working capabilities — see v2.3 §5.1):
+Avoid (until they're real, working capabilities — see v3.0 §5.1):
 
 ```
 SystemAudioSource
@@ -241,7 +241,7 @@ ConnectionState
 LatencyStats
 ```
 
-Static web app file structure (no framework, see v2.3 §14.3 app-web-receiver):
+Static web app file structure (no framework, see v3.0 §14.3 app-web-receiver):
 
 ```
 src/

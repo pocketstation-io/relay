@@ -29,7 +29,7 @@ func newRateLimitTestServer(t *testing.T, maxRooms, maxListeners int) *httptest.
 		JWTSecret:           []byte(rateLimitJWTSecret),
 		API:                 api,
 		MaxRooms:            maxRooms,
-		MaxListenersPerRoom: maxListeners,
+		MaxSubscribersPerRoom: maxListeners,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

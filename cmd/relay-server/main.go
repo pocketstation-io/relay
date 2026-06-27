@@ -15,7 +15,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/callback"
-	"github.com/pocketstation-io/relay/internal/room"
+	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/server"
 	relayTurn "github.com/pocketstation-io/relay/internal/turn"
 	"github.com/pocketstation-io/relay/internal/webhook"
@@ -53,21 +53,19 @@ func main() {
 
 	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)              // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
-	maxListenersPerRoom := getenvInt("MAX_LISTENERS_PER_ROOM", 0)     // 0 → unlimited
 
 	cfg := server.Config{
 		JWTSecret:              jwtSecret,
 		MaxRooms:               getenvInt("RELAY_MAX_ROOMS", 0),
-		MaxListenersPerRoom:    getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
+		MaxSubscribersPerRoom:  getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
 		MaxRoomsPerIPPerMinute: getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
 		CallbackClient:         cbClient,
 		WebhookDispatcher:      whDispatcher,
 		ClientICEServers:       clientICEServers,
 		UseTURN:                useTURN,
-		RoomConfig: room.ManagerConfig{
+		RegistryConfig: graph.RegistryConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
-			MaxListeners:      maxListenersPerRoom,
 		},
 	}
 

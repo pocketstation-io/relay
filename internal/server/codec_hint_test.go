@@ -11,7 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/room"
+	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
@@ -184,14 +184,14 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 	// Build a relay Server whose sessions map contains one source session
 	// backed by the server-side WebSocket conn.
 	srv := &Server{sessions: make(map[string]*session)}
-	rm := room.New(roomID)
+	rm := graph.New(roomID)
 	defer rm.Close()
 
 	sourceSess := &session{
 		id:   "src-session-e2e",
 		srv:  srv,
 		conn: serverConn,
-		rm:   rm,
+		room: rm,
 		role: auth.RoleSource,
 	}
 	srv.mu.Lock()

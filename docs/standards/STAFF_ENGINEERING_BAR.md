@@ -168,16 +168,16 @@ WIP commits are fine on a working branch but must be squashed before merge.
 
 ## 9. Architecture Document Rules
 
-The architecture document at `docs/architecture/PocketStation-v2.3.md` (and any successor version) is treated as the source of truth for the project's shape.
+The architecture document at `docs/architecture/pocketstation-v3.0.md` (and any successor version) is treated as the source of truth for the project's shape.
 
 Agents must not edit the architecture document without an ADR documenting why the change is needed.
 
-RELAY-008 through RELAY-013 in v2.3 are open questions; resolving them may legitimately require architecture-doc changes. When that happens:
+RELAY-008 through RELAY-013 in v3.0 are open questions; resolving them may legitimately require architecture-doc changes. When that happens:
 
 1. Write the ADR first.
 2. Get human approval on the ADR.
 3. Then edit the architecture doc to reflect the resolved decision.
-4. Bump the architecture doc version (v2.3 → v2.4 etc.).
+4. Bump the architecture doc version (bump version in pocketstation-v3.0.md).
 
 Not: edit the doc speculatively, then write an ADR to justify it.
 

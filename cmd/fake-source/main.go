@@ -250,7 +250,7 @@ func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, lo
 					logger.Error("add ICE candidate failed", "err", err)
 				}
 			case signaling.TypeRoomState:
-				logger.Info("room state", "source_active", msg.SourceActive, "listeners", msg.ListenerCount)
+				logger.Info("room state", "source_active", msg.SourceActive, "listeners", msg.SubscriptionCount)
 			case signaling.TypeError:
 				logger.Error("relay error", "code", msg.Code, "message", msg.Message)
 			}

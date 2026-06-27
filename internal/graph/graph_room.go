@@ -1,0 +1,751 @@
+// Package graph implements the GraphRoom — the core forwarding unit of the
+// PocketStation relay (v3.0). A GraphRoom owns a set of named AudioBuses,
+// each carrying a distinct audio stream (voice, music, agent_voice, events…).
+// BusSubscriptions are room-wide: a subscriber receives RTP from every active
+// AudioBus, enabling relay.out("mix") semantics from the holy-shit demo.
+//
+//	graph.connect(duck.out("audio"),       relay.in_("music"))?;
+//	graph.connect(agent.out("audio"),      relay.in_("agent_voice"))?;
+//	graph.connect(relay.out("mix"),        browser.in_("audio"))?;
+package graph
+
+import (
+	"errors"
+	"log/slog"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/pion/rtp"
+)
+
+// latencyWindowSizeCount is the rolling window depth for P50 percentile
+// computation (spec §13.4).
+const latencyWindowSizeCount = 100
+
+// LatencyStats holds aggregated per-segment latency percentiles for a
+// GraphRoom. All duration fields are P50 medians over the last
+// latencyWindowSizeCount reports received from source and subscriber clients.
+type LatencyStats struct {
+	CaptureP50Ms      float64 `json:"capture_p50_ms"`
+	EncodeP50Ms       float64 `json:"encode_p50_ms"`
+	RelayRttP50Ms     float64 `json:"relay_rtt_p50_ms"`
+	JitterBufferP50Ms float64 `json:"jitter_buffer_p50_ms"`
+	DecodeP50Ms       float64 `json:"decode_p50_ms"`
+	PacketLossPct     float64 `json:"packet_loss_pct"`
+	SampleCount       int     `json:"sample_count"`
+}
+
+type latencySample struct {
+	captureMs      float64
+	encodeMs       float64
+	relayRttMs     float64
+	jitterBufferMs float64
+	decodeMs       float64
+	packetLossPct  float64
+}
+
+// latencyStore accumulates latency samples in a fixed-size ring and computes
+// rolling P50 percentiles. Safe for concurrent use.
+type latencyStore struct {
+	mu      sync.Mutex
+	samples []latencySample // ring buffer; grows up to latencyWindowSizeCount
+	head    int             // next write position
+	full    bool            // true once the ring has wrapped at least once
+}
+
+func newLatencyStore() *latencyStore {
+	return &latencyStore{samples: make([]latencySample, latencyWindowSizeCount)}
+}
+
+func (ls *latencyStore) record(s latencySample) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.samples[ls.head] = s
+	ls.head = (ls.head + 1) % latencyWindowSizeCount
+	if ls.head == 0 {
+		ls.full = true
+	}
+}
+
+func (ls *latencyStore) stats() LatencyStats {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	count := ls.head
+	if ls.full {
+		count = latencyWindowSizeCount
+	}
+	if count == 0 {
+		return LatencyStats{}
+	}
+
+	capture  := make([]float64, count)
+	encode   := make([]float64, count)
+	rtt      := make([]float64, count)
+	jitter   := make([]float64, count)
+	decode   := make([]float64, count)
+	lossSum  := 0.0
+	for i := 0; i < count; i++ {
+		s := ls.samples[i]
+		capture[i]  = s.captureMs
+		encode[i]   = s.encodeMs
+		rtt[i]      = s.relayRttMs
+		jitter[i]   = s.jitterBufferMs
+		decode[i]   = s.decodeMs
+		lossSum    += s.packetLossPct
+	}
+	return LatencyStats{
+		CaptureP50Ms:      p50(capture),
+		EncodeP50Ms:       p50(encode),
+		RelayRttP50Ms:     p50(rtt),
+		JitterBufferP50Ms: p50(jitter),
+		DecodeP50Ms:       p50(decode),
+		PacketLossPct:     lossSum / float64(count),
+		SampleCount:       count,
+	}
+}
+
+func p50(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	sort.Float64s(v)
+	mid := len(v) / 2
+	if len(v)%2 == 0 {
+		return (v[mid-1] + v[mid]) / 2
+	}
+	return v[mid]
+}
+
+// BusID names a forwarding lane within a GraphRoom.
+// Canonical values: "voice", "music", "agent_voice", "events".
+// "mix" is a virtual value meaning all active buses (used on the subscriber side).
+type BusID = string
+
+// BusMix is the virtual BusID that subscribes to all active buses.
+const BusMix BusID = "mix"
+
+// BusRole classifies the audio content type of a bus.
+// Determines the Opus codec profile, loss policy, and forwarding priority.
+type BusRole uint8
+
+const (
+	BusRoleVoice       BusRole = iota // mono, Voip mode, VAD-gated; latency-rank 0
+	BusRoleMusic                      // stereo, Audio mode, no DTX; latency-rank 1
+	BusRoleAgentOutput                // TTS from a ModelNode; latency-rank 0
+	BusRoleEvents                     // metadata / transcript fragments; latency-rank 2
+	BusRoleMonitor                    // passive monitor mix; latency-rank 3
+)
+
+// LatencyRank returns the forwarding priority of this bus role.
+// Lower values are higher priority (LAW 8 — classification as impl method).
+func (r BusRole) LatencyRank() uint8 {
+	switch r {
+	case BusRoleVoice, BusRoleAgentOutput:
+		return 0
+	case BusRoleMusic:
+		return 1
+	case BusRoleEvents:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// ReliabilityRank returns the loss tolerance rank of this bus role.
+// Lower values tolerate less loss.
+func (r BusRole) ReliabilityRank() uint8 {
+	switch r {
+	case BusRoleVoice, BusRoleAgentOutput:
+		return 0
+	case BusRoleMusic:
+		return 1
+	case BusRoleEvents:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// defaultInactivityTimeout is the time a GraphRoom with no active bus source
+// will remain open before auto-closing. Configurable via ROOM_EXPIRY_MINUTES.
+const defaultInactivityTimeout = 30 * time.Minute
+
+// defaultReconnectWindow is the time a bus keeps subscribers alive after its
+// source disconnects. Configurable via SOURCE_RECONNECT_WINDOW_SEC.
+const defaultReconnectWindow = 60 * time.Second
+
+var (
+	// ErrNoSource is returned when an operation requires a live source and none exists.
+	ErrNoSource = errors.New("graph_room: bus has no source")
+	// ErrRoomFull is returned by AddSubscription when the room is at capacity.
+	ErrRoomFull = errors.New("graph_room: reached maximum subscription capacity")
+)
+
+// SourceSession is the readable side of a live audio stream on a bus.
+// Using an interface decouples GraphRoom from *webrtc.TrackRemote and allows
+// the forward loop to be unit-tested without a live Pion setup.
+type SourceSession interface {
+	ReadRTP() (*rtp.Packet, error)
+}
+
+// BusSubscription is the write-side of an audio stream delivered to a subscriber.
+// *webrtc.TrackLocalStaticRTP satisfies this interface directly.
+type BusSubscription interface {
+	WriteRTP(pkt *rtp.Packet) error
+}
+
+// subscriptionEntry pairs a subscriber ID with its BusSubscription.
+type subscriptionEntry struct {
+	subscriberID string
+	sub          BusSubscription
+}
+
+// AudioBus is one named forwarding lane: one SourceSession → N BusSubscriptions.
+//
+// Each bus is independent: it has its own source, its own reconnect timer, and
+// its own forwardLoop goroutine. Packets are written to the parent GraphRoom's
+// subscription list so subscribers receive from all buses on a single track
+// (relay.out("mix") semantics for Phase 1).
+//
+// Invariants:
+//   - sourceMu guards source, sourceCloser, loopDone.
+//   - sourceEverConnected is set to true by the first SetSource call.
+//   - reconnectTimer fires if a source disconnects and no new PUBLISH arrives.
+type AudioBus struct {
+	ID      BusID
+	Role    BusRole
+	graphID string // back-reference to parent GraphRoom.ID for logging
+
+	PacketCount     atomic.Uint64
+	ByteCount       atomic.Uint64
+	PacketDropCount atomic.Uint64
+
+	sourceMu     sync.Mutex
+	source       SourceSession
+	sourceCloser func()
+	loopDone     chan struct{} // closed by forwardLoop on exit; nil if no loop running
+
+	timerMu             sync.Mutex
+	inactivityTimer     *time.Timer
+	inactivityTimeout   time.Duration
+	reconnectTimer      *time.Timer
+	reconnectWindow     time.Duration
+	sourceEverConnected atomic.Bool
+
+	closeOnce sync.Once
+	done      chan struct{}
+}
+
+func newAudioBus(id BusID, role BusRole, graphID string, inactivityTimeout, reconnectWindow time.Duration) *AudioBus {
+	b := &AudioBus{
+		ID:                id,
+		Role:              role,
+		graphID:           graphID,
+		done:              make(chan struct{}),
+		inactivityTimeout: inactivityTimeout,
+		reconnectWindow:   reconnectWindow,
+	}
+	b.timerMu.Lock()
+	b.inactivityTimer = time.AfterFunc(inactivityTimeout, func() {
+		b.timerMu.Lock()
+		b.timerMu.Unlock()
+		b.close()
+	})
+	b.timerMu.Unlock()
+	return b
+}
+
+// SetSource sets the audio source and starts the forward loop.
+// If a previous source is active (ICE restart), it is closed first.
+// deliver is called for each received RTP packet to write to subscribers.
+func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp.Packet)) {
+	newLoopDone := make(chan struct{})
+
+	b.sourceMu.Lock()
+	prevCloser  := b.sourceCloser
+	prevDone    := b.loopDone
+	b.source      = src
+	b.sourceCloser = closer
+	b.loopDone    = newLoopDone
+	b.sourceMu.Unlock()
+
+	if prevCloser != nil {
+		prevCloser()
+	}
+	if prevDone != nil {
+		<-prevDone
+	}
+
+	b.timerMu.Lock()
+	b.inactivityTimer.Stop()
+	if b.reconnectTimer != nil {
+		b.reconnectTimer.Stop()
+	}
+	b.timerMu.Unlock()
+
+	b.sourceEverConnected.Store(true)
+	go b.forwardLoop(src, newLoopDone, deliver)
+}
+
+// SourceActive reports whether a source is currently attached to this bus.
+func (b *AudioBus) SourceActive() bool {
+	b.sourceMu.Lock()
+	defer b.sourceMu.Unlock()
+	return b.source != nil
+}
+
+func (b *AudioBus) close() {
+	b.closeOnce.Do(func() {
+		b.timerMu.Lock()
+		b.inactivityTimer.Stop()
+		if b.reconnectTimer != nil {
+			b.reconnectTimer.Stop()
+		}
+		b.timerMu.Unlock()
+		close(b.done)
+	})
+}
+
+// forwardLoop reads RTP from src and calls deliver for each packet until src
+// errors or the bus is closed. loopDone is closed on exit.
+func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, deliver func(*rtp.Packet)) {
+	defer close(loopDone)
+	defer func() {
+		b.sourceMu.Lock()
+		if b.source == src {
+			b.source       = nil
+			b.sourceCloser = nil
+		}
+		b.sourceMu.Unlock()
+
+		select {
+		case <-b.done:
+		default:
+			b.timerMu.Lock()
+			b.reconnectTimer = time.AfterFunc(b.reconnectWindow, func() {
+				b.timerMu.Lock()
+				b.timerMu.Unlock()
+				b.close()
+			})
+			b.timerMu.Unlock()
+		}
+	}()
+
+	for {
+		pkt, err := src.ReadRTP()
+		if err != nil {
+			return
+		}
+		select {
+		case <-b.done:
+			return
+		default:
+		}
+
+		b.PacketCount.Add(1)
+		b.ByteCount.Add(uint64(len(pkt.Payload)))
+
+		// Normalise padding before forwarding (radio-glitch fix: pion strips
+		// padding bytes but leaves Header.Padding=true; receivers then read
+		// the last payload byte as padding length and discard the packet).
+		pkt.Header.Padding = false
+		pkt.PaddingSize    = 0
+
+		deliver(pkt)
+	}
+}
+
+// GraphRoom owns the set of AudioBuses for one relay session.
+// Subscribers are room-wide: each subscriber receives RTP from all buses
+// (relay.out("mix") semantics). Buses are created lazily on first PUBLISH.
+//
+// Invariants:
+//   - busesMu guards the buses map for writes; reads inside forwardLoop go
+//     through the room's atomic subscription pointer (no room lock on hot path).
+//   - subscriptions is copy-on-write behind subscriptionsMu.
+//   - done is closed by Close and signals all bus forwardLoops to stop.
+type GraphRoom struct {
+	ID      string
+	GraphID string // graph template name from PUBLISH (e.g. "room-demo")
+
+	busesMu sync.RWMutex
+	buses   map[BusID]*AudioBus
+
+	// subscriptionsMu and subscriptions are room-wide; every bus forwardLoop
+	// writes here so subscribers receive from all buses on one track.
+	subscriptionsMu sync.Mutex
+	subscriptions   atomic.Pointer[[]*subscriptionEntry]
+
+	Public    atomic.Bool
+	createdAt time.Time
+
+	keyMu      sync.RWMutex
+	currentKey string
+
+	latency *latencyStore
+
+	// maxSubscriptions: 0 = unlimited.
+	maxSubscriptions int
+	pendingSlots     atomic.Int32
+
+	// inactivity/reconnect configuration propagated to each AudioBus.
+	inactivityTimeout time.Duration
+	reconnectWindow   time.Duration
+
+	closeOnce sync.Once
+	done      chan struct{}
+}
+
+// New returns an open GraphRoom with default timeouts.
+func New(id string) *GraphRoom {
+	return newWithTimeouts(id, defaultInactivityTimeout, defaultReconnectWindow)
+}
+
+func newWithTimeout(id string, timeout time.Duration) *GraphRoom {
+	return newWithTimeouts(id, timeout, defaultReconnectWindow)
+}
+
+func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration) *GraphRoom {
+	r := &GraphRoom{
+		ID:                id,
+		buses:             make(map[BusID]*AudioBus),
+		done:              make(chan struct{}),
+		inactivityTimeout: inactivityTimeout,
+		reconnectWindow:   reconnectWindow,
+		latency:           newLatencyStore(),
+		createdAt:         time.Now().UTC(),
+	}
+	empty := make([]*subscriptionEntry, 0)
+	r.subscriptions.Store(&empty)
+	return r
+}
+
+// GetOrCreateBus returns the AudioBus named id, creating it with the given role
+// if it does not yet exist. Safe to call concurrently from multiple PUBLISH goroutines.
+func (r *GraphRoom) GetOrCreateBus(id BusID, role BusRole) *AudioBus {
+	r.busesMu.RLock()
+	if b, ok := r.buses[id]; ok {
+		r.busesMu.RUnlock()
+		return b
+	}
+	r.busesMu.RUnlock()
+
+	r.busesMu.Lock()
+	defer r.busesMu.Unlock()
+	if b, ok := r.buses[id]; ok {
+		return b // created by a concurrent caller while we waited for the write lock
+	}
+	b := newAudioBus(id, role, r.ID, r.inactivityTimeout, r.reconnectWindow)
+	r.buses[id] = b
+	return b
+}
+
+// SetSource sets the SourceSession on the named bus (creating the bus if absent)
+// and starts the forwarding loop. closer, if non-nil, is called when a new
+// source replaces this one (ICE restart path).
+func (r *GraphRoom) SetSource(busID BusID, role BusRole, src SourceSession, closer func()) {
+	bus := r.GetOrCreateBus(busID, role)
+	bus.SetSource(src, closer, r.deliver)
+}
+
+// deliver is the hot-path function passed to each AudioBus.forwardLoop.
+// It writes pkt to all current room-wide subscriptions.
+func (r *GraphRoom) deliver(pkt *rtp.Packet) {
+	const maxConsecutiveErrors = 5
+
+	ls := *r.subscriptions.Load()
+
+	errCounts    := make(map[string]int, len(ls))
+	var deadSubs []string
+
+	for _, e := range ls {
+		if wErr := e.sub.WriteRTP(pkt); wErr != nil {
+			errCounts[e.subscriberID]++
+			if errCounts[e.subscriberID] >= maxConsecutiveErrors {
+				deadSubs = append(deadSubs, e.subscriberID)
+			}
+		} else {
+			errCounts[e.subscriberID] = 0
+		}
+	}
+	for _, id := range deadSubs {
+		r.RemoveSubscription(id)
+		slog.Warn("evicted dead subscription", "graph_room_id", r.ID, "subscriber_id", id)
+	}
+}
+
+// AddSubscription registers sub under subscriberID.
+// Returns ErrRoomFull when r.maxSubscriptions > 0 and capacity is reached.
+func (r *GraphRoom) AddSubscription(subscriberID string, sub BusSubscription) error {
+	r.subscriptionsMu.Lock()
+	defer r.subscriptionsMu.Unlock()
+
+	old := *r.subscriptions.Load()
+	if r.maxSubscriptions > 0 && len(old) >= r.maxSubscriptions {
+		return ErrRoomFull
+	}
+	next := make([]*subscriptionEntry, len(old)+1)
+	copy(next, old)
+	next[len(old)] = &subscriptionEntry{subscriberID: subscriberID, sub: sub}
+	r.subscriptions.Store(&next)
+	return nil
+}
+
+// RemoveSubscription deregisters the subscription for subscriberID. No-op if absent.
+func (r *GraphRoom) RemoveSubscription(subscriberID string) {
+	r.subscriptionsMu.Lock()
+	defer r.subscriptionsMu.Unlock()
+
+	old := *r.subscriptions.Load()
+	next := make([]*subscriptionEntry, 0, len(old))
+	for _, e := range old {
+		if e.subscriberID != subscriberID {
+			next = append(next, e)
+		}
+	}
+	r.subscriptions.Store(&next)
+}
+
+// TryReserveSlot atomically reserves a pending subscription slot.
+// Returns false if active+pending subscriptions would reach or exceed max.
+// max ≤ 0 means unlimited.
+func (r *GraphRoom) TryReserveSlot(max int) bool {
+	if max <= 0 {
+		r.pendingSlots.Add(1)
+		return true
+	}
+	for {
+		pending := r.pendingSlots.Load()
+		active  := int32(r.SubscriptionCount())
+		if int(pending+active) >= max {
+			return false
+		}
+		if r.pendingSlots.CompareAndSwap(pending, pending+1) {
+			return true
+		}
+	}
+}
+
+// ReleaseSlot decrements the pending slot counter.
+// Must be called exactly once for each successful TryReserveSlot call.
+func (r *GraphRoom) ReleaseSlot() { r.pendingSlots.Add(-1) }
+
+// SubscriptionCount returns the current number of registered subscriptions.
+func (r *GraphRoom) SubscriptionCount() int { return len(*r.subscriptions.Load()) }
+
+// SourceActive reports whether any bus currently has an active source.
+func (r *GraphRoom) SourceActive() bool {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	for _, b := range r.buses {
+		if b.SourceActive() {
+			return true
+		}
+	}
+	return false
+}
+
+// BusSourceActive reports whether the named bus has an active source.
+func (r *GraphRoom) BusSourceActive(id BusID) bool {
+	r.busesMu.RLock()
+	b, ok := r.buses[id]
+	r.busesMu.RUnlock()
+	if !ok {
+		return false
+	}
+	return b.SourceActive()
+}
+
+// PacketStats returns aggregate packet and byte counts across all buses.
+func (r *GraphRoom) PacketStats() (packets, bytes, dropped uint64) {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	for _, b := range r.buses {
+		packets += b.PacketCount.Load()
+		bytes   += b.ByteCount.Load()
+		dropped += b.PacketDropCount.Load()
+	}
+	return
+}
+
+// Close terminates the room and all its buses. Safe to call multiple times.
+func (r *GraphRoom) Close() {
+	r.closeOnce.Do(func() {
+		close(r.done)
+		r.busesMu.RLock()
+		defer r.busesMu.RUnlock()
+		for _, b := range r.buses {
+			b.close()
+		}
+	})
+}
+
+// SetKey stores the SFrame room key received via KEY_EXCHANGE.
+// The relay stores it opaquely and never decodes it to raw key material.
+func (r *GraphRoom) SetKey(keyBase64 string) {
+	r.keyMu.Lock()
+	defer r.keyMu.Unlock()
+	r.currentKey = keyBase64
+}
+
+// GetKey returns the opaque base64 SFrame key, or "" if none has been received.
+func (r *GraphRoom) GetKey() string {
+	r.keyMu.RLock()
+	defer r.keyMu.RUnlock()
+	return r.currentKey
+}
+
+// RecordLatency adds a latency sample to the room's rolling window.
+func (r *GraphRoom) RecordLatency(captureMs, encodeMs, relayRttMs, jitterBufferMs, decodeMs, packetLossPct float64) {
+	r.latency.record(latencySample{
+		captureMs:      captureMs,
+		encodeMs:       encodeMs,
+		relayRttMs:     relayRttMs,
+		jitterBufferMs: jitterBufferMs,
+		decodeMs:       decodeMs,
+		packetLossPct:  packetLossPct,
+	})
+}
+
+// GetLatencyStats returns the current rolling P50 latency statistics.
+func (r *GraphRoom) GetLatencyStats() LatencyStats { return r.latency.stats() }
+
+// SessionRegistry manages the set of active GraphRooms.
+// (Named SessionRegistry, not Manager, per CODE_PROTOCOL LAW 18.)
+type SessionRegistry struct {
+	mu    sync.RWMutex
+	rooms map[string]*GraphRoom
+
+	inactivityTimeout time.Duration
+	reconnectWindow   time.Duration
+	maxSubscriptions  int
+}
+
+// RegistryConfig holds configurable parameters for the SessionRegistry.
+type RegistryConfig struct {
+	// InactivityTimeout: time a room waits for its first publisher before
+	// auto-closing. Zero uses defaultInactivityTimeout (30 min).
+	InactivityTimeout time.Duration
+	// ReconnectWindow: time a room keeps subscriptions alive after the last
+	// source disconnects. Zero uses defaultReconnectWindow (60 s).
+	ReconnectWindow time.Duration
+	// MaxSubscriptions: maximum subscribers per room. Zero means unlimited.
+	MaxSubscriptions int
+}
+
+// NewRegistry returns an empty SessionRegistry with default timeouts.
+func NewRegistry() *SessionRegistry { return NewRegistryWithConfig(RegistryConfig{}) }
+
+// NewRegistryWithConfig returns a SessionRegistry configured with cfg.
+func NewRegistryWithConfig(cfg RegistryConfig) *SessionRegistry {
+	inactivity := cfg.InactivityTimeout
+	if inactivity <= 0 {
+		inactivity = defaultInactivityTimeout
+	}
+	reconnect := cfg.ReconnectWindow
+	if reconnect <= 0 {
+		reconnect = defaultReconnectWindow
+	}
+	return &SessionRegistry{
+		rooms:             make(map[string]*GraphRoom),
+		inactivityTimeout: inactivity,
+		reconnectWindow:   reconnect,
+		maxSubscriptions:  cfg.MaxSubscriptions,
+	}
+}
+
+// GetOrCreate returns the GraphRoom for id, creating it if absent.
+func (reg *SessionRegistry) GetOrCreate(id string) *GraphRoom {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if r := reg.rooms[id]; r != nil {
+		return r
+	}
+	r := newWithTimeouts(id, reg.inactivityTimeout, reg.reconnectWindow)
+	r.maxSubscriptions = reg.maxSubscriptions
+	reg.rooms[id] = r
+	return r
+}
+
+// Get returns the GraphRoom for id and whether it was found.
+func (reg *SessionRegistry) Get(id string) (*GraphRoom, bool) {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	r, ok := reg.rooms[id]
+	return r, ok
+}
+
+// Delete closes and removes the GraphRoom for id. No-op if absent.
+func (reg *SessionRegistry) Delete(id string) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if r, ok := reg.rooms[id]; ok {
+		r.Close()
+		delete(reg.rooms, id)
+	}
+}
+
+// RoomCount returns the number of active GraphRooms.
+func (reg *SessionRegistry) RoomCount() int {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	return len(reg.rooms)
+}
+
+// PacketStats returns aggregate forwarded and dropped packet counts across
+// all currently active GraphRooms.
+func (reg *SessionRegistry) PacketStats() (forwarded, dropped uint64) {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	for _, r := range reg.rooms {
+		pkts, _, drop := r.PacketStats()
+		forwarded += pkts
+		dropped   += drop
+	}
+	return
+}
+
+// CloseAll closes every active GraphRoom and removes it from the registry.
+func (reg *SessionRegistry) CloseAll() {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	for id, r := range reg.rooms {
+		r.Close()
+		delete(reg.rooms, id)
+	}
+}
+
+// SessionSummary is a snapshot of a GraphRoom's observable state.
+// Used by GET /v1/channels (spec §3.1).
+type SessionSummary struct {
+	SessionID         string    `json:"session_id"`
+	SubscriptionCount int       `json:"subscription_count"`
+	SourceActive      bool      `json:"source_active"`
+	CreatedAt         time.Time `json:"created_at"`
+	Public            bool      `json:"public"`
+}
+
+// ListPublic returns a summary of every GraphRoom created with Public==true.
+// Returns a non-nil empty slice when no public rooms exist.
+func (reg *SessionRegistry) ListPublic() []SessionSummary {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+
+	result := make([]SessionSummary, 0)
+	for _, r := range reg.rooms {
+		if !r.Public.Load() {
+			continue
+		}
+		result = append(result, SessionSummary{
+			SessionID:         r.ID,
+			SubscriptionCount: r.SubscriptionCount(),
+			SourceActive:      r.SourceActive(),
+			CreatedAt:         r.createdAt,
+			Public:            true,
+		})
+	}
+	return result
+}

@@ -1,5 +1,14 @@
 # AGENTS.md — pocketstation-io/relay
 
+## Code writing standard — MANDATORY
+
+Before writing any code, read `docs/standards/CODE_PROTOCOL.md`.
+All 14 laws apply to this repo: field alignment, unit suffixes, Go `atomic.Pointer` not
+`sync.RWMutex` on hot paths, enum methods not free functions, no section banners.
+No code ships until it passes the checklist at the bottom of that document.
+
+---
+
 ## 🐞 NON-TRIVIAL BUG → EMPIRICAL DEBUGGING FRAMEWORK (MANDATORY)
 
 When a defect's cause is NOT obvious from reading, OR a first obvious fix didn't
@@ -30,7 +39,7 @@ burn and over-engineering that defeats the purpose. Escalate the instant an
 
 Before editing, read:
 
-1. `docs/architecture/PocketStation-v2.3.md`
+1. `docs/architecture/pocketstation-v3.0.md`
 2. `docs/REPO_CONTRACT.md`
 3. Relevant ADRs in `docs/adr/`
 4. The assigned GitHub issue
@@ -62,16 +71,16 @@ Relay owns all room creation and JWT issuance in Phase 1. The relay's POST /v1/r
 
 See `RELAY_PHASE2_QUEUE.md` for the full table. Summary:
 
-- Copy-on-write listener slice (RELAY-005): replace sync.RWMutex per packet with atomic.Pointer (v2.3 §26.2, §15).
-- Source reconnect (ICE restart): relay survives source disconnect + reconnect without losing listeners (v2.3 §15).
+- Copy-on-write listener slice (RELAY-005): replace sync.RWMutex per packet with atomic.Pointer (v3.0 §26.2, §15).
+- Source reconnect (ICE restart): relay survives source disconnect + reconnect without losing listeners (v3.0 §15).
 - Listener reconnect: listener reconnects to an active room without session interruption.
-- Rate limiting: max rooms per IP, max listeners per room (v2.3 §9 Phase 2).
-- Room expiry: auto-close after N hours of inactivity (v2.3 §9 Phase 2).
-- Graceful shutdown: SIGTERM drain — relay stops accepting new rooms, drains active sessions (v2.3 §15).
-- SLO instrumentation: session completion, transport latency, source publish success (v2.3 §13.5).
-- latency_estimate_ms metric: clock-sync-based per-session latency estimation (RELAY-006, v2.3 §13.2).
+- Rate limiting: max rooms per IP, max listeners per room (v3.0 §9 Phase 2).
+- Room expiry: auto-close after N hours of inactivity (v3.0 §9 Phase 2).
+- Graceful shutdown: SIGTERM drain — relay stops accepting new rooms, drains active sessions (v3.0 §15).
+- SLO instrumentation: session completion, transport latency, source publish success (v3.0 §13.5).
+- latency_estimate_ms metric: clock-sync-based per-session latency estimation (RELAY-006, v3.0 §13.2).
 - api-server JWT compatibility: api-server upgraded to call auth.Sign with shared POCKETSTATION_JWT_SECRET; cross-service integration test required before Phase 2 exit (RELAY-014/RELAY-015).
-- relay→api-server source_active push: relay POSTs source_active event to api-server on source connect/disconnect (v2.3 §12.2).
+- relay→api-server source_active push: relay POSTs source_active event to api-server on source connect/disconnect (v3.0 §12.2).
 - Connected WriteRTP bench (RELAY-009): measure real Pion WriteRTP allocation against live tracks, not discardListener mock.
 - ICE failure / SIGTERM / room-delete failure mode tests (Audit F3).
 
@@ -87,7 +96,7 @@ If an issue is not listed in RELAY_PHASE2_QUEUE.md, do not implement it here unl
 - Do not edit unrelated repos.
 - Do not create `pocketstation-io/protocol` before Phase 2.
 - Signaling message types live in this repo until Phase 2 protocol repo creation. Do not extract them early.
-- Do not change v2.3 architecture unless explicitly assigned.
+- Do not change v3.0 architecture unless explicitly assigned.
 - Do not add dependencies without approval.
 - Do not bypass CI.
 
