@@ -249,11 +249,7 @@ func newAudioBus(id BusID, role BusRole, graphID string, inactivityTimeout, reco
 		reconnectWindow:   reconnectWindow,
 	}
 	b.timerMu.Lock()
-	b.inactivityTimer = time.AfterFunc(inactivityTimeout, func() {
-		b.timerMu.Lock()
-		b.timerMu.Unlock()
-		b.close()
-	})
+	b.inactivityTimer = time.AfterFunc(inactivityTimeout, func() { b.close() })
 	b.timerMu.Unlock()
 	return b
 }
@@ -325,11 +321,7 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 		case <-b.done:
 		default:
 			b.timerMu.Lock()
-			b.reconnectTimer = time.AfterFunc(b.reconnectWindow, func() {
-				b.timerMu.Lock()
-				b.timerMu.Unlock()
-				b.close()
-			})
+			b.reconnectTimer = time.AfterFunc(b.reconnectWindow, func() { b.close() })
 			b.timerMu.Unlock()
 		}
 	}()
