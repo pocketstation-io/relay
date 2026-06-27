@@ -11,29 +11,22 @@ const (
 	TypeRoomState MessageType = "ROOM_STATE"
 	TypeError     MessageType = "ERROR"
 	// TypeKeyExchange is sent by the source to distribute an SFrame encryption
-	// key to all listeners (RELAY-014). The relay forwards the message to every
-	// listener in the room without reading the key material.
+	// key to all subscribers (RELAY-014). The relay forwards verbatim without
+	// reading the key material.
 	TypeKeyExchange MessageType = "KEY_EXCHANGE"
-	// TypeCodecHint is sent by the relay to the source when RTCP Receiver
-	// Reports indicate a change in packet-loss tier (RELAY-021). The source
-	// adjusts its Opus encoder parameters on receipt.
+	// TypeCodecHint is sent by the relay to the source when RTCP Receiver Reports
+	// indicate a change in packet-loss tier (RELAY-021).
 	TypeCodecHint MessageType = "CODEC_HINT"
-	// TypeLatencyReport is sent by source or listener clients to report
-	// per-segment latency measurements. The relay accumulates reports and
-	// exposes aggregated percentiles via GET /v1/rooms/{id}/latency (spec §13.4).
+	// TypeLatencyReport is sent by source or subscriber clients to report
+	// per-segment latency measurements (spec §13.4).
 	TypeLatencyReport MessageType = "LATENCY_REPORT"
 	// TypeICERestart is sent by the relay to the source when sustained packet
-	// loss (>15% for 3 consecutive RTCP reports) indicates the current ICE
-	// path has degraded beyond recovery (spec §10.4). The source calls
-	// RTCPeerConnection.restartIce() on receipt. When the relay's embedded
-	// TURN server is configured, use_turn=true signals that the client should
-	// prefer TURN relay candidates on the next ICE negotiation.
+	// loss indicates the ICE path has degraded beyond recovery (spec §10.4).
 	TypeICERestart MessageType = "ICE_RESTART"
 )
 
-// LatencyReport is sent by source/listener clients to report per-segment latency.
-// All duration fields are in milliseconds. The relay aggregates these into a
-// rolling window and exposes P50 percentiles via GET /v1/rooms/{id}/latency.
+// LatencyReport is sent by source/subscriber clients to report per-segment
+// latency. All duration fields carry ms suffixes per CODE_PROTOCOL LAW 1.
 type LatencyReport struct {
 	SessionID      string  `json:"session_id"`
 	CaptureMs      float64 `json:"capture_ms"`
@@ -45,57 +38,77 @@ type LatencyReport struct {
 	ClockDriftPpm  float64 `json:"clock_drift_ppm"`
 }
 
-// CodecHintPayload carries the encoder parameters for the CODEC_HINT message.
-// All fields are advisory: the source applies them best-effort on the next
-// encode call; no acknowledgement is sent.
+// CodecHintPayload carries encoder parameters for the CODEC_HINT message.
+// All fields are advisory; the source applies them best-effort.
 type CodecHintPayload struct {
-	// BitRateKbps is the target Opus bitrate in kbps (e.g. 32, 64, 96).
-	BitRateKbps int `json:"bitrate_kbps"`
-	// Complexity is the Opus complexity parameter (0–10).
-	Complexity int `json:"complexity"`
-	// Fec enables or disables in-band FEC.
-	Fec bool `json:"fec"`
-	// Dtx enables or disables discontinuous transmission.
-	Dtx bool `json:"dtx"`
-	// FrameMs signals the Opus frame duration the source should use: 10 or 20.
-	// 10ms (RESTRICTED_LOWDELAY) is preferred on clean links (loss < 1%).
-	// 20ms is used when loss > 5% because the larger frame amortises FEC
-	// overhead per packet more efficiently (RFC 6716 §3.1).
-	FrameMs int `json:"frame_ms"`
+	BitRateKbps int  `json:"bitrate_kbps"` // target Opus bitrate (e.g. 32, 64, 96)
+	Complexity  int  `json:"complexity"`   // Opus complexity 0–10
+	Fec         bool `json:"fec"`          // enable in-band FEC
+	Dtx         bool `json:"dtx"`          // enable discontinuous transmission
+	FrameMs     int  `json:"frame_ms"`     // Opus frame duration: 10 or 20
 }
 
+// ClientMessage is sent from a client to the relay over the /v1/signal WebSocket.
+//
+// v3.0 fields (SessionID, BusID, GraphID) identify the graph session and named
+// bus. v2.3 RoomID is kept as a wire alias — the relay treats RoomID as SessionID
+// when SessionID is absent, so existing clients continue to work.
 type ClientMessage struct {
-	Type      MessageType `json:"type"`
-	RoomID    string      `json:"room_id,omitempty"`
-	Token     string      `json:"token,omitempty"`
-	SDPOffer  string      `json:"sdp_offer,omitempty"`
-	Candidate string      `json:"candidate,omitempty"`
-	// SFrameKey is the base64-encoded SFrame key material for KEY_EXCHANGE messages.
-	// The relay forwards this to all room listeners without reading it.
+	Type MessageType `json:"type"`
+
+	// SessionID identifies the GraphRoom. Preferred v3.0 field.
+	// Falls back to RoomID when absent for backward compatibility.
+	SessionID string `json:"session_id,omitempty"`
+	// RoomID is the v2.3 wire alias for SessionID. Clients may send either.
+	RoomID string `json:"room_id,omitempty"`
+	// GraphID is the graph template name (e.g. "room-demo"). Optional.
+	GraphID string `json:"graph_id,omitempty"`
+	// BusID names the audio bus to publish to or subscribe from.
+	// "voice", "music", "agent_voice", "events". Absent or "mix" = all buses.
+	BusID string `json:"bus_id,omitempty"`
+
+	Token     string `json:"token,omitempty"`
+	SDPOffer  string `json:"sdp_offer,omitempty"`
+	Candidate string `json:"candidate,omitempty"`
+
+	// SFrameKey is the base64-encoded SFrame key for KEY_EXCHANGE messages.
 	SFrameKey string `json:"sframe_key,omitempty"`
-	// LatencyReport is populated on LATENCY_REPORT messages sent by clients to
-	// report per-segment latency measurements (spec §13.4).
+	// LatencyReport is populated on LATENCY_REPORT messages.
 	LatencyReport *LatencyReport `json:"latency_report,omitempty"`
-	// Public, when true on a PUBLISH message, marks the room as a public
-	// broadcast channel visible via GET /v1/channels (spec §3.1, Phase 6).
+	// Public marks the session as a public broadcast channel (spec §3.1).
 	Public bool `json:"public,omitempty"`
 }
 
+// EffectiveSessionID returns the session/room ID from the message, preferring
+// SessionID (v3.0) over RoomID (v2.3) for backward compatibility.
+func (m *ClientMessage) EffectiveSessionID() string {
+	if m.SessionID != "" {
+		return m.SessionID
+	}
+	return m.RoomID
+}
+
+// ServerMessage is sent from the relay to a client over the /v1/signal WebSocket.
 type ServerMessage struct {
-	Type          MessageType `json:"type"`
-	SDPAnswer     string      `json:"sdp_answer,omitempty"`
-	Candidate     string      `json:"candidate,omitempty"`
-	SourceActive  bool        `json:"source_active,omitempty"`
-	ListenerCount int         `json:"listener_count,omitempty"`
-	Codec         string      `json:"codec,omitempty"`
-	Code          string      `json:"code,omitempty"`
-	Message       string      `json:"message,omitempty"`
-	// SFrameKey is populated on KEY_EXCHANGE forwards from source to listeners.
+	Type MessageType `json:"type"`
+
+	SDPAnswer         string `json:"sdp_answer,omitempty"`
+	Candidate         string `json:"candidate,omitempty"`
+	SourceActive      bool   `json:"source_active,omitempty"`
+	SubscriptionCount int    `json:"subscription_count,omitempty"`
+	Codec             string `json:"codec,omitempty"`
+	Code              string `json:"code,omitempty"`
+	Message           string `json:"message,omitempty"`
+
+	// SFrameKey is populated on KEY_EXCHANGE forwards from source to subscribers.
 	SFrameKey string `json:"sframe_key,omitempty"`
 	// CodecHint is populated on CODEC_HINT messages from relay to source.
 	CodecHint *CodecHintPayload `json:"codec_hint,omitempty"`
-	// UseTURN is set to true on ICE_RESTART messages when the relay has an
-	// embedded TURN server configured. The source should prefer TURN relay
-	// candidates on the next ICE negotiation (spec §10.4, RELAY-023).
+	// UseTURN is set on ICE_RESTART messages when the relay has an embedded TURN
+	// server configured (spec §10.4, RELAY-023).
 	UseTURN bool `json:"use_turn,omitempty"`
+
+	// v3.0 session state fields
+	SessionID string `json:"session_id,omitempty"`
+	BusID     string `json:"bus_id,omitempty"`
 }
