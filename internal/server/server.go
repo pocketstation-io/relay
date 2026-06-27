@@ -127,6 +127,11 @@ type Server struct {
 	codecHintStates  sync.Map
 	iceRestartStates sync.Map
 
+	// whipConns maps WHIP/WHEP connection IDs to their live PeerConnections.
+	// Keyed by the opaque connID returned in the Location header (RFC 9725).
+	// sync.Map: concurrent PATCH/DELETE from multiple HTTP goroutines.
+	whipConns sync.Map
+
 	// useTURN is set once from Config.UseTURN; propagated to ICE_RESTART msgs.
 	useTURN bool
 }
@@ -181,8 +186,24 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
+
+	// v3.0 session endpoints (canonical)
+	mux.HandleFunc("POST /v1/sessions", s.createRoom)
+	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
+	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
+
+	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
+	// POST body: application/sdp offer. Response: 201 + application/sdp answer.
+	// ?bus=voice|music|agent_voice|events selects the named AudioBus.
+	mux.HandleFunc("POST /v1/sessions/{id}/whip", s.handleWHIP)
+	mux.HandleFunc("POST /v1/sessions/{id}/whep", s.handleWHEP)
+	mux.HandleFunc("PATCH /v1/connections/{connID}", s.handleWHIPICE)
+	mux.HandleFunc("DELETE /v1/connections/{connID}", s.handleWHIPDelete)
+
+	// v2.3 room endpoints — backward-compat aliases
 	mux.HandleFunc("/v1/rooms", s.createRoom)
 	mux.HandleFunc("GET /v1/rooms/{id}/latency", s.roomLatency)
+
 	mux.HandleFunc("/v1/channels", s.listChannels)
 	mux.HandleFunc("/v1/signal", s.signal)
 	mux.HandleFunc("/v1/echo", s.echo)
@@ -465,6 +486,59 @@ func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 	stats := rm.GetLatencyStats()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+// sseKeepaliveInterval is how often the relay sends SSE keepalive comments.
+// 20 seconds prevents proxy and load-balancer idle-connection timeouts.
+const sseKeepaliveInterval = 20 * time.Second
+
+// sessionSSE streams GraphRoom presence events as Server-Sent Events.
+// GET /v1/sessions/{id}/events
+//
+// Wire format: `data: {"source_active":bool,"subscription_count":N,"bus_id":"voice"}\n\n`
+// Keepalive: `: keepalive\n\n` every sseKeepaliveInterval.
+//
+// The initial event carries the current room state so the client is never
+// blind after connect. Subsequent events fire on source or subscriber changes
+// (push model: the relay's future Phase 2 callback path triggers these).
+//
+// For Phase 1 the SSE stream is polling-free: the initial state is sent once
+// and keepalives keep the connection alive. Phase 2 wires room-state deltas.
+func (s *Server) sessionSSE(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	pkts, _, _ := rm.PacketStats()
+	fmt.Fprintf(w, "data: {\"session_id\":%q,\"source_active\":%v,\"subscription_count\":%d,\"packets_forwarded\":%d}\n\n",
+		sessionID, rm.SourceActive(), rm.SubscriptionCount(), pkts)
+	flusher.Flush()
+
+	ticker := time.NewTicker(sseKeepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 // newID returns a random UUID v4-formatted identifier.
