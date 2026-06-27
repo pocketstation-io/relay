@@ -2,6 +2,7 @@ package server
 
 import (
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -236,8 +237,14 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		}
 		s.slotReserved.Store(true)
 
+		// The listener track is audio/red when RED is enabled (the relay frames
+		// RED on egress; see redListener) and plain Opus otherwise.
+		listenerMime := webrtc.MimeTypeOpus
+		if redEnabled() {
+			listenerMime = redMimeType
+		}
 		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+			webrtc.RTPCodecCapability{MimeType: listenerMime},
 			"audio", "pocketstation",
 		)
 		if err != nil {
@@ -277,7 +284,13 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			if s.listenerRegistered.Swap(true) {
 				return // guard against spurious re-fires (e.g. ICE restart)
 			}
-			if err := rm.AddListener(s.id, audioTrack); err != nil {
+			var listener room.Listener = audioTrack
+			if redEnabled() {
+				// Forward through the RED decorator so each Opus frame is sent
+				// with the previous one as RFC 2198 redundancy (loss resilience).
+				listener = newREDListener(audioTrack, opusPayloadType)
+			}
+			if err := rm.AddListener(s.id, listener); err != nil {
 				// Two sessions raced through the reservation window; the active
 				// count reached capacity before this one could finalize.
 				s.listenerRegistered.Store(false)
@@ -457,16 +470,46 @@ const opusPayloadType = 111
 // stereo on their sides.
 const opusStereoFmtp = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=131072"
 
+// redMimeType / redPayloadType identify the RFC 2198 RED codec the relay offers
+// on the listener leg when RED is enabled. PT 63 is the de-facto WebRTC RED
+// payload type (matches Chrome). pion has no MimeTypeRED constant.
+const (
+	redMimeType    = "audio/red"
+	redPayloadType = 63
+)
+
 // newMediaEngineWithAudioNACK returns an audio-only MediaEngine that registers a
 // stereo-capable Opus (48 kHz, 2 channels) with the stereo fmtp above and NACK
-// feedback. The relay is an Opus-only audio SFU, so registering just Opus (rather
-// than RegisterDefaultCodecs) keeps negotiation minimal and lets the answer carry
+// feedback. When RED is enabled, audio/red (PT 63, fmtp "111/111") is registered
+// first so it is preferred in the relay's SDP answers.
+//
+// The relay is an Opus-only audio SFU, so registering just Opus (rather than
+// RegisterDefaultCodecs) keeps negotiation minimal and lets the answer carry
 // the stereo fmtp — RegisterDefaultCodecs would register a mono-fmtp Opus at the
 // same payload type and cannot be amended. NACK lets the relay request
 // retransmission of dropped audio packets (pion enables NACK only for video by
 // default).
 func newMediaEngineWithAudioNACK() (*webrtc.MediaEngine, error) {
 	m := &webrtc.MediaEngine{}
+
+	// When RED is enabled, register audio/red FIRST so it is preferred over plain
+	// Opus. Its fmtp "<opusPT>/<opusPT>" declares it carries one level of Opus
+	// redundancy (RFC 2198). The relay frames RED itself (see redListener); the
+	// browser decodes it (Chrome supports opus+red by default since M96).
+	if redEnabled() {
+		if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:    redMimeType,
+				ClockRate:   48000,
+				Channels:    2,
+				SDPFmtpLine: strconv.Itoa(opusPayloadType) + "/" + strconv.Itoa(opusPayloadType),
+			},
+			PayloadType: redPayloadType,
+		}, webrtc.RTPCodecTypeAudio); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:     webrtc.MimeTypeOpus,
