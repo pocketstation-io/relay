@@ -1,8 +1,9 @@
 // Package graph implements the GraphRoom — the core forwarding unit of the
 // PocketStation relay (v3.0). A GraphRoom owns a set of named AudioBuses,
 // each carrying a distinct audio stream (voice, music, agent_voice, events…).
-// BusSubscriptions are room-wide: a subscriber receives RTP from every active
-// AudioBus, enabling relay.out("mix") semantics from the holy-shit demo.
+// A BusSubscription selects a single AudioBus, or the virtual BusMix to receive
+// RTP from every active bus — enabling relay.out("mix") semantics from the
+// holy-shit demo while still allowing per-bus subscriptions (spec §7).
 //
 //	graph.connect(duck.out("audio"),       relay.in_("music"))?;
 //	graph.connect(agent.out("audio"),      relay.in_("agent_voice"))?;
@@ -223,9 +224,12 @@ type BusSubscription interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
 
-// subscriptionEntry pairs a subscriber ID with its BusSubscription.
+// subscriptionEntry pairs a subscriber ID with its BusSubscription and the
+// BusID it selected. busID == BusMix means "all buses" (relay.out("mix")
+// semantics); any other value receives only that bus's RTP (spec §7).
 type subscriptionEntry struct {
 	subscriberID string
+	busID        BusID
 	sub          BusSubscription
 }
 
@@ -233,8 +237,9 @@ type subscriptionEntry struct {
 //
 // Each bus is independent: it has its own source, its own reconnect timer, and
 // its own forwardLoop goroutine. Packets are written to the parent GraphRoom's
-// subscription list so subscribers receive from all buses on a single track
-// (relay.out("mix") semantics for Phase 1).
+// subscription list, tagged with this bus's ID, so BusMix subscribers receive
+// from all buses on a single track while per-bus subscribers receive only
+// their selected bus (relay.out("mix") semantics for Phase 1; spec §7).
 //
 // Invariants:
 //   - sourceMu guards source, sourceCloser, loopDone.
@@ -436,7 +441,7 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 }
 
 // GraphRoom owns the set of AudioBuses for one relay session.
-// Subscribers are room-wide: each subscriber receives RTP from all buses
+// Each subscriber selects one bus, or BusMix to receive RTP from all buses
 // (relay.out("mix") semantics). Buses are created lazily on first PUBLISH.
 //
 // Invariants:
@@ -452,7 +457,8 @@ type GraphRoom struct {
 	buses   map[BusID]*AudioBus
 
 	// subscriptionsMu and subscriptions are room-wide; every bus forwardLoop
-	// writes here so subscribers receive from all buses on one track.
+	// writes here tagged with its BusID, and deliver filters per subscriber
+	// (BusMix subscribers receive all buses on one track).
 	subscriptionsMu sync.Mutex
 	subscriptions   atomic.Pointer[[]*subscriptionEntry]
 
@@ -572,12 +578,14 @@ func (r *GraphRoom) GetOrCreateBus(id BusID, role BusRole) *AudioBus {
 // source replaces this one (ICE restart path).
 func (r *GraphRoom) SetSource(busID BusID, role BusRole, src SourceSession, closer func()) {
 	bus := r.GetOrCreateBus(busID, role)
-	bus.SetSource(src, closer, r.deliver)
+	bus.SetSource(src, closer, func(pkt *rtp.Packet) { r.deliver(busID, pkt) })
 }
 
-// deliver is the hot-path function passed to each AudioBus.forwardLoop.
-// It writes pkt to all current room-wide subscriptions.
-func (r *GraphRoom) deliver(pkt *rtp.Packet) {
+// deliver is the hot-path function passed to each AudioBus.forwardLoop. It
+// writes pkt to every subscriber that selected this bus (entry.busID == busID)
+// or the virtual mix (entry.busID == BusMix). A BusMix subscriber therefore
+// receives RTP from all buses — byte-identical to the room-wide behavior.
+func (r *GraphRoom) deliver(busID BusID, pkt *rtp.Packet) {
 	const maxConsecutiveErrors = 5
 
 	ls := *r.subscriptions.Load()
@@ -586,6 +594,9 @@ func (r *GraphRoom) deliver(pkt *rtp.Packet) {
 	var deadSubs []string
 
 	for _, e := range ls {
+		if e.busID != busID && e.busID != BusMix {
+			continue
+		}
 		if wErr := e.sub.WriteRTP(pkt); wErr != nil {
 			errCounts[e.subscriberID]++
 			if errCounts[e.subscriberID] >= maxConsecutiveErrors {
@@ -601,9 +612,11 @@ func (r *GraphRoom) deliver(pkt *rtp.Packet) {
 	}
 }
 
-// AddSubscription registers sub under subscriberID.
+// AddSubscription registers sub under subscriberID for the named busID. Pass
+// BusMix to receive RTP from every bus (relay.out("mix") semantics); pass a
+// concrete BusID (e.g. "voice") to receive only that bus (spec §7).
 // Returns ErrRoomFull when r.maxSubscriptions > 0 and capacity is reached.
-func (r *GraphRoom) AddSubscription(subscriberID string, sub BusSubscription) error {
+func (r *GraphRoom) AddSubscription(subscriberID string, busID BusID, sub BusSubscription) error {
 	r.subscriptionsMu.Lock()
 	defer r.subscriptionsMu.Unlock()
 
@@ -613,7 +626,7 @@ func (r *GraphRoom) AddSubscription(subscriberID string, sub BusSubscription) er
 	}
 	next := make([]*subscriptionEntry, len(old)+1)
 	copy(next, old)
-	next[len(old)] = &subscriptionEntry{subscriberID: subscriberID, sub: sub}
+	next[len(old)] = &subscriptionEntry{subscriberID: subscriberID, busID: busID, sub: sub}
 	r.subscriptions.Store(&next)
 	return nil
 }

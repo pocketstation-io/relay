@@ -270,7 +270,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			if redEnabled() {
 				sub = newREDListener(audioTrack, opusPayloadType)
 			}
-			if err := rm.AddSubscription(s.id, sub); err != nil {
+			if err := rm.AddSubscription(s.id, s.busID, sub); err != nil {
 				s.subscriptionRegistered.Store(false)
 				slog.Warn("AddSubscription post-connect failed", "session_id", s.id, "err", err)
 				return
