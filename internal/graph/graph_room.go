@@ -12,6 +12,7 @@ package graph
 import (
 	"errors"
 	"log/slog"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -81,20 +82,20 @@ func (ls *latencyStore) stats() LatencyStats {
 		return LatencyStats{}
 	}
 
-	capture  := make([]float64, count)
-	encode   := make([]float64, count)
-	rtt      := make([]float64, count)
-	jitter   := make([]float64, count)
-	decode   := make([]float64, count)
-	lossSum  := 0.0
+	capture := make([]float64, count)
+	encode := make([]float64, count)
+	rtt := make([]float64, count)
+	jitter := make([]float64, count)
+	decode := make([]float64, count)
+	lossSum := 0.0
 	for i := 0; i < count; i++ {
 		s := ls.samples[i]
-		capture[i]  = s.captureMs
-		encode[i]   = s.encodeMs
-		rtt[i]      = s.relayRttMs
-		jitter[i]   = s.jitterBufferMs
-		decode[i]   = s.decodeMs
-		lossSum    += s.packetLossPct
+		capture[i] = s.captureMs
+		encode[i] = s.encodeMs
+		rtt[i] = s.relayRttMs
+		jitter[i] = s.jitterBufferMs
+		decode[i] = s.decodeMs
+		lossSum += s.packetLossPct
 	}
 	return LatencyStats{
 		CaptureP50Ms:      p50(capture),
@@ -169,6 +170,25 @@ func (r BusRole) ReliabilityRank() uint8 {
 	}
 }
 
+// String returns the canonical label for this bus role (LAW 8 — classification
+// as an impl method; used in BusHealth JSON).
+func (r BusRole) String() string {
+	switch r {
+	case BusRoleVoice:
+		return "voice"
+	case BusRoleMusic:
+		return "music"
+	case BusRoleAgentOutput:
+		return "agent_output"
+	case BusRoleEvents:
+		return "events"
+	case BusRoleMonitor:
+		return "monitor"
+	default:
+		return "unknown"
+	}
+}
+
 // defaultInactivityTimeout is the time a GraphRoom with no active bus source
 // will remain open before auto-closing. Configurable via ROOM_EXPIRY_MINUTES.
 const defaultInactivityTimeout = 30 * time.Minute
@@ -176,6 +196,12 @@ const defaultInactivityTimeout = 30 * time.Minute
 // defaultReconnectWindow is the time a bus keeps subscribers alive after its
 // source disconnects. Configurable via SOURCE_RECONNECT_WINDOW_SEC.
 const defaultReconnectWindow = 60 * time.Second
+
+// DefaultMediaStallThresholdMs is how long a bus with an attached source may go
+// without forwarding an RTP packet before it is considered media-stalled.
+// WebSocket/ICE can stay alive while media silently stops (Corrected Audit §6):
+// at 50–100 pkt/s, ~2 s with zero packets is unambiguously a stall, not jitter.
+const DefaultMediaStallThresholdMs = 2000
 
 var (
 	// ErrNoSource is returned when an operation requires a live source and none exists.
@@ -223,6 +249,11 @@ type AudioBus struct {
 	ByteCount       atomic.Uint64
 	PacketDropCount atomic.Uint64
 
+	// lastRTPAtNanos is the UnixNano timestamp of the most recently forwarded
+	// RTP packet (0 = none yet). The media watchdog reads it to tell a live but
+	// silent source from a healthy one — WebSocket liveness ≠ media liveness.
+	lastRTPAtNanos atomic.Int64
+
 	sourceMu     sync.Mutex
 	source       SourceSession
 	sourceCloser func()
@@ -261,11 +292,11 @@ func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp
 	newLoopDone := make(chan struct{})
 
 	b.sourceMu.Lock()
-	prevCloser  := b.sourceCloser
-	prevDone    := b.loopDone
-	b.source      = src
+	prevCloser := b.sourceCloser
+	prevDone := b.loopDone
+	b.source = src
 	b.sourceCloser = closer
-	b.loopDone    = newLoopDone
+	b.loopDone = newLoopDone
 	b.sourceMu.Unlock()
 
 	if prevCloser != nil {
@@ -283,6 +314,9 @@ func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp
 	b.timerMu.Unlock()
 
 	b.sourceEverConnected.Store(true)
+	// Seed the watchdog clock so a freshly-attached source is not reported as
+	// stalled before its first packet arrives.
+	b.lastRTPAtNanos.Store(time.Now().UnixNano())
 	go b.forwardLoop(src, newLoopDone, deliver)
 }
 
@@ -291,6 +325,56 @@ func (b *AudioBus) SourceActive() bool {
 	b.sourceMu.Lock()
 	defer b.sourceMu.Unlock()
 	return b.source != nil
+}
+
+// LastRTPAge returns how long since this bus last forwarded an RTP packet.
+// Returns the maximum duration if no packet has ever been forwarded.
+func (b *AudioBus) LastRTPAge() time.Duration {
+	last := b.lastRTPAtNanos.Load()
+	if last == 0 {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Since(time.Unix(0, last))
+}
+
+// Stalled reports whether the bus has an attached source but has not forwarded
+// an RTP packet within threshold. A bus with no source is idle, not stalled —
+// this is the media-plane liveness a WebSocket ping cannot detect (§6).
+func (b *AudioBus) Stalled(threshold time.Duration) bool {
+	return b.SourceActive() && b.LastRTPAge() > threshold
+}
+
+// BusHealth is a media-plane snapshot of one AudioBus, distinguishing a live
+// source gone silent (Stalled) from a healthy or idle one (Corrected Audit §6).
+type BusHealth struct {
+	BusID        BusID  `json:"bus_id"`
+	Role         string `json:"role"`
+	SourceActive bool   `json:"source_active"`
+	Stalled      bool   `json:"stalled"`
+	LastRTPAgeMs int64  `json:"last_rtp_age_ms"` // -1 when no packet has ever flowed
+	PacketCount  uint64 `json:"packet_count"`
+	ByteCount    uint64 `json:"byte_count"`
+	DropCount    uint64 `json:"drop_count"`
+}
+
+// Health snapshots this bus, marking it stalled if its source is live but no
+// RTP has flowed within threshold.
+func (b *AudioBus) Health(threshold time.Duration) BusHealth {
+	age := b.LastRTPAge()
+	ageMs := int64(-1)
+	if age != time.Duration(math.MaxInt64) {
+		ageMs = age.Milliseconds()
+	}
+	return BusHealth{
+		BusID:        b.ID,
+		Role:         b.Role.String(),
+		SourceActive: b.SourceActive(),
+		Stalled:      b.Stalled(threshold),
+		LastRTPAgeMs: ageMs,
+		PacketCount:  b.PacketCount.Load(),
+		ByteCount:    b.ByteCount.Load(),
+		DropCount:    b.PacketDropCount.Load(),
+	}
 }
 
 func (b *AudioBus) close() {
@@ -312,7 +396,7 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 	defer func() {
 		b.sourceMu.Lock()
 		if b.source == src {
-			b.source       = nil
+			b.source = nil
 			b.sourceCloser = nil
 		}
 		b.sourceMu.Unlock()
@@ -339,12 +423,13 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 
 		b.PacketCount.Add(1)
 		b.ByteCount.Add(uint64(len(pkt.Payload)))
+		b.lastRTPAtNanos.Store(time.Now().UnixNano())
 
 		// Normalise padding before forwarding (radio-glitch fix: pion strips
 		// padding bytes but leaves Header.Padding=true; receivers then read
 		// the last payload byte as padding length and discard the packet).
 		pkt.Header.Padding = false
-		pkt.PaddingSize    = 0
+		pkt.PaddingSize = 0
 
 		deliver(pkt)
 	}
@@ -387,6 +472,11 @@ type GraphRoom struct {
 	inactivityTimeout time.Duration
 	reconnectWindow   time.Duration
 
+	// expiryTimer drives active-media-aware room expiry: it periodically closes
+	// the room only when it is truly idle (Corrected Audit §6.4).
+	expiryMu    sync.Mutex
+	expiryTimer *time.Timer
+
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -412,7 +502,49 @@ func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration
 	}
 	empty := make([]*subscriptionEntry, 0)
 	r.subscriptions.Store(&empty)
+	r.expiryMu.Lock()
+	r.expiryTimer = time.AfterFunc(inactivityTimeout, r.checkExpiry)
+	r.expiryMu.Unlock()
 	return r
+}
+
+// checkExpiry closes the room if it is idle, otherwise reschedules itself.
+// Runs on the expiry timer goroutine.
+func (r *GraphRoom) checkExpiry() {
+	if r.isInactive() {
+		r.Close()
+		return
+	}
+	r.expiryMu.Lock()
+	if r.expiryTimer != nil {
+		r.expiryTimer.Reset(r.inactivityTimeout)
+	}
+	r.expiryMu.Unlock()
+}
+
+// isInactive reports whether the room may be expired: no live source, no
+// subscribers, and no RTP forwarded within the inactivity window. A WebSocket
+// staying open does not keep an otherwise-dead room alive (Corrected Audit §6.4).
+func (r *GraphRoom) isInactive() bool {
+	if r.SourceActive() {
+		return false
+	}
+	if r.SubscriptionCount() > 0 {
+		return false
+	}
+	return !r.hasRecentRTP(r.inactivityTimeout)
+}
+
+// hasRecentRTP reports whether any bus forwarded an RTP packet within window.
+func (r *GraphRoom) hasRecentRTP(window time.Duration) bool {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	for _, b := range r.buses {
+		if b.lastRTPAtNanos.Load() != 0 && b.LastRTPAge() < window {
+			return true
+		}
+	}
+	return false
 }
 
 // GetOrCreateBus returns the AudioBus named id, creating it with the given role
@@ -450,7 +582,7 @@ func (r *GraphRoom) deliver(pkt *rtp.Packet) {
 
 	ls := *r.subscriptions.Load()
 
-	errCounts    := make(map[string]int, len(ls))
+	errCounts := make(map[string]int, len(ls))
 	var deadSubs []string
 
 	for _, e := range ls {
@@ -511,7 +643,7 @@ func (r *GraphRoom) TryReserveSlot(max int) bool {
 	}
 	for {
 		pending := r.pendingSlots.Load()
-		active  := int32(r.SubscriptionCount())
+		active := int32(r.SubscriptionCount())
 		if int(pending+active) >= max {
 			return false
 		}
@@ -557,16 +689,47 @@ func (r *GraphRoom) PacketStats() (packets, bytes, dropped uint64) {
 	defer r.busesMu.RUnlock()
 	for _, b := range r.buses {
 		packets += b.PacketCount.Load()
-		bytes   += b.ByteCount.Load()
+		bytes += b.ByteCount.Load()
 		dropped += b.PacketDropCount.Load()
 	}
 	return
+}
+
+// BusHealthList returns a media-plane health snapshot for every bus in the room.
+// Returns a non-nil empty slice when the room has no buses yet.
+func (r *GraphRoom) BusHealthList(threshold time.Duration) []BusHealth {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	out := make([]BusHealth, 0, len(r.buses))
+	for _, b := range r.buses {
+		out = append(out, b.Health(threshold))
+	}
+	return out
+}
+
+// AnyBusStalled reports whether any bus has a live source that has gone silent.
+// This is the media-stall signal the room watchdog acts on (emit event / request
+// ICE restart) — distinct from "no source", which is normal idleness.
+func (r *GraphRoom) AnyBusStalled(threshold time.Duration) bool {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	for _, b := range r.buses {
+		if b.Stalled(threshold) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close terminates the room and all its buses. Safe to call multiple times.
 func (r *GraphRoom) Close() {
 	r.closeOnce.Do(func() {
 		close(r.done)
+		r.expiryMu.Lock()
+		if r.expiryTimer != nil {
+			r.expiryTimer.Stop()
+		}
+		r.expiryMu.Unlock()
 		r.busesMu.RLock()
 		defer r.busesMu.RUnlock()
 		for _, b := range r.buses {
@@ -695,7 +858,7 @@ func (reg *SessionRegistry) PacketStats() (forwarded, dropped uint64) {
 	for _, r := range reg.rooms {
 		pkts, _, drop := r.PacketStats()
 		forwarded += pkts
-		dropped   += drop
+		dropped += drop
 	}
 	return
 }
