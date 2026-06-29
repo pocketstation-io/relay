@@ -82,7 +82,7 @@ func TestGiven_NewGraphRoom_When_Inspected_Then_Empty(t *testing.T) {
 
 func TestGiven_GraphRoom_When_AddSubscription_Then_CountIncreases(t *testing.T) {
 	r := New("room-1")
-	if err := r.AddSubscription("peer-1", &mockSubscription{}); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, &mockSubscription{}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	if r.SubscriptionCount() != 1 {
@@ -93,7 +93,7 @@ func TestGiven_GraphRoom_When_AddSubscription_Then_CountIncreases(t *testing.T) 
 func TestGiven_GraphRoom_When_MultipleSubscriptions_Then_AllCounted(t *testing.T) {
 	r := New("room-1")
 	for _, id := range []string{"peer-1", "peer-2", "peer-3"} {
-		if err := r.AddSubscription(id, &mockSubscription{}); err != nil {
+		if err := r.AddSubscription(id, BusMix, &mockSubscription{}); err != nil {
 			t.Fatalf("AddSubscription %s: %v", id, err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestGiven_GraphRoom_When_MultipleSubscriptions_Then_AllCounted(t *testing.T
 
 func TestGiven_GraphRoom_When_RemoveSubscription_Then_CountDecreases(t *testing.T) {
 	r := New("room-1")
-	if err := r.AddSubscription("peer-1", &mockSubscription{}); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, &mockSubscription{}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	r.RemoveSubscription("peer-1")
@@ -152,7 +152,7 @@ func TestGiven_ActiveBus_When_PacketPublished_Then_SubscriberReceives(t *testing
 	r := New("room-1")
 	src := newMockSource()
 	sub := &mockSubscription{}
-	if err := r.AddSubscription("peer-1", sub); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, sub); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	r.SetSource("voice", BusRoleVoice, src, nil)
@@ -169,7 +169,7 @@ func TestGiven_MultipleBuses_When_EachPublishes_Then_SubscriberReceivesAll(t *te
 	voiceSrc := newMockSource()
 	musicSrc := newMockSource()
 	sub := &mockSubscription{}
-	if err := r.AddSubscription("peer-1", sub); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, sub); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	r.SetSource("voice", BusRoleVoice, voiceSrc, nil)
@@ -187,14 +187,66 @@ func TestGiven_MultipleBuses_When_EachPublishes_Then_SubscriberReceivesAll(t *te
 	musicSrc.close()
 }
 
+func TestGiven_BusSpecificSubscriber_When_OtherBusPublishes_Then_NotReceived(t *testing.T) {
+	r := New("room-1")
+	voiceSrc := newMockSource()
+	musicSrc := newMockSource()
+
+	mixSub := &mockSubscription{}   // BusMix: must receive both buses
+	voiceSub := &mockSubscription{} // "voice": must receive only voice
+	musicSub := &mockSubscription{} // "music": must receive only music
+	if err := r.AddSubscription("mix-peer", BusMix, mixSub); err != nil {
+		t.Fatalf("AddSubscription mix: %v", err)
+	}
+	if err := r.AddSubscription("voice-peer", "voice", voiceSub); err != nil {
+		t.Fatalf("AddSubscription voice: %v", err)
+	}
+	if err := r.AddSubscription("music-peer", "music", musicSub); err != nil {
+		t.Fatalf("AddSubscription music: %v", err)
+	}
+
+	r.SetSource("voice", BusRoleVoice, voiceSrc, nil)
+	r.SetSource("music", BusRoleMusic, musicSrc, nil)
+
+	voicePkt := &rtp.Packet{Payload: []byte{0x01}}
+	musicPkt := &rtp.Packet{Payload: []byte{0x02}}
+	voiceSrc.send(voicePkt)
+	musicSrc.send(musicPkt)
+
+	// BusMix subscriber receives both buses (byte-identical to room-wide behavior).
+	waitFor(t, 100*time.Millisecond, func() bool { return len(mixSub.received()) == 2 })
+	// Per-bus subscribers each receive exactly their own bus.
+	waitFor(t, 100*time.Millisecond, func() bool { return len(voiceSub.received()) == 1 })
+	waitFor(t, 100*time.Millisecond, func() bool { return len(musicSub.received()) == 1 })
+
+	if got := voiceSub.received()[0].Payload[0]; got != 0x01 {
+		t.Errorf("voice subscriber got payload %#x, want 0x01 (must not receive music)", got)
+	}
+	if got := musicSub.received()[0].Payload[0]; got != 0x02 {
+		t.Errorf("music subscriber got payload %#x, want 0x02 (must not receive voice)", got)
+	}
+
+	// Give any erroneous cross-bus delivery a chance to land, then assert it did not.
+	time.Sleep(20 * time.Millisecond)
+	if n := len(voiceSub.received()); n != 1 {
+		t.Errorf("voice subscriber received %d packets, want exactly 1", n)
+	}
+	if n := len(musicSub.received()); n != 1 {
+		t.Errorf("music subscriber received %d packets, want exactly 1", n)
+	}
+
+	voiceSrc.close()
+	musicSrc.close()
+}
+
 func TestGiven_MultipleSubscribers_When_BusPublishes_Then_AllReceive(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	sub1, sub2 := &mockSubscription{}, &mockSubscription{}
-	if err := r.AddSubscription("peer-1", sub1); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, sub1); err != nil {
 		t.Fatalf("AddSubscription peer-1: %v", err)
 	}
-	if err := r.AddSubscription("peer-2", sub2); err != nil {
+	if err := r.AddSubscription("peer-2", BusMix, sub2); err != nil {
 		t.Fatalf("AddSubscription peer-2: %v", err)
 	}
 	r.SetSource("voice", BusRoleVoice, src, nil)
@@ -236,7 +288,7 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_SubscriberReceivesAft
 	r := New("reconnect-room")
 	src1 := newMockSource()
 	sub := &mockSubscription{}
-	if err := r.AddSubscription("peer-1", sub); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, sub); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 
@@ -263,7 +315,7 @@ func TestGiven_RTPPaddingBitSet_When_Forwarded_Then_PaddingBitCleared(t *testing
 	r := New("padding-room")
 	src := newMockSource()
 	sub := &mockSubscription{}
-	if err := r.AddSubscription("peer-1", sub); err != nil {
+	if err := r.AddSubscription("peer-1", BusMix, sub); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	r.SetSource("voice", BusRoleVoice, src, nil)

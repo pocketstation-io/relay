@@ -150,6 +150,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 			return
 		}
 		connCapture := connID
+		busCapture := busID
 		pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 			switch state {
 			case webrtc.PeerConnectionStateConnected:
@@ -157,7 +158,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 				if redEnabled() {
 					sub = newREDListener(audioTrack, opusPayloadType)
 				}
-				_ = rm.AddSubscription(connCapture, sub)
+				_ = rm.AddSubscription(connCapture, busCapture, sub)
 			case webrtc.PeerConnectionStateFailed,
 				webrtc.PeerConnectionStateClosed,
 				webrtc.PeerConnectionStateDisconnected:
