@@ -18,9 +18,9 @@ type mockSource struct {
 	ch chan *rtp.Packet
 }
 
-func newMockSource() *mockSource { return &mockSource{ch: make(chan *rtp.Packet, 16)} }
-func (m *mockSource) send(pkt *rtp.Packet)   { m.ch <- pkt }
-func (m *mockSource) close()                 { close(m.ch) }
+func newMockSource() *mockSource           { return &mockSource{ch: make(chan *rtp.Packet, 16)} }
+func (m *mockSource) send(pkt *rtp.Packet) { m.ch <- pkt }
+func (m *mockSource) close()               { close(m.ch) }
 func (m *mockSource) ReadRTP() (*rtp.Packet, error) {
 	pkt, ok := <-m.ch
 	if !ok {
@@ -270,8 +270,8 @@ func TestGiven_RTPPaddingBitSet_When_Forwarded_Then_PaddingBitCleared(t *testing
 
 	paddedPkt := &rtp.Packet{}
 	paddedPkt.Header.Padding = true
-	paddedPkt.PaddingSize    = 4
-	paddedPkt.Payload        = []byte{0xAA, 0xBB}
+	paddedPkt.PaddingSize = 4
+	paddedPkt.Payload = []byte{0xAA, 0xBB}
 	src.send(paddedPkt)
 
 	waitFor(t, 100*time.Millisecond, func() bool { return len(sub.received()) == 1 })
@@ -387,4 +387,105 @@ func TestGiven_BusRoles_When_LatencyRank_Then_VoiceAndAgentAreLowest(t *testing.
 	if BusRoleEvents.LatencyRank() <= BusRoleMusic.LatencyRank() {
 		t.Error("events must have higher latency rank than music")
 	}
+}
+
+// --- media watchdog (Corrected Audit §6) ---
+
+func TestGiven_BusWithNoSource_When_StalledChecked_Then_NotStalled(t *testing.T) {
+	r := New("room-wd")
+	defer r.Close()
+	bus := r.GetOrCreateBus("voice", BusRoleVoice)
+
+	if bus.SourceActive() {
+		t.Error("a bus with no source must not report source active")
+	}
+	if bus.Stalled(time.Second) {
+		t.Error("a bus with no source is idle, not stalled")
+	}
+}
+
+func TestGiven_ActiveSourceWithRecentRTP_When_StalledChecked_Then_NotStalled(t *testing.T) {
+	r := New("room-wd")
+	src := newMockSource()
+	r.SetSource("voice", BusRoleVoice, src, nil)
+	bus := r.GetOrCreateBus("voice", BusRoleVoice)
+
+	src.send(&rtp.Packet{})
+	waitFor(t, time.Second, func() bool { return bus.PacketCount.Load() == 1 })
+
+	if bus.Stalled(time.Second) {
+		t.Errorf("a bus forwarding RTP must not be stalled (age=%v)", bus.LastRTPAge())
+	}
+
+	r.Close()
+	src.close()
+}
+
+func TestGiven_ActiveSourceButSilent_When_StalledChecked_Then_Stalled(t *testing.T) {
+	r := New("room-wd")
+	src := newMockSource()
+	r.SetSource("voice", BusRoleVoice, src, nil) // seeds last-RTP=now, then blocks on ReadRTP
+	bus := r.GetOrCreateBus("voice", BusRoleVoice)
+
+	const threshold = 10 * time.Millisecond
+	time.Sleep(5 * threshold) // let the seeded timestamp age past the threshold
+
+	if !bus.Stalled(threshold) {
+		t.Errorf("a live source silent past %v must be stalled (age=%v)", threshold, bus.LastRTPAge())
+	}
+	if !r.AnyBusStalled(threshold) {
+		t.Error("room must report a stalled bus")
+	}
+
+	r.Close()
+	src.close()
+}
+
+func TestGiven_ForwardingBus_When_HealthSnapshot_Then_ReflectsCounters(t *testing.T) {
+	r := New("room-wd")
+	src := newMockSource()
+	r.SetSource("music", BusRoleMusic, src, nil)
+	bus := r.GetOrCreateBus("music", BusRoleMusic)
+
+	src.send(&rtp.Packet{Payload: []byte{1, 2, 3, 4}})
+	waitFor(t, time.Second, func() bool { return bus.PacketCount.Load() == 1 })
+
+	h := bus.Health(time.Second)
+	if h.BusID != "music" || h.Role != "music" {
+		t.Errorf("unexpected health identity: %+v", h)
+	}
+	if !h.SourceActive || h.Stalled {
+		t.Errorf("a forwarding bus must be source-active and not stalled: %+v", h)
+	}
+	if h.PacketCount != 1 || h.ByteCount != 4 {
+		t.Errorf("health counters wrong: %+v", h)
+	}
+
+	list := r.BusHealthList(time.Second)
+	if len(list) != 1 || list[0].BusID != "music" {
+		t.Errorf("BusHealthList should hold the one music bus, got %+v", list)
+	}
+
+	r.Close()
+	src.close()
+}
+
+func TestGiven_RoomWithActiveSource_When_PastInactivityTimeout_Then_NotExpired(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	r := newWithTimeout("active-room", timeout)
+	src := newMockSource()
+	r.SetSource("voice", BusRoleVoice, src, nil)
+
+	// Keep a live source attached well past several inactivity windows; a
+	// WebSocket-open-but-media-aware room must stay open while media is live.
+	time.Sleep(6 * timeout)
+
+	select {
+	case <-r.done:
+		t.Error("a room with an active source must not expire on the inactivity timer")
+	default:
+	}
+
+	r.Close()
+	src.close()
 }

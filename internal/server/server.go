@@ -190,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	// v3.0 session endpoints (canonical)
 	mux.HandleFunc("POST /v1/sessions", s.createRoom)
 	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
+	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
 
 	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
@@ -486,6 +487,22 @@ func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 	stats := rm.GetLatencyStats()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+// roomHealth returns the media-plane health of every bus in the session: which
+// buses have a live source, which have gone silent (stalled), and how long
+// since each last forwarded RTP (Corrected Audit §6 — media liveness, distinct
+// from WebSocket liveness).
+func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	threshold := time.Duration(graph.DefaultMediaStallThresholdMs) * time.Millisecond
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
 }
 
 // sseKeepaliveInterval is how often the relay sends SSE keepalive comments.
