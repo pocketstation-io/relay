@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -191,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sessions", s.createRoom)
 	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
 	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
+	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
 
 	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
@@ -384,6 +386,8 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		"subscriber_token": subscriberToken,
 		"listener_token":   subscriberToken, // v2.3 wire compat
 		"qr_url":           "/listen?room=" + id,
+		"relay_region":     os.Getenv("FLY_REGION"),
+		"relay_app":        os.Getenv("FLY_APP_NAME"),
 	}
 	// Include ICE server configuration when TURN is enabled (RELAY-023).
 	// Clients pass this list to RTCPeerConnection so they reach the relay's
@@ -503,6 +507,53 @@ func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 	threshold := time.Duration(graph.DefaultMediaStallThresholdMs) * time.Millisecond
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
+}
+
+// packetLogMaxLimit caps the number of entries returned by packetLogHandler.
+const packetLogMaxLimit = 1000
+
+// packetLogHandler handles GET /v1/sessions/{id}/packet-log.
+// Returns the most recent per-packet relay timestamps for the named bus.
+//
+// Query parameters:
+//   - bus  (required): AudioBus ID, e.g. "voice" or "music".
+//   - limit (optional): number of entries to return, 1–1000, default 100.
+//
+// Each entry is a PacketLogEntry with seq, rx_ts_ns, and tx_ts_ns.
+// tx_ts_ns - rx_ts_ns = relay-internal forwarding latency for that packet.
+// rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
+// subscriber recv_ns - tx_ts_ns = A4 (relay → subscriber) leg latency.
+func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	busID := r.URL.Query().Get("bus")
+	if busID == "" {
+		http.Error(w, "bus query parameter required", http.StatusBadRequest)
+		return
+	}
+	limit := 100
+	if lstr := r.URL.Query().Get("limit"); lstr != "" {
+		n, err := strconv.Atoi(lstr)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		if n > packetLogMaxLimit {
+			n = packetLogMaxLimit
+		}
+		limit = n
+	}
+	entries := rm.BusPacketLog(busID, limit)
+	if entries == nil {
+		http.Error(w, "bus not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(entries)
 }
 
 // sseKeepaliveInterval is how often the relay sends SSE keepalive comments.

@@ -27,6 +27,10 @@ import (
 // computation (spec §13.4).
 const latencyWindowSizeCount = 100
 
+// packetLogWindowSize is the number of per-packet entries retained per bus.
+// At 50 pkt/s this covers 20 seconds of audio history.
+const packetLogWindowSize = 1000
+
 // LatencyStats holds aggregated per-segment latency percentiles for a
 // GraphRoom. All duration fields are P50 medians over the last
 // latencyWindowSizeCount reports received from source and subscriber clients.
@@ -120,6 +124,64 @@ func p50(v []float64) float64 {
 		return (v[mid-1] + v[mid]) / 2
 	}
 	return v[mid]
+}
+
+// PacketLogEntry holds the relay-side timestamps for one forwarded RTP packet.
+// RxTsNs is stamped immediately after ReadRTP returns (ingress).
+// TxTsNs is stamped immediately after deliver completes (egress).
+// TxTsNs - RxTsNs = relay-internal forwarding latency for that packet.
+type PacketLogEntry struct {
+	Seq    uint16 `json:"seq"`
+	RxTsNs int64  `json:"rx_ts_ns"`
+	TxTsNs int64  `json:"tx_ts_ns"`
+}
+
+// packetLogStore accumulates PacketLogEntry values in a fixed-size ring.
+// Safe for concurrent use.
+type packetLogStore struct {
+	mu      sync.Mutex
+	entries []PacketLogEntry
+	head    int
+	full    bool
+}
+
+func newPacketLogStore() *packetLogStore {
+	return &packetLogStore{entries: make([]PacketLogEntry, packetLogWindowSize)}
+}
+
+func (pl *packetLogStore) record(e PacketLogEntry) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.entries[pl.head] = e
+	pl.head = (pl.head + 1) % packetLogWindowSize
+	if pl.head == 0 {
+		pl.full = true
+	}
+}
+
+// last returns the most recent limit entries in chronological order.
+// Returns an empty slice (not nil) when no entries exist yet.
+func (pl *packetLogStore) last(limit int) []PacketLogEntry {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	count := pl.head
+	if pl.full {
+		count = packetLogWindowSize
+	}
+	if limit > count {
+		limit = count
+	}
+	if limit == 0 {
+		return []PacketLogEntry{}
+	}
+
+	out := make([]PacketLogEntry, limit)
+	start := (pl.head - limit + packetLogWindowSize*2) % packetLogWindowSize
+	for i := 0; i < limit; i++ {
+		out[i] = pl.entries[(start+i)%packetLogWindowSize]
+	}
+	return out
 }
 
 // BusID names a forwarding lane within a GraphRoom.
@@ -260,6 +322,10 @@ type AudioBus struct {
 	// silent source from a healthy one — WebSocket liveness ≠ media liveness.
 	lastRTPAtNanos atomic.Int64
 
+	// packetLog is a fixed-size ring of per-packet relay timestamps used to
+	// compute A3 (WebRTC→relay) and A4 (relay→subscriber) §11.3 budgets.
+	packetLog *packetLogStore
+
 	sourceMu     sync.Mutex
 	source       SourceSession
 	sourceCloser func()
@@ -284,6 +350,7 @@ func newAudioBus(id BusID, role BusRole, graphID string, inactivityTimeout, reco
 		done:              make(chan struct{}),
 		inactivityTimeout: inactivityTimeout,
 		reconnectWindow:   reconnectWindow,
+		packetLog:         newPacketLogStore(),
 	}
 	b.timerMu.Lock()
 	b.inactivityTimer = time.AfterFunc(inactivityTimeout, func() { b.close() })
@@ -426,6 +493,7 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 		if err != nil {
 			return
 		}
+		rxTs := time.Now().UnixNano() // A3/A4 measurement: ingress timestamp
 		select {
 		case <-b.done:
 			return
@@ -434,7 +502,7 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 
 		b.PacketCount.Add(1)
 		b.ByteCount.Add(uint64(len(pkt.Payload)))
-		b.lastRTPAtNanos.Store(time.Now().UnixNano())
+		b.lastRTPAtNanos.Store(rxTs)
 
 		// Normalise padding before forwarding (radio-glitch fix: pion strips
 		// padding bytes but leaves Header.Padding=true; receivers then read
@@ -443,6 +511,12 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 		pkt.PaddingSize = 0
 
 		deliver(pkt)
+		txTs := time.Now().UnixNano() // A3/A4 measurement: egress timestamp
+		b.packetLog.record(PacketLogEntry{
+			Seq:    pkt.Header.SequenceNumber,
+			RxTsNs: rxTs,
+			TxTsNs: txTs,
+		})
 	}
 }
 
@@ -491,7 +565,6 @@ type GraphRoom struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
-
 }
 
 // New returns an open GraphRoom with default timeouts.
@@ -739,6 +812,19 @@ func (r *GraphRoom) BusHealthList(threshold time.Duration) []BusHealth {
 		out = append(out, b.Health(threshold))
 	}
 	return out
+}
+
+// BusPacketLog returns the last limit per-packet relay timestamps for busID.
+// Returns an empty slice when the bus exists but no packets have been forwarded.
+// Returns nil when the bus does not exist in this session.
+func (r *GraphRoom) BusPacketLog(busID BusID, limit int) []PacketLogEntry {
+	r.busesMu.RLock()
+	b, ok := r.buses[busID]
+	r.busesMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return b.packetLog.last(limit)
 }
 
 // AnyBusStalled reports whether any bus has a live source that has gone silent.
