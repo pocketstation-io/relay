@@ -10,26 +10,75 @@
 - [x] Padding fix — clear RTP padding bit on forward (fixes ~47% browser concealment)
 - [x] Stage D core — RFC 2198 RED codec + redListener + MediaEngine registration
 - [x] Stage D browser fix — app-web-receiver SDP munge to include audio/red in subscribe offer
+- [x] Room → GraphSession migration — COMPLETE (audited 2026-07-02; see below)
+- [x] AudioBus semantics on relay forwarding path — COMPLETE (AudioBus type, BusID, BusMix)
+- [x] source_id / bus_id in signaling — COMPLETE (ClientMessage.BusID, SessionID/RoomID compat)
+- [x] /v1/sessions control plane API — COMPLETE (POST, GET latency/health/packet-log/events, WHIP/WHEP)
 - [ ] Stage D Gate D — prove loss recovery with packet-loss-injection harness (RELAY_ENABLE_RED=1)
-- [ ] Room → GraphSession migration (Phase 1 primary task — not started)
-- [ ] AudioBus semantics on relay forwarding path
-- [ ] source_id / bus_id in signaling
-- [ ] /v1/graphs and /v1/sessions control plane API
+- [ ] /v1/graphs endpoint — graph template listing (Phase 2+ scope; not started)
+
+---
+
+## Phase 1 Audit — GraphSession Migration (2026-07-02)
+
+**Audited state vs. AGENTS.md claim ("0%"):**
+
+The AGENTS.md and BUILD_GUIDE were written before Waves 13/13b/13c were committed.
+The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
+
+| Item | Status | Evidence |
+|---|---|---|
+| GraphRoom core type | ✅ DONE | `internal/graph/graph_room.go` |
+| AudioBus (per-bus forwarding) | ✅ DONE | `AudioBus`, `BusID`, `BusMix`, `BusRole` in graph_room.go |
+| BusSubscription interface | ✅ DONE | `BusSubscription` replaces old Listener |
+| POST /v1/sessions | ✅ DONE | server.go:192 |
+| GET /v1/sessions/{id}/latency | ✅ DONE | server.go:193 |
+| GET /v1/sessions/{id}/health | ✅ DONE | server.go:194 — per-bus media watchdog |
+| GET /v1/sessions/{id}/packet-log | ✅ DONE | server.go:195 — A3/A4 benchmark endpoint |
+| GET /v1/sessions/{id}/events | ✅ DONE | server.go:196 — SSE presence stream |
+| WHIP / WHEP (RFC 9725) | ✅ DONE | server.go:201-202 |
+| v2.3 /v1/rooms alias | ✅ DONE | server.go:207 — backward compat, kept until SDKs migrate |
+| session_id in signaling | ✅ DONE | ClientMessage.SessionID + RoomID alias |
+| bus_id in signaling | ✅ DONE | ClientMessage.BusID |
+| SessionRegistry | ✅ DONE | `graph.SessionRegistry`, replaces old room registry |
+| Per-bus media watchdog | ✅ DONE | Wave 13 — LastRTPAge, DefaultMediaStallThresholdMs |
+
+**What is NOT done:**
+- Stage D Gate D — requires packet-loss injection with RELAY_ENABLE_RED=1 (real path needed)
+- `/v1/graphs` — graph template listing endpoint; deferred to Phase 2+ (no template registry yet)
 
 ---
 
 ## Completed
 
-### Stage D — Opus RED (RFC 2198) loss resilience
+### Task 1.1 — Room → GraphSession migration (DONE, audited 2026-07-02)
+
+**Waves:** 13, 13b, 13c (pre-existing commits on test/floodtest-100m-smoke)
+**v3.0 vocabulary fully implemented:**
+
+- `graph.GraphRoom` — the central forwarding unit; owns named AudioBuses
+- `graph.AudioBus` — one named forwarding lane (voice / music / agent_voice / events)
+- `graph.BusSubscription` — write side of audio delivery (replaces `room.Listener`)
+- `graph.SessionRegistry` — room registry with RegistryConfig, inactivity timeouts, CloseAll
+- `graph.BusRole` with `LatencyRank()` and `ReliabilityRank()` impl methods (LAW 8)
+- BusMix (`"mix"`) — virtual BusID subscribing to all active buses (relay.out("mix") semantics)
+- `/v1/sessions` canonical endpoints with `/v1/rooms` backward-compat aliases
+- `ClientMessage.SessionID` (v3.0) + `RoomID` (v2.3 alias) via `EffectiveSessionID()`
+- `ClientMessage.BusID` — names the AudioBus for PUBLISH/SUBSCRIBE
+- Per-bus media watchdog: WebSocket liveness ≠ media liveness (Corrected Audit §6)
+- Packet log ring-buffer (A3/A4 benchmark endpoint, 1000-entry window)
+- SSE presence events at `/v1/sessions/{id}/events`
+- WHIP/WHEP (RFC 9725) ingest/egress at `/v1/sessions/{id}/whip|whep`
+
+### Stage D — Opus RED (RFC 2198) loss resilience (PARTIAL — Gate D pending)
 
 **Branch:** test/floodtest-100m-smoke
 **Commits:** relay 62bbaec · app-web-receiver 758f6be
 **Date:** 2026-06-27
-**Phase-exception:** user-directed; Phase 0 audio-graph crate is the canonical next task
 
 **What was built:**
 - `internal/red/red.go` — RFC 2198 encoder + parser (spec-exact, round-trip tested)
-- `internal/server/red_listener.go` — room.Listener decorator; wraps each forwarded
+- `internal/server/red_listener.go` — AudioBus decorator; wraps each forwarded
   Opus frame with the previous one as redundancy (1-deep, ~20ms redundancy window)
 - `session.go` — MediaEngine registers audio/red PT 63 fmtp "111/111" ahead of Opus
   when RELAY_ENABLE_RED=1; listener track created as audio/red; AddListener wrapped
