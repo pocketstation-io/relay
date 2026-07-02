@@ -4,9 +4,9 @@
 //
 //	go test -race -run TestFiftyListeners ./test/stress/
 //
-// The test uses the room package directly — no real WebRTC, no network.
-// It verifies the copy-on-write listener slice (RELAY-005) is free of data
-// races and that the room reaches a clean steady state after 50 concurrent
+// The test uses the graph package directly — no real WebRTC, no network.
+// It verifies the copy-on-write subscription slice (RELAY-005) is free of data
+// races and that the GraphRoom reaches a clean steady state after 50 concurrent
 // join/leave cycles.
 package stress
 
@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
-	"github.com/pocketstation-io/relay/internal/room"
+	"github.com/pocketstation-io/relay/internal/graph"
 )
 
 // listenerCount is the Phase 2 exit criterion value.
@@ -46,13 +46,13 @@ func (m *mockSource) ReadRTP() (*rtp.Packet, error) {
 	return pkt, nil
 }
 
-// mockListener counts received packets. WriteRTP is safe for concurrent use.
-type mockListener struct {
+// mockSubscription counts received packets. WriteRTP is safe for concurrent use.
+type mockSubscription struct {
 	mu    sync.Mutex
 	count int
 }
 
-func (ml *mockListener) WriteRTP(_ *rtp.Packet) error {
+func (ml *mockSubscription) WriteRTP(_ *rtp.Packet) error {
 	ml.mu.Lock()
 	ml.count++
 	ml.mu.Unlock()
@@ -72,22 +72,22 @@ func makePacket() *rtp.Packet {
 // --- tests ------------------------------------------------------------
 
 // TestFiftyListenersJoinLeaveRapidly verifies the Phase 2 exit criterion:
-// "Relay handles 50 listeners joining/leaving rapidly without crash."
+// "Relay handles 50 subscribers joining/leaving rapidly without crash."
 //
-// Given: a room with an active source forwarding RTP at ~1 kHz.
-// When:  50 goroutines each add a listener, yield the CPU once, then remove it.
-// Then:  no panics, no data races (-race), and final listener count is 0.
+// Given: a GraphRoom with an active source forwarding RTP at ~1 kHz.
+// When:  50 goroutines each add a subscription, yield the CPU once, then remove it.
+// Then:  no panics, no data races (-race), and final subscription count is 0.
 func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
-	// Given — room with short expiry timers so the test does not block.
-	mgr := room.NewManagerWithConfig(room.ManagerConfig{
+	// Given — GraphRoom with short expiry timers so the test does not block.
+	reg := graph.NewRegistryWithConfig(graph.RegistryConfig{
 		InactivityTimeout: 5 * time.Minute,
 		ReconnectWindow:   5 * time.Minute,
 	})
-	r := mgr.GetOrCreate("stress-room-1")
-	defer mgr.Delete("stress-room-1")
+	r := reg.GetOrCreate("stress-room-1")
+	defer reg.Delete("stress-room-1")
 
 	src := newMockSource()
-	r.SetSource(src, nil)
+	r.SetSource("voice", graph.BusRoleVoice, src, nil)
 
 	// stopSending is closed by the test body to signal the sender goroutine to
 	// exit before src.stop() closes the channel. This prevents a concurrent
@@ -97,7 +97,7 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 
 	// Drive the source in the background: send packets for the duration of the
 	// test so forwardLoop is active and exercises WriteRTP concurrently with
-	// AddListener/RemoveListener.
+	// AddSubscription/RemoveSubscription.
 	go func() {
 		defer close(senderDone)
 		pkt := makePacket()
@@ -125,16 +125,16 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			peerID := fmt.Sprintf("peer-%03d", idx)
-			ml := &mockListener{}
-			if err := r.AddListener(peerID, ml); err != nil {
-				// ErrRoomFull would only fire if MaxListeners were set; it is not.
-				t.Errorf("AddListener(%s): unexpected error: %v", peerID, err)
+			ml := &mockSubscription{}
+			if err := r.AddSubscription(peerID, graph.BusMix, ml); err != nil {
+				// ErrRoomFull would only fire if MaxSubscriptions were set; it is not.
+				t.Errorf("AddSubscription(%s): unexpected error: %v", peerID, err)
 				return
 			}
-			// Yield so the forward loop has a chance to write to this listener
+			// Yield so the forward loop has a chance to write to this subscription
 			// while other goroutines are still modifying the slice.
 			time.Sleep(time.Millisecond)
-			r.RemoveListener(peerID)
+			r.RemoveSubscription(peerID)
 		}(i)
 	}
 
@@ -146,10 +146,10 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 	<-senderDone
 	src.stop()
 
-	// Then — room is consistent: all listeners removed, no goroutine leaked.
-	got := r.ListenerCount()
+	// Then — GraphRoom is consistent: all subscriptions removed, no goroutine leaked.
+	got := r.SubscriptionCount()
 	if got != 0 {
-		t.Errorf("expected 0 listeners after all goroutines finished, got %d", got)
+		t.Errorf("expected 0 subscriptions after all goroutines finished, got %d", got)
 	}
 }
 
@@ -157,16 +157,16 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 // no source is active (forwardLoop never started). This exercises the
 // copy-on-write path in isolation.
 //
-// Given: a room with no source.
-// When:  50 goroutines each add then immediately remove a listener.
-// Then:  no panics, no data races, final listener count is 0.
+// Given: a GraphRoom with no source.
+// When:  50 goroutines each add then immediately remove a subscription.
+// Then:  no panics, no data races, final subscription count is 0.
 func TestFiftyListenersNoSource(t *testing.T) {
-	mgr := room.NewManagerWithConfig(room.ManagerConfig{
+	reg := graph.NewRegistryWithConfig(graph.RegistryConfig{
 		InactivityTimeout: 5 * time.Minute,
 		ReconnectWindow:   5 * time.Minute,
 	})
-	r := mgr.GetOrCreate("stress-room-2")
-	defer mgr.Delete("stress-room-2")
+	r := reg.GetOrCreate("stress-room-2")
+	defer reg.Delete("stress-room-2")
 
 	var wg sync.WaitGroup
 	wg.Add(listenerCount)
@@ -175,18 +175,18 @@ func TestFiftyListenersNoSource(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			peerID := fmt.Sprintf("peer-%03d", idx)
-			ml := &mockListener{}
-			if err := r.AddListener(peerID, ml); err != nil {
-				t.Errorf("AddListener(%s): unexpected error: %v", peerID, err)
+			ml := &mockSubscription{}
+			if err := r.AddSubscription(peerID, graph.BusMix, ml); err != nil {
+				t.Errorf("AddSubscription(%s): unexpected error: %v", peerID, err)
 				return
 			}
-			r.RemoveListener(peerID)
+			r.RemoveSubscription(peerID)
 		}(i)
 	}
 
 	wg.Wait()
 
-	if got := r.ListenerCount(); got != 0 {
-		t.Errorf("expected 0 listeners, got %d", got)
+	if got := r.SubscriptionCount(); got != 0 {
+		t.Errorf("expected 0 subscriptions, got %d", got)
 	}
 }

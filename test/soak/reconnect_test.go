@@ -35,7 +35,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/room"
+	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/server"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -108,7 +108,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	srv := server.New(server.Config{
 		JWTSecret: []byte("reconnect-soak-secret"),
 		API:       api,
-		RoomConfig: room.ManagerConfig{
+		RegistryConfig: graph.RegistryConfig{
 			InactivityTimeout: window + 10*time.Minute,
 			ReconnectWindow:   window,
 		},
