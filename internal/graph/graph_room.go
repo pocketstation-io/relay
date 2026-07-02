@@ -14,6 +14,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -396,7 +397,12 @@ func (b *AudioBus) close() {
 
 // forwardLoop reads RTP from src and calls deliver for each packet until src
 // errors or the bus is closed. loopDone is closed on exit.
+//
+// LockOSThread pins this goroutine to a single OS thread for CPU cache
+// locality on the hot forwarding path (same technique as OpenAI's Go relay).
 func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, deliver func(*rtp.Packet)) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	defer close(loopDone)
 	defer func() {
 		b.sourceMu.Lock()
@@ -485,6 +491,7 @@ type GraphRoom struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
+
 }
 
 // New returns an open GraphRoom with default timeouts.
@@ -578,20 +585,33 @@ func (r *GraphRoom) GetOrCreateBus(id BusID, role BusRole) *AudioBus {
 // source replaces this one (ICE restart path).
 func (r *GraphRoom) SetSource(busID BusID, role BusRole, src SourceSession, closer func()) {
 	bus := r.GetOrCreateBus(busID, role)
-	bus.SetSource(src, closer, func(pkt *rtp.Packet) { r.deliver(busID, pkt) })
+	// Per-bus scratch buffers captured in the closure. Each forwardLoop
+	// goroutine is serial, so no lock needed. Avoids per-packet map/slice
+	// allocation and GC pressure on the hot forwarding path.
+	errCounts := make(map[string]int, 8)
+	deadSubs := make([]string, 0, 8)
+
+	bus.SetSource(src, closer, func(pkt *rtp.Packet) {
+		r.deliver(busID, pkt, errCounts, &deadSubs)
+	})
 }
 
 // deliver is the hot-path function passed to each AudioBus.forwardLoop. It
 // writes pkt to every subscriber that selected this bus (entry.busID == busID)
 // or the virtual mix (entry.busID == BusMix). A BusMix subscriber therefore
 // receives RTP from all buses — byte-identical to the room-wide behavior.
-func (r *GraphRoom) deliver(busID BusID, pkt *rtp.Packet) {
+//
+// Allocation-free on the fast path: errCounts and deadSubs are pre-allocated
+// per-bus in the SetSource closure and reused across calls.
+func (r *GraphRoom) deliver(busID BusID, pkt *rtp.Packet, errCounts map[string]int, deadSubs *[]string) {
 	const maxConsecutiveErrors = 5
 
 	ls := *r.subscriptions.Load()
 
-	errCounts := make(map[string]int, len(ls))
-	var deadSubs []string
+	for k := range errCounts {
+		delete(errCounts, k)
+	}
+	*deadSubs = (*deadSubs)[:0]
 
 	for _, e := range ls {
 		if e.busID != busID && e.busID != BusMix {
@@ -600,13 +620,14 @@ func (r *GraphRoom) deliver(busID BusID, pkt *rtp.Packet) {
 		if wErr := e.sub.WriteRTP(pkt); wErr != nil {
 			errCounts[e.subscriberID]++
 			if errCounts[e.subscriberID] >= maxConsecutiveErrors {
-				deadSubs = append(deadSubs, e.subscriberID)
+				*deadSubs = append(*deadSubs, e.subscriberID)
 			}
 		} else {
 			errCounts[e.subscriberID] = 0
 		}
 	}
-	for _, id := range deadSubs {
+
+	for _, id := range *deadSubs {
 		r.RemoveSubscription(id)
 		slog.Warn("evicted dead subscription", "graph_room_id", r.ID, "subscriber_id", id)
 	}

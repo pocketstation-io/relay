@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -86,9 +88,20 @@ func main() {
 	// NAT1To1IPs: public IP(s) for ICE host candidates behind NAT (Fly.io).
 	// Set RELAY_PUBLIC_IPS to the relay's public IP so remote peers receive
 	// reachable ICE candidates. Multiple IPs are comma-separated.
+	// Special value "auto": resolve the app's public IP at startup (fly.io).
 	if publicIPs := os.Getenv("RELAY_PUBLIC_IPS"); publicIPs != "" {
-		cfg.NAT1To1IPs = splitComma(publicIPs)
-		slog.Info("NAT1To1 public IPs configured", "ips", cfg.NAT1To1IPs)
+		if strings.EqualFold(publicIPs, "auto") {
+			if ip, err := resolvePublicIP(); err == nil {
+				cfg.NAT1To1IPs = []string{ip.String()}
+				slog.Info("NAT1To1 public IP auto-detected", "ip", ip.String())
+			} else {
+				slog.Error("RELAY_PUBLIC_IPS=auto but detection failed", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			cfg.NAT1To1IPs = splitComma(publicIPs)
+			slog.Info("NAT1To1 public IPs configured", "ips", cfg.NAT1To1IPs)
+		}
 	}
 
 	// ICE-UDP mux: force ALL UDP media through a single socket so the relay
@@ -103,8 +116,12 @@ func main() {
 	// advertised host candidate — the listener's nominated pair then receives
 	// zero media. Pinning the socket to the advertised IP makes egress match the
 	// candidate. Falls back to 0.0.0.0 when no public IP is configured.
+	//
+	// On fly.io the public IP is on the anycast proxy, not assignable to a local
+	// socket. Bind to 0.0.0.0 there; fly.io routes inbound UDP by port.
 	udpBindIP := net.IPv4zero
-	if len(cfg.NAT1To1IPs) > 0 {
+	onFlyIO := os.Getenv("FLY_APP_NAME") != ""
+	if len(cfg.NAT1To1IPs) > 0 && !onFlyIO {
 		if ip := net.ParseIP(cfg.NAT1To1IPs[0]); ip != nil {
 			udpBindIP = ip
 		}
@@ -117,6 +134,18 @@ func main() {
 		slog.Error("failed to bind ICE-UDP socket", "error", err)
 		os.Exit(1)
 	}
+
+	// Enlarge the kernel receive buffer to absorb burst arrivals without
+	// packet drops. 2 MiB matches typical production SFU tuning (OpenAI,
+	// LiveKit). The OS may cap this below the request; that is fine.
+	const udpRecvBufBytes = 2 * 1024 * 1024
+	if err := udpConn.SetReadBuffer(udpRecvBufBytes); err != nil {
+		slog.Warn("failed to set UDP read buffer", "target_bytes", udpRecvBufBytes, "error", err)
+	}
+	if err := udpConn.SetWriteBuffer(udpRecvBufBytes); err != nil {
+		slog.Warn("failed to set UDP write buffer", "target_bytes", udpRecvBufBytes, "error", err)
+	}
+
 	cfg.ICEUDPMux = webrtc.NewICEUDPMux(nil, udpConn)
 	slog.Info("ICE-UDP mux started", "addr", udpConn.LocalAddr().String())
 
@@ -167,6 +196,17 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.
 	if publicIPStr == "" {
 		slog.Info("TURN_PUBLIC_IP not set; relay running in STUN-only mode")
 		return nil, new(relayTurn.Server) // no-op Stop()
+	}
+
+	// "auto": resolve the public IP at startup (fly.io zero-config).
+	if strings.EqualFold(publicIPStr, "auto") {
+		ip, err := resolvePublicIP()
+		if err != nil {
+			slog.Error("TURN_PUBLIC_IP=auto but detection failed", "error", err)
+			os.Exit(1)
+		}
+		publicIPStr = ip.String()
+		slog.Info("TURN public IP auto-detected", "ip", publicIPStr)
 	}
 
 	publicIP := net.ParseIP(publicIPStr)
@@ -237,6 +277,49 @@ func turnURLs(host string, udpPort, tcpPort, tlsPort int) []string {
 	}
 	slog.Info("TURN transport active", "transport", "udp", "port", udpPort)
 	return urls
+}
+
+// resolvePublicIP discovers the relay's public IPv4 address. Tried in order:
+//  1. FLY_PUBLIC_IP env var (set by fly.io for dedicated IPs)
+//  2. DNS lookup of FLY_APP_NAME.fly.dev (shared anycast on fly.io)
+//  3. External IP service (https://api.ipify.org) as last resort
+func resolvePublicIP() (net.IP, error) {
+	// 1. Fly.io dedicated IP.
+	if raw := os.Getenv("FLY_PUBLIC_IP"); raw != "" {
+		if ip := net.ParseIP(raw); ip != nil && ip.To4() != nil {
+			return ip.To4(), nil
+		}
+	}
+
+	// 2. Resolve fly.io app hostname.
+	if appName := os.Getenv("FLY_APP_NAME"); appName != "" {
+		hostname := appName + ".fly.dev"
+		addrs, err := net.LookupIP(hostname)
+		if err == nil {
+			for _, addr := range addrs {
+				if v4 := addr.To4(); v4 != nil {
+					return v4, nil
+				}
+			}
+		}
+		slog.Warn("DNS lookup failed for fly.io hostname", "hostname", hostname, "error", err)
+	}
+
+	// 3. External IP service.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://api.ipify.org")
+	if err != nil {
+		return nil, fmt.Errorf("ipify request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ipify read failed: %w", err)
+	}
+	if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil && ip.To4() != nil {
+		return ip.To4(), nil
+	}
+	return nil, fmt.Errorf("could not detect public IP (tried FLY_PUBLIC_IP, DNS, ipify)")
 }
 
 func getenv(k, d string) string {
