@@ -8,9 +8,10 @@ dockerfile = "Dockerfile"
 # Secrets (POCKETSTATION_JWT_SECRET) are set via `fly secrets set`.
 [env]
   PORT             = "8080"
+  ICE_UDP_PORT     = "10000"
   ICE_TCP_PORT     = "8081"
-  RELAY_PUBLIC_IPS = "66.241.125.128"
-  TURN_PUBLIC_IP   = "66.241.125.128"
+  RELAY_PUBLIC_IPS = "auto"
+  TURN_PUBLIC_IP   = "auto"
   TURN_UDP_PORT    = "3478"
   TURN_TCP_PORT    = "3478"
   TURN_REALM       = "pocketstation.io"
@@ -35,6 +36,15 @@ protocol = "tcp"
 
   [[services.ports]]
   port = 8081
+
+# ICE-UDP media plane — single multiplexed UDP port for all WebRTC peers.
+# Direct UDP media path; lower latency than ICE-TCP.
+[[services]]
+internal_port = 10000
+protocol = "udp"
+
+  [[services.ports]]
+  port = 10000
 
 # TURN/STUN UDP — standard port for STUN reflexive discovery and TURN/UDP.
 # Note: TURN relay-address allocations (dynamic ephemeral ports) are not
