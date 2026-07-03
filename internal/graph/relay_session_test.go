@@ -1,4 +1,4 @@
-// White-box tests for GraphRoom lifecycle. Package graph (not graph_test) so we
+// White-box tests for RelaySession lifecycle. Package graph (not graph_test) so we
 // can inject mock implementations via the unexported SourceSession/BusSubscription
 // interfaces.
 package graph
@@ -61,9 +61,9 @@ func waitFor(t *testing.T, deadline time.Duration, fn func() bool) {
 	t.Fatalf("condition not met within %v", deadline)
 }
 
-// --- GraphRoom tests ---
+// --- RelaySession tests ---
 
-func given_new_graph_room_when_inspected_then_empty(t *testing.T) {
+func given_new_relay_session_when_inspected_then_empty(t *testing.T) {
 	r := New("room-1")
 	if r.ID != "room-1" {
 		t.Errorf("got ID %q, want %q", r.ID, "room-1")
@@ -72,15 +72,15 @@ func given_new_graph_room_when_inspected_then_empty(t *testing.T) {
 		t.Errorf("got %d subscriptions, want 0", r.SubscriptionCount())
 	}
 	if r.SourceActive() {
-		t.Error("new GraphRoom must not report source active")
+		t.Error("new RelaySession must not report source active")
 	}
 }
 
-func TestGiven_NewGraphRoom_When_Inspected_Then_Empty(t *testing.T) {
-	given_new_graph_room_when_inspected_then_empty(t)
+func TestGiven_NewRelaySession_When_Inspected_Then_Empty(t *testing.T) {
+	given_new_relay_session_when_inspected_then_empty(t)
 }
 
-func TestGiven_GraphRoom_When_AddSubscription_Then_CountIncreases(t *testing.T) {
+func TestGiven_RelaySession_When_AddSubscription_Then_CountIncreases(t *testing.T) {
 	r := New("room-1")
 	if err := r.AddSubscription("peer-1", BusMix, &mockSubscription{}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
@@ -90,7 +90,7 @@ func TestGiven_GraphRoom_When_AddSubscription_Then_CountIncreases(t *testing.T) 
 	}
 }
 
-func TestGiven_GraphRoom_When_MultipleSubscriptions_Then_AllCounted(t *testing.T) {
+func TestGiven_RelaySession_When_MultipleSubscriptions_Then_AllCounted(t *testing.T) {
 	r := New("room-1")
 	for _, id := range []string{"peer-1", "peer-2", "peer-3"} {
 		if err := r.AddSubscription(id, BusMix, &mockSubscription{}); err != nil {
@@ -102,7 +102,7 @@ func TestGiven_GraphRoom_When_MultipleSubscriptions_Then_AllCounted(t *testing.T
 	}
 }
 
-func TestGiven_GraphRoom_When_RemoveSubscription_Then_CountDecreases(t *testing.T) {
+func TestGiven_RelaySession_When_RemoveSubscription_Then_CountDecreases(t *testing.T) {
 	r := New("room-1")
 	if err := r.AddSubscription("peer-1", BusMix, &mockSubscription{}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
@@ -113,19 +113,19 @@ func TestGiven_GraphRoom_When_RemoveSubscription_Then_CountDecreases(t *testing.
 	}
 }
 
-func TestGiven_GraphRoom_When_RemoveUnknownSubscription_Then_Noop(t *testing.T) {
+func TestGiven_RelaySession_When_RemoveUnknownSubscription_Then_Noop(t *testing.T) {
 	r := New("room-1")
 	r.RemoveSubscription("does-not-exist") // must not panic
 }
 
-func TestGiven_GraphRoom_When_ClosedMultipleTimes_Then_Idempotent(t *testing.T) {
+func TestGiven_RelaySession_When_ClosedMultipleTimes_Then_Idempotent(t *testing.T) {
 	r := New("room-1")
 	r.Close()
 	r.Close()
 	r.Close() // must not panic
 }
 
-func TestGiven_GraphRoom_When_SetSource_Then_SourceActive(t *testing.T) {
+func TestGiven_RelaySession_When_SetSource_Then_SourceActive(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	r.SetSource("voice", BusRoleVoice, src, nil)
@@ -135,7 +135,7 @@ func TestGiven_GraphRoom_When_SetSource_Then_SourceActive(t *testing.T) {
 	src.close()
 }
 
-func TestGiven_GraphRoom_When_SetSource_Then_BusSourceActive(t *testing.T) {
+func TestGiven_RelaySession_When_SetSource_Then_BusSourceActive(t *testing.T) {
 	r := New("room-1")
 	src := newMockSource()
 	r.SetSource("music", BusRoleMusic, src, nil)
@@ -408,7 +408,7 @@ func TestGiven_EmptySessionRegistry_When_ListPublic_Then_NonNilEmpty(t *testing.
 	}
 }
 
-func TestGiven_GraphRoom_When_InactivityTimerExpires_Then_RoomClosed(t *testing.T) {
+func TestGiven_RelaySession_When_InactivityTimerExpires_Then_RoomClosed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timer expiry test — skipped in -short mode")
 	}
@@ -607,7 +607,7 @@ func TestGiven_PacketLog_When_WindowFull_Then_OldestOverwritten(t *testing.T) {
 
 // --- BusPacketLog integration tests ---
 
-func TestGiven_GraphRoom_When_BusNotFound_Then_PacketLogNil(t *testing.T) {
+func TestGiven_RelaySession_When_BusNotFound_Then_PacketLogNil(t *testing.T) {
 	r := New("room-pl-1")
 	entries := r.BusPacketLog("voice", 10)
 	if entries != nil {

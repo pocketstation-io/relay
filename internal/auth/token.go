@@ -16,7 +16,7 @@ const (
 )
 
 // Claims is the JWT payload for relay session tokens.
-// SessionID (v3.0) and RoomID (v2.3 alias) both identify the target GraphRoom.
+// SessionID (v3.0) and RoomID (v2.3 alias) both identify the target RelaySession.
 // BusID identifies the named bus for PUBLISH tokens; empty means "any bus".
 type Claims struct {
 	SessionID string `json:"session_id,omitempty"` // v3.0

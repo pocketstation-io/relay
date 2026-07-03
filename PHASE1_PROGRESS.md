@@ -28,8 +28,8 @@ The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
 
 | Item | Status | Evidence |
 |---|---|---|
-| GraphRoom core type | ✅ DONE | `internal/graph/graph_room.go` |
-| AudioBus (per-bus forwarding) | ✅ DONE | `AudioBus`, `BusID`, `BusMix`, `BusRole` in graph_room.go |
+| RelaySession core type | ✅ DONE | `internal/graph/relay_session.go` |
+| AudioBus (per-bus forwarding) | ✅ DONE | `AudioBus`, `BusID`, `BusMix`, `BusRole` in relay_session.go |
 | BusSubscription interface | ✅ DONE | `BusSubscription` replaces old Listener |
 | POST /v1/sessions | ✅ DONE | server.go:192 |
 | GET /v1/sessions/{id}/latency | ✅ DONE | server.go:193 |
@@ -56,7 +56,7 @@ The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
 **Waves:** 13, 13b, 13c (pre-existing commits on test/floodtest-100m-smoke)
 **v3.0 vocabulary fully implemented:**
 
-- `graph.GraphRoom` — the central forwarding unit; owns named AudioBuses
+- `graph.RelaySession` — the central forwarding unit; owns named AudioBuses
 - `graph.AudioBus` — one named forwarding lane (voice / music / agent_voice / events)
 - `graph.BusSubscription` — write side of audio delivery (replaces `room.Listener`)
 - `graph.SessionRegistry` — room registry with RegistryConfig, inactivity timeouts, CloseAll

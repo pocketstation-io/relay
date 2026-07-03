@@ -62,11 +62,11 @@ type Config struct {
 	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
 	// does not need real network interfaces.
 	API *webrtc.API
-	// MaxRooms is the maximum number of concurrently active GraphRooms.
+	// MaxRooms is the maximum number of concurrently active RelaySessions.
 	// Zero means use defaultMaxRooms.
 	MaxRooms int
 	// MaxSubscribersPerRoom is the maximum number of subscribers in a single
-	// GraphRoom. Zero means use defaultMaxListenersPerRoom.
+	// RelaySession. Zero means use defaultMaxListenersPerRoom.
 	MaxSubscribersPerRoom int
 	// MaxRoomsPerIPPerMinute is the maximum number of rooms a single IP may
 	// create per minute. Zero means use defaultMaxRoomsPerIPPerMinute.
@@ -123,7 +123,7 @@ type Server struct {
 	httpServer *http.Server
 	sessions   map[string]*session // active WebSocket sessions
 
-	// codecHintStates and iceRestartStates are keyed by GraphRoom ID.
+	// codecHintStates and iceRestartStates are keyed by RelaySession ID.
 	// sync.Map for concurrent access from multiple subscriber RTCP goroutines.
 	codecHintStates  sync.Map
 	iceRestartStates sync.Map
@@ -157,7 +157,7 @@ func New(cfg Config) *Server {
 		ipLim = ratelimit.New(int64(maxPerIP), time.Minute)
 	}
 
-	// Propagate MaxSubscriptions into the RegistryConfig so each GraphRoom
+	// Propagate MaxSubscriptions into the RegistryConfig so each RelaySession
 	// enforces the same ceiling.
 	regCfg := cfg.RegistryConfig
 	regCfg.MaxSubscriptions = maxSubs
@@ -467,7 +467,7 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 }
 
 // listChannels handles GET /v1/channels (spec §3.1, Phase 6).
-// Returns a JSON array of public GraphRooms. Returns [] when none exist.
+// Returns a JSON array of public RelaySessions. Returns [] when none exist.
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -479,7 +479,7 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 }
 
 // roomLatency handles GET /v1/rooms/{id}/latency.
-// Returns the rolling P50 latency statistics for the GraphRoom as JSON.
+// Returns the rolling P50 latency statistics for the RelaySession as JSON.
 // Returns 404 when the session does not exist.
 func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
@@ -560,7 +560,7 @@ func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
 // 20 seconds prevents proxy and load-balancer idle-connection timeouts.
 const sseKeepaliveInterval = 20 * time.Second
 
-// sessionSSE streams GraphRoom presence events as Server-Sent Events.
+// sessionSSE streams RelaySession presence events as Server-Sent Events.
 // GET /v1/sessions/{id}/events
 //
 // Wire format: `data: {"source_active":bool,"subscription_count":N,"bus_id":"voice"}\n\n`

@@ -27,7 +27,7 @@ type session struct {
 	conn *websocket.Conn
 
 	pc         *webrtc.PeerConnection
-	room       *graph.GraphRoom
+	room       *graph.RelaySession
 	role       auth.Role
 	busID      graph.BusID  // bus this session publishes to or subscribes from
 	pendingICE []string     // candidates received before PUBLISH/SUBSCRIBE
@@ -196,7 +196,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 
 	slog.Info("session joined",
 		"session_id", s.id,
-		"graph_room_id", sessionID,
+		"relay_session_id", sessionID,
 		"role", string(claims.Role),
 		"bus_id", busID,
 	)

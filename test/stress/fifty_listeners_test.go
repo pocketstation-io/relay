@@ -6,7 +6,7 @@
 //
 // The test uses the graph package directly — no real WebRTC, no network.
 // It verifies the copy-on-write subscription slice (RELAY-005) is free of data
-// races and that the GraphRoom reaches a clean steady state after 50 concurrent
+// races and that the RelaySession reaches a clean steady state after 50 concurrent
 // join/leave cycles.
 package stress
 
@@ -74,11 +74,11 @@ func makePacket() *rtp.Packet {
 // TestFiftyListenersJoinLeaveRapidly verifies the Phase 2 exit criterion:
 // "Relay handles 50 subscribers joining/leaving rapidly without crash."
 //
-// Given: a GraphRoom with an active source forwarding RTP at ~1 kHz.
+// Given: a RelaySession with an active source forwarding RTP at ~1 kHz.
 // When:  50 goroutines each add a subscription, yield the CPU once, then remove it.
 // Then:  no panics, no data races (-race), and final subscription count is 0.
 func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
-	// Given — GraphRoom with short expiry timers so the test does not block.
+	// Given — RelaySession with short expiry timers so the test does not block.
 	reg := graph.NewRegistryWithConfig(graph.RegistryConfig{
 		InactivityTimeout: 5 * time.Minute,
 		ReconnectWindow:   5 * time.Minute,
@@ -146,7 +146,7 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 	<-senderDone
 	src.stop()
 
-	// Then — GraphRoom is consistent: all subscriptions removed, no goroutine leaked.
+	// Then — RelaySession is consistent: all subscriptions removed, no goroutine leaked.
 	got := r.SubscriptionCount()
 	if got != 0 {
 		t.Errorf("expected 0 subscriptions after all goroutines finished, got %d", got)
@@ -157,7 +157,7 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 // no source is active (forwardLoop never started). This exercises the
 // copy-on-write path in isolation.
 //
-// Given: a GraphRoom with no source.
+// Given: a RelaySession with no source.
 // When:  50 goroutines each add then immediately remove a subscription.
 // Then:  no panics, no data races, final subscription count is 0.
 func TestFiftyListenersNoSource(t *testing.T) {

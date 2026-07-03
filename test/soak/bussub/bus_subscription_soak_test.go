@@ -1,6 +1,6 @@
 // Package bussub_test — Wave 13b media soak for per-bus subscriptions (spec §7).
 //
-// This soak forwards real RTP through a real GraphRoom (real forwardLoop
+// This soak forwards real RTP through a real RelaySession (real forwardLoop
 // goroutines, real deliver hot path) for a long duration. It proves three
 // things hold for the whole run:
 //
@@ -17,11 +17,11 @@
 //
 // Run short (default, ~2s, two payload profiles):
 //
-//	go test -race -run TestGiven_GraphRoom_When_LongMediaSoak ./test/soak/bussub/
+//	go test -race -run TestGiven_RelaySession_When_LongMediaSoak ./test/soak/bussub/
 //
 // Run the full 24h endurance soak:
 //
-//	RELAY_SOAK_FULL=1 go test -timeout 25h -run TestGiven_GraphRoom_When_LongMediaSoak ./test/soak/bussub/
+//	RELAY_SOAK_FULL=1 go test -timeout 25h -run TestGiven_RelaySession_When_LongMediaSoak ./test/soak/bussub/
 package bussub_test
 
 import (
@@ -98,7 +98,7 @@ type busSoakProfile struct {
 	payloadBytes int
 }
 
-func TestGiven_GraphRoom_When_LongMediaSoak_Then_NoLeakAndCountsMatch(t *testing.T) {
+func TestGiven_RelaySession_When_LongMediaSoak_Then_NoLeakAndCountsMatch(t *testing.T) {
 	duration := busSoakShortDuration
 	if os.Getenv("RELAY_SOAK_FULL") == "1" {
 		duration = busSoakFullDuration
