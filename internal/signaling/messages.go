@@ -56,7 +56,7 @@ type CodecHintPayload struct {
 type ClientMessage struct {
 	Type MessageType `json:"type"`
 
-	// SessionID identifies the GraphRoom. Preferred v3.0 field.
+	// SessionID identifies the RelaySession. Preferred v3.0 field.
 	// Falls back to RoomID when absent for backward compatibility.
 	SessionID string `json:"session_id,omitempty"`
 	// RoomID is the v2.3 wire alias for SessionID. Clients may send either.

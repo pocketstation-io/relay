@@ -45,7 +45,7 @@ import (
 // Keyed by connID in Server.whipConns.
 type whipConn struct {
 	pc      *webrtc.PeerConnection
-	room    *graph.GraphRoom
+	room    *graph.RelaySession
 	busID   graph.BusID
 	connID  string
 	created time.Time
