@@ -54,7 +54,7 @@ Before editing, read:
 
 ### Phase 1 — What is done
 
-- Full signaling protocol: PUBLISH, SUBSCRIBE, ICE, SDP_ANSWER, LEAVE, ROOM_STATE, ERROR (all 7 types).
+- Full signaling protocol: PUBLISH, SUBSCRIBE, ICE, SDP_ANSWER, LEAVE, SESSION_STATE, ERROR (all 7 types). ROOM_STATE accepted on incoming for backward compat.
 - JWT auth: room-scoped HS256 tokens (golang-jwt/v5), source and listener roles, configurable TTL. See RELAY-014.
 - RTP forwarding: forwardLoop, atomic packet/byte counters, goroutine teardown on error or done signal.
 - Room lifecycle: Source/Listener interfaces, Manager with GetOrCreate/Get/Delete, idempotent Close.

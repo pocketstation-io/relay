@@ -8,6 +8,10 @@ const (
 	TypeIce       MessageType = "ICE"
 	TypeLeave     MessageType = "LEAVE"
 	TypeSDPAnswer MessageType = "SDP_ANSWER"
+	TypeSessionState MessageType = "SESSION_STATE"
+	// TypeRoomState is the deprecated v2.3 wire alias. The relay only sends
+	// TypeSessionState, but accepts both on incoming messages for backward
+	// compatibility with older clients.
 	TypeRoomState MessageType = "ROOM_STATE"
 	TypeError     MessageType = "ERROR"
 	// TypeKeyExchange is sent by the source to distribute an SFrame encryption
