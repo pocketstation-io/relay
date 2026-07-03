@@ -343,7 +343,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		BusID:             busID,
 	})
 	_ = s.send(signaling.ServerMessage{
-		Type:              signaling.TypeRoomState,
+		Type:              signaling.TypeSessionState,
 		SourceActive:      rm.SourceActive(),
 		SubscriptionCount: rm.SubscriptionCount(),
 		Codec:             "opus",
