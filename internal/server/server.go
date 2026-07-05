@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +22,9 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/callback"
+	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/metrics"
 	"github.com/pocketstation-io/relay/internal/ratelimit"
-	"github.com/pocketstation-io/relay/internal/room"
 	"github.com/pocketstation-io/relay/internal/signaling"
 	"github.com/pocketstation-io/relay/internal/webhook"
 )
@@ -55,70 +56,50 @@ const defaultMaxRoomsPerIPPerMinute = 10
 
 // Config holds the parameters for creating a Server.
 type Config struct {
-	// JWTSecret is the HMAC-SHA256 signing key used for room tokens.
+	// JWTSecret is the HMAC-SHA256 signing key used for session tokens.
 	JWTSecret []byte
 	// API is an optional *webrtc.API used instead of the default global API.
 	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
 	// does not need real network interfaces.
 	API *webrtc.API
-	// MaxRooms is the maximum number of concurrently active rooms.
+	// MaxRooms is the maximum number of concurrently active RelaySessions.
 	// Zero means use defaultMaxRooms.
 	MaxRooms int
-	// MaxListenersPerRoom is the maximum number of listeners in a single room.
-	// Zero means use defaultMaxListenersPerRoom.
-	MaxListenersPerRoom int
+	// MaxSubscribersPerRoom is the maximum number of subscribers in a single
+	// RelaySession. Zero means use defaultMaxListenersPerRoom.
+	MaxSubscribersPerRoom int
 	// MaxRoomsPerIPPerMinute is the maximum number of rooms a single IP may
 	// create per minute. Zero means use defaultMaxRoomsPerIPPerMinute.
 	// Set to -1 to disable per-IP rate limiting (tests, trusted environments).
 	MaxRoomsPerIPPerMinute int
-	// CallbackClient is an optional client for posting source/listener events to
-	// api-server. Nil disables all outbound callbacks.
+	// CallbackClient is an optional client for posting source/subscriber events
+	// to api-server. Nil disables all outbound callbacks.
 	CallbackClient *callback.Client
 	// WebhookDispatcher is an optional dispatcher for posting relay lifecycle
-	// events (session_started, utterance_detected, session_ended) to an
-	// external HTTP endpoint. Nil disables all webhook delivery.
+	// events to an external HTTP endpoint. Nil disables all webhook delivery.
 	WebhookDispatcher *webhook.Dispatcher
 	// ICEServers overrides the ICE server list used by the relay's own Pion
-	// PeerConnections. When nil or empty AND NAT1To1IPs is also empty, the relay
-	// falls back to stun.l.google.com:19302. When NAT1To1IPs is set, this field
-	// is intentionally left nil so Pion only gathers host candidates (no
-	// self-STUN loop via the embedded TURN server). See RELAY-023.
+	// PeerConnections. Falls back to stun.l.google.com:19302 when empty.
 	ICEServers []webrtc.ICEServer
-	// ClientICEServers is the ICE server list returned to connecting clients in
-	// the createRoom response (ice_servers field). When TURN is enabled, this
-	// contains the embedded TURN credentials so clients can reach the relay
-	// even from behind strict NAT. Separate from ICEServers to avoid the relay
-	// self-STUNing against its own TURN server. See RELAY-023.
+	// ClientICEServers is the ICE server list returned to connecting clients.
+	// Separate from ICEServers to avoid the relay self-STUNing via TURN.
 	ClientICEServers []webrtc.ICEServer
-	// ICETCPMux, when non-nil, enables ICE-TCP candidates for PeerConnections
-	// created by this server. Production: SetICETCPMux(tcpMux) on port 443.
-	// Tests: leave nil; the loopback ICE API handles connectivity.
+	// ICETCPMux, when non-nil, enables ICE-TCP candidates.
 	ICETCPMux pionIce.TCPMux
-	// ICEUDPMux, when non-nil, forces ALL UDP ICE traffic through a single
-	// shared socket. Without it, pion gathers one UDP host candidate per local
-	// interface (and per NAT1To1 IP), so media can egress from a socket the
-	// remote peer never consented to — the peer then drops those packets. On a
-	// multi-homed host this caused ~50% RTP loss. A single mux guarantees one
-	// egress port matching the nominated candidate pair.
+	// ICEUDPMux, when non-nil, forces all UDP ICE traffic through one socket.
 	ICEUDPMux pionIce.UDPMux
-	// RoomConfig sets per-room inactivity timeout and source reconnect window.
-	// Zero values in RoomConfig use package defaults (30 min / 60 s).
-	// Read from ROOM_EXPIRY_MINUTES and SOURCE_RECONNECT_WINDOW_SEC env vars.
-	RoomConfig room.ManagerConfig
-	// UseTURN, when true, sets use_turn=true in ICE_RESTART messages sent to
-	// the source (spec §10.4). Set to true when the relay's embedded TURN
-	// server is configured (TURN_PUBLIC_IP is set, RELAY-023).
+	// RegistryConfig sets per-room inactivity timeout and source reconnect window.
+	RegistryConfig graph.RegistryConfig
+	// UseTURN, when true, sets use_turn=true in ICE_RESTART messages (RELAY-023).
 	UseTURN bool
 	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
-	// candidates. Set to the relay's public IP when deployed behind NAT (e.g.
-	// Fly.io). Without this, Pion generates private/link-local candidates that
-	// remote peers cannot reach. Env: RELAY_PUBLIC_IPS (comma-separated).
+	// candidates (Fly.io / NAT deployments). Env: RELAY_PUBLIC_IPS.
 	NAT1To1IPs []string
 }
 
 // Server is the top-level relay server.
 type Server struct {
-	rooms             *room.Manager
+	sessions_         *graph.SessionRegistry // named sessions_ to avoid collision with sessions map below
 	jwtSecret         []byte
 	api               *webrtc.API
 	Metrics           *metrics.Registry
@@ -130,38 +111,29 @@ type Server struct {
 	iceUDPMux         pionIce.UDPMux
 	nat1to1IPs        []string
 
-	// maxRooms and maxListenersPerRoom are the rate-limiting ceilings.
-	// Both are set once at construction and never written again.
-	maxRooms            int
-	maxListenersPerRoom int
+	maxRooms              int // set once at construction
+	maxSubscribersPerRoom int // set once at construction
 
 	// ipLimiter enforces per-IP room-creation rate limiting.
 	// Nil when per-IP limiting is disabled (MaxRoomsPerIPPerMinute == -1).
 	ipLimiter *ratelimit.IPLimiter
 
-	// mu guards httpServer and sessions so Serve/Shutdown/signal handlers can
-	// run concurrently without data races.
+	// mu guards httpServer and active WebSocket session map.
 	mu         sync.RWMutex
 	httpServer *http.Server
-	// sessions tracks active WebSocket sessions. Each session registers itself
-	// on creation and deregisters on cleanup. Shutdown closes all tracked
-	// connections so hijacked WebSocket connections are not abandoned.
-	sessions map[string]*session
+	sessions   map[string]*session // active WebSocket sessions
 
-	// codecHintStates holds per-room debounce state for CODEC_HINT emission
-	// (D13, RELAY-021). Keys are room IDs; values are *codecHintState.
-	// sync.Map is safe for concurrent access from multiple listener goroutines.
-	codecHintStates sync.Map
-
-	// iceRestartStates holds per-room state for ICE restart tracking (spec §10.4).
-	// Keys are room IDs; values are *iceRestartState.
-	// sync.Map is safe for concurrent access from multiple listener goroutines.
+	// codecHintStates and iceRestartStates are keyed by RelaySession ID.
+	// sync.Map for concurrent access from multiple subscriber RTCP goroutines.
+	codecHintStates  sync.Map
 	iceRestartStates sync.Map
 
-	// useTURN is true when the relay's embedded TURN server is configured.
-	// Propagated into ICE_RESTART messages so the source knows to prefer TURN
-	// relay candidates on the next ICE negotiation (spec §10.4, RELAY-023).
-	// Set once at construction time from Config.UseTURN.
+	// whipConns maps WHIP/WHEP connection IDs to their live PeerConnections.
+	// Keyed by the opaque connID returned in the Location header (RFC 9725).
+	// sync.Map: concurrent PATCH/DELETE from multiple HTTP goroutines.
+	whipConns sync.Map
+
+	// useTURN is set once from Config.UseTURN; propagated to ICE_RESTART msgs.
 	useTURN bool
 }
 
@@ -171,9 +143,9 @@ func New(cfg Config) *Server {
 	if maxRooms <= 0 {
 		maxRooms = defaultMaxRooms
 	}
-	maxListeners := cfg.MaxListenersPerRoom
-	if maxListeners <= 0 {
-		maxListeners = defaultMaxListenersPerRoom
+	maxSubs := cfg.MaxSubscribersPerRoom
+	if maxSubs <= 0 {
+		maxSubs = defaultMaxListenersPerRoom
 	}
 
 	var ipLim *ratelimit.IPLimiter
@@ -185,23 +157,28 @@ func New(cfg Config) *Server {
 		ipLim = ratelimit.New(int64(maxPerIP), time.Minute)
 	}
 
+	// Propagate MaxSubscriptions into the RegistryConfig so each RelaySession
+	// enforces the same ceiling.
+	regCfg := cfg.RegistryConfig
+	regCfg.MaxSubscriptions = maxSubs
+
 	return &Server{
-		rooms:               room.NewManagerWithConfig(cfg.RoomConfig),
-		jwtSecret:           cfg.JWTSecret,
-		api:                 cfg.API,
-		Metrics:             metrics.New(),
-		callbackClient:      cfg.CallbackClient,
-		webhookDispatcher:   cfg.WebhookDispatcher,
-		iceServers:          cfg.ICEServers,
-		clientICEServers:    cfg.ClientICEServers,
-		iceTCPMux:           cfg.ICETCPMux,
-		iceUDPMux:           cfg.ICEUDPMux,
-		nat1to1IPs:          cfg.NAT1To1IPs,
-		maxRooms:            maxRooms,
-		maxListenersPerRoom: maxListeners,
-		ipLimiter:           ipLim,
-		sessions:            make(map[string]*session),
-		useTURN:             cfg.UseTURN,
+		sessions_:             graph.NewRegistryWithConfig(regCfg),
+		jwtSecret:             cfg.JWTSecret,
+		api:                   cfg.API,
+		Metrics:               metrics.New(),
+		callbackClient:        cfg.CallbackClient,
+		webhookDispatcher:     cfg.WebhookDispatcher,
+		iceServers:            cfg.ICEServers,
+		clientICEServers:      cfg.ClientICEServers,
+		iceTCPMux:             cfg.ICETCPMux,
+		iceUDPMux:             cfg.ICEUDPMux,
+		nat1to1IPs:            cfg.NAT1To1IPs,
+		maxRooms:              maxRooms,
+		maxSubscribersPerRoom: maxSubs,
+		ipLimiter:             ipLim,
+		sessions:              make(map[string]*session),
+		useTURN:               cfg.UseTURN,
 	}
 }
 
@@ -210,8 +187,26 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
+
+	// v3.0 session endpoints (canonical)
+	mux.HandleFunc("POST /v1/sessions", s.createRoom)
+	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
+	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
+	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
+	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
+
+	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
+	// POST body: application/sdp offer. Response: 201 + application/sdp answer.
+	// ?bus=voice|music|agent_voice|events selects the named AudioBus.
+	mux.HandleFunc("POST /v1/sessions/{id}/whip", s.handleWHIP)
+	mux.HandleFunc("POST /v1/sessions/{id}/whep", s.handleWHEP)
+	mux.HandleFunc("PATCH /v1/connections/{connID}", s.handleWHIPICE)
+	mux.HandleFunc("DELETE /v1/connections/{connID}", s.handleWHIPDelete)
+
+	// v2.3 room endpoints — backward-compat aliases
 	mux.HandleFunc("/v1/rooms", s.createRoom)
 	mux.HandleFunc("GET /v1/rooms/{id}/latency", s.roomLatency)
+
 	mux.HandleFunc("/v1/channels", s.listChannels)
 	mux.HandleFunc("/v1/signal", s.signal)
 	mux.HandleFunc("/v1/echo", s.echo)
@@ -282,7 +277,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	// Close all active rooms so forwardLoops exit and peer connections are
 	// cleaned up before the process exits.
-	s.rooms.CloseAll()
+	s.sessions_.CloseAll()
 
 	// Stop the per-IP rate limiter's background goroutine.
 	if s.ipLimiter != nil {
@@ -332,10 +327,10 @@ func (s *Server) echo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
-	fwd, drop := s.rooms.PacketStats()
+	fwd, drop := s.sessions_.PacketStats()
 	s.Metrics.PacketsForwarded.Store(fwd)
 	s.Metrics.PacketsDropped.Store(drop)
-	s.Metrics.RoomsActive.Store(int64(s.rooms.RoomCount()))
+	s.Metrics.RoomsActive.Store(int64(s.sessions_.RoomCount()))
 	if s.webhookDispatcher != nil {
 		s.Metrics.WebhookErrorsTotal.Store(s.webhookDispatcher.ErrorsTotal())
 	}
@@ -363,7 +358,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limit: reject when the room count has reached the ceiling.
-	if s.rooms.RoomCount() >= s.maxRooms {
+	if s.sessions_.RoomCount() >= s.maxRooms {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room_limit_exceeded"})
@@ -371,24 +366,28 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := newID()
-	s.rooms.GetOrCreate(id)
+	s.sessions_.GetOrCreate(id)
 	s.Metrics.RoomsActive.Add(1)
-	slog.Info("room created", "room_id", id)
+	slog.Info("session created", "session_id", id)
 	sourceToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSource, 2*time.Hour)
 	if err != nil {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
 	}
-	listenerToken, err := auth.Sign(s.jwtSecret, id, auth.RoleListener, 2*time.Hour)
+	subscriberToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSubscriber, 2*time.Hour)
 	if err != nil {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
 	}
 	resp := map[string]any{
-		"room_id":        id,
-		"source_token":   sourceToken,
-		"listener_token": listenerToken,
-		"qr_url":         "/listen?room=" + id,
+		"session_id":       id,
+		"room_id":          id, // v2.3 wire compat
+		"source_token":     sourceToken,
+		"subscriber_token": subscriberToken,
+		"listener_token":   subscriberToken, // v2.3 wire compat
+		"qr_url":           "/listen?room=" + id,
+		"relay_region":     os.Getenv("FLY_REGION"),
+		"relay_app":        os.Getenv("FLY_APP_NAME"),
 	}
 	// Include ICE server configuration when TURN is enabled (RELAY-023).
 	// Clients pass this list to RTCPeerConnection so they reach the relay's
@@ -468,31 +467,146 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 }
 
 // listChannels handles GET /v1/channels (spec §3.1, Phase 6).
-// Returns a JSON array of public broadcast rooms. Returns [] when none exist.
+// Returns a JSON array of public RelaySessions. Returns [] when none exist.
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	channels := s.rooms.ListPublic()
+	channels := s.sessions_.ListPublic()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(channels)
 }
 
 // roomLatency handles GET /v1/rooms/{id}/latency.
-// Returns the rolling P50 latency statistics for the specified room as JSON.
-// Returns 404 when the room does not exist.
-// The room ID is extracted from the URL path via r.PathValue("id") (Go 1.22+).
+// Returns the rolling P50 latency statistics for the RelaySession as JSON.
+// Returns 404 when the session does not exist.
 func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
-	roomID := r.PathValue("id")
-	rm, ok := s.rooms.Get(roomID)
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
 	if !ok {
-		http.Error(w, "room not found", http.StatusNotFound)
+		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 	stats := rm.GetLatencyStats()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+// roomHealth returns the media-plane health of every bus in the session: which
+// buses have a live source, which have gone silent (stalled), and how long
+// since each last forwarded RTP (Corrected Audit §6 — media liveness, distinct
+// from WebSocket liveness).
+func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	threshold := time.Duration(graph.DefaultMediaStallThresholdMs) * time.Millisecond
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
+}
+
+// packetLogMaxLimit caps the number of entries returned by packetLogHandler.
+const packetLogMaxLimit = 1000
+
+// packetLogHandler handles GET /v1/sessions/{id}/packet-log.
+// Returns the most recent per-packet relay timestamps for the named bus.
+//
+// Query parameters:
+//   - bus  (required): AudioBus ID, e.g. "voice" or "music".
+//   - limit (optional): number of entries to return, 1–1000, default 100.
+//
+// Each entry is a PacketLogEntry with seq, rx_ts_ns, and tx_ts_ns.
+// tx_ts_ns - rx_ts_ns = relay-internal forwarding latency for that packet.
+// rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
+// subscriber recv_ns - tx_ts_ns = A4 (relay → subscriber) leg latency.
+func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	busID := r.URL.Query().Get("bus")
+	if busID == "" {
+		http.Error(w, "bus query parameter required", http.StatusBadRequest)
+		return
+	}
+	limit := 100
+	if lstr := r.URL.Query().Get("limit"); lstr != "" {
+		n, err := strconv.Atoi(lstr)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		if n > packetLogMaxLimit {
+			n = packetLogMaxLimit
+		}
+		limit = n
+	}
+	entries := rm.BusPacketLog(busID, limit)
+	if entries == nil {
+		http.Error(w, "bus not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// sseKeepaliveInterval is how often the relay sends SSE keepalive comments.
+// 20 seconds prevents proxy and load-balancer idle-connection timeouts.
+const sseKeepaliveInterval = 20 * time.Second
+
+// sessionSSE streams RelaySession presence events as Server-Sent Events.
+// GET /v1/sessions/{id}/events
+//
+// Wire format: `data: {"source_active":bool,"subscription_count":N,"bus_id":"voice"}\n\n`
+// Keepalive: `: keepalive\n\n` every sseKeepaliveInterval.
+//
+// The initial event carries the current room state so the client is never
+// blind after connect. Subsequent events fire on source or subscriber changes
+// (push model: the relay's future Phase 2 callback path triggers these).
+//
+// For Phase 1 the SSE stream is polling-free: the initial state is sent once
+// and keepalives keep the connection alive. Phase 2 wires room-state deltas.
+func (s *Server) sessionSSE(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	pkts, _, _ := rm.PacketStats()
+	fmt.Fprintf(w, "data: {\"session_id\":%q,\"source_active\":%v,\"subscription_count\":%d,\"packets_forwarded\":%d}\n\n",
+		sessionID, rm.SourceActive(), rm.SubscriptionCount(), pkts)
+	flusher.Flush()
+
+	ticker := time.NewTicker(sseKeepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 // newID returns a random UUID v4-formatted identifier.

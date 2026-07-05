@@ -14,7 +14,7 @@ Phase 1 relay MVP. Tracks what is done, what is partial, and what is intentional
 
 ## What is done and tested
 
-- **Signaling messages** (`internal/signaling/messages.go`): all 7 types defined (PUBLISH, SUBSCRIBE, ICE, LEAVE, SDP_ANSWER, ROOM_STATE, ERROR) with typed ClientMessage/ServerMessage structs.
+- **Signaling messages** (`internal/signaling/messages.go`): all 7 types defined (PUBLISH, SUBSCRIBE, ICE, LEAVE, SDP_ANSWER, SESSION_STATE, ERROR) with typed ClientMessage/ServerMessage structs. ROOM_STATE accepted on incoming for backward compat.
 - **JWT helper** (`internal/auth/token.go`): room-scoped token, source/listener roles, configurable TTL, HS256 signing. Tests in `token_test.go`.
 - **Room lifecycle** (`internal/room/room.go`): Source/Listener interfaces, SetSource, AddListener, RemoveListener, ListenerCount, SourceActive, Close (idempotent via sync.Once), Manager with GetOrCreate/Get/Delete. Tests in `room_test.go`.
 - **RTP forwarding scaffold** (`internal/room/room.go`): forwardLoop reads from Source, snapshots listeners under read lock, writes to each Listener. Counters (PacketCount, ByteCount) are atomic. Goroutine teardown: returns on ReadRTP error or done channel close.

@@ -1,5 +1,14 @@
 # AGENTS.md — pocketstation-io/relay
 
+## Code writing standard — MANDATORY
+
+Before writing any code, read `docs/standards/CODE_PROTOCOL.md`.
+All 14 laws apply to this repo: field alignment, unit suffixes, Go `atomic.Pointer` not
+`sync.RWMutex` on hot paths, enum methods not free functions, no section banners.
+No code ships until it passes the checklist at the bottom of that document.
+
+---
+
 ## 🐞 NON-TRIVIAL BUG → EMPIRICAL DEBUGGING FRAMEWORK (MANDATORY)
 
 When a defect's cause is NOT obvious from reading, OR a first obvious fix didn't
@@ -30,14 +39,14 @@ burn and over-engineering that defeats the purpose. Escalate the instant an
 
 Before editing, read:
 
-1. `docs/architecture/PocketStation-v2.3.md`
+1. `docs/architecture/pocketstation-v3.0.md`
 2. `docs/REPO_CONTRACT.md`
 3. Relevant ADRs in `docs/adr/`
 4. The assigned GitHub issue
 
 ## Phase status
 
-**Phase 1: COMPLETE as of 2026-05-20. Audit: CONDITIONAL PASS.**
+**Phase 1 relay implementation: IMPLEMENTED. Product Phase 1 exit is not fully proven until aggregate race/soak, 30-minute browser, cross-network browser, and RED hardware proof gates are recorded.**
 
 **Phase 2: IN PROGRESS — see `RELAY_PHASE2_QUEUE.md` for the full task list. Core items shipped; SLO instrumentation + latency_estimate_ms still open.**
 
@@ -45,7 +54,7 @@ Before editing, read:
 
 ### Phase 1 — What is done
 
-- Full signaling protocol: PUBLISH, SUBSCRIBE, ICE, SDP_ANSWER, LEAVE, ROOM_STATE, ERROR (all 7 types).
+- Full signaling protocol: PUBLISH, SUBSCRIBE, ICE, SDP_ANSWER, LEAVE, SESSION_STATE, ERROR (all 7 types). ROOM_STATE accepted on incoming for backward compat.
 - JWT auth: room-scoped HS256 tokens (golang-jwt/v5), source and listener roles, configurable TTL. See RELAY-014.
 - RTP forwarding: forwardLoop, atomic packet/byte counters, goroutine teardown on error or done signal.
 - Room lifecycle: Source/Listener interfaces, Manager with GetOrCreate/Get/Delete, idempotent Close.
@@ -62,22 +71,22 @@ Relay owns all room creation and JWT issuance in Phase 1. The relay's POST /v1/r
 
 See `RELAY_PHASE2_QUEUE.md` for the full table. Summary:
 
-- Copy-on-write listener slice (RELAY-005): replace sync.RWMutex per packet with atomic.Pointer (v2.3 §26.2, §15).
-- Source reconnect (ICE restart): relay survives source disconnect + reconnect without losing listeners (v2.3 §15).
+- Copy-on-write listener slice (RELAY-005): replace sync.RWMutex per packet with atomic.Pointer (v3.0 §26.2, §15).
+- Source reconnect (ICE restart): relay survives source disconnect + reconnect without losing listeners (v3.0 §15).
 - Listener reconnect: listener reconnects to an active room without session interruption.
-- Rate limiting: max rooms per IP, max listeners per room (v2.3 §9 Phase 2).
-- Room expiry: auto-close after N hours of inactivity (v2.3 §9 Phase 2).
-- Graceful shutdown: SIGTERM drain — relay stops accepting new rooms, drains active sessions (v2.3 §15).
-- SLO instrumentation: session completion, transport latency, source publish success (v2.3 §13.5).
-- latency_estimate_ms metric: clock-sync-based per-session latency estimation (RELAY-006, v2.3 §13.2).
+- Rate limiting: max rooms per IP, max listeners per room (v3.0 §9 Phase 2).
+- Room expiry: auto-close after N hours of inactivity (v3.0 §9 Phase 2).
+- Graceful shutdown: SIGTERM drain — relay stops accepting new rooms, drains active sessions (v3.0 §15).
+- SLO instrumentation: session completion, transport latency, source publish success (v3.0 §13.5).
+- latency_estimate_ms metric: clock-sync-based per-session latency estimation (RELAY-006, v3.0 §13.2).
 - api-server JWT compatibility: api-server upgraded to call auth.Sign with shared POCKETSTATION_JWT_SECRET; cross-service integration test required before Phase 2 exit (RELAY-014/RELAY-015).
-- relay→api-server source_active push: relay POSTs source_active event to api-server on source connect/disconnect (v2.3 §12.2).
+- relay→api-server source_active push: relay POSTs source_active event to api-server on source connect/disconnect (v3.0 §12.2).
 - Connected WriteRTP bench (RELAY-009): measure real Pion WriteRTP allocation against live tracks, not discardListener mock.
 - ICE failure / SIGTERM / room-delete failure mode tests (Audit F3).
 
 ## Phase gate
 
-This repo activated in **Phase 1**. Phase 1 is complete (2026-05-20, CONDITIONAL PASS). Work now targets **Phase 2**.
+This repo activated in **Phase 1**. Relay implementation work now targets **Phase 2**, but do not claim Product Phase 1 exit until the remaining proof gates are recorded.
 
 If an issue is not listed in RELAY_PHASE2_QUEUE.md, do not implement it here unless the issue has `phase-exception-approved`.
 
@@ -87,7 +96,7 @@ If an issue is not listed in RELAY_PHASE2_QUEUE.md, do not implement it here unl
 - Do not edit unrelated repos.
 - Do not create `pocketstation-io/protocol` before Phase 2.
 - Signaling message types live in this repo until Phase 2 protocol repo creation. Do not extract them early.
-- Do not change v2.3 architecture unless explicitly assigned.
+- Do not change v3.0 architecture unless explicitly assigned.
 - Do not add dependencies without approval.
 - Do not bypass CI.
 

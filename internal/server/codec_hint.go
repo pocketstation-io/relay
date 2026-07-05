@@ -160,7 +160,7 @@ func (s *Server) maybeEmitCodecHint(
 	s.mu.Lock()
 	var sourceSess *session
 	for _, sess := range s.sessions {
-		if sess.rm != nil && sess.rm.ID == roomID && sess.role == auth.RoleSource {
+		if sess.room != nil && sess.room.ID == roomID && sess.role == auth.RoleSource {
 			sourceSess = sess
 			break
 		}

@@ -38,7 +38,7 @@ func fanOutMessages(
 	go func() {
 		for msg := range rawMsgs {
 			switch msg.Type {
-			case signaling.TypeIce, signaling.TypeSDPAnswer, signaling.TypeRoomState, signaling.TypeError:
+			case signaling.TypeIce, signaling.TypeSDPAnswer, signaling.TypeSessionState, signaling.TypeRoomState, signaling.TypeError:
 				// Forward to the handshake channel (must not block).
 				select {
 				case iceCh <- msg:
@@ -110,7 +110,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 
 	// --- 3 listeners setup ---
 	// For each listener: create two channels — one for handshake messages
-	// (SDP_ANSWER, ICE, ROOM_STATE) and one for KEY_EXCHANGE messages.
+	// (SDP_ANSWER, ICE, SESSION_STATE) and one for KEY_EXCHANGE messages.
 	// fanOutMessages routes the raw WebSocket stream to both channels.
 	listenerConns := make([]*websocket.Conn, listenerCount)
 	listenerPCs := make([]*webrtc.PeerConnection, listenerCount)

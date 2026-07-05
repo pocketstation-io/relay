@@ -119,7 +119,7 @@ func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *tes
 		}
 	}()
 
-	// Send a SUBSCRIBE to obtain a ROOM_STATE or ERROR — just to have a live
+	// Send a SUBSCRIBE to obtain a SESSION_STATE or ERROR — just to have a live
 	// message exchange. We use the source token on purpose to get an error
 	// response (role mismatch), which keeps the connection alive.
 	_ = wsConn.WriteJSON(signaling.ClientMessage{

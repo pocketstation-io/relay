@@ -237,16 +237,18 @@ Known error codes:
 
 ---
 
-### ROOM_STATE (relay → client)
+### SESSION_STATE (relay → client)
 
-Sent on join and on listener-count change.
+Sent on join and on subscription-count change.
+Wire type is `"SESSION_STATE"`. Clients should also accept the deprecated
+`"ROOM_STATE"` for backward compatibility with older relays.
 
-| Field          | Value                    |
-|----------------|--------------------------|
-| type           | `"ROOM_STATE"`           |
-| source_active  | Whether source is live   |
-| listener_count | Current listener count   |
-| codec          | Negotiated codec name    |
+| Field              | Value                    |
+|--------------------|--------------------------|
+| type               | `"SESSION_STATE"`        |
+| source_active      | Whether source is live   |
+| subscription_count | Current subscriber count |
+| codec              | Negotiated codec name    |
 
 ---
 
@@ -277,7 +279,7 @@ Listener              Relay
   |<-- SDP_ANSWER -------|
   |<-> ICE (trickle) --->|
   |<-- KEY_EXCHANGE -----|  (if source key is cached)
-  |<-- ROOM_STATE -------|
+  |<-- SESSION_STATE ----|
   |                     |
   |<-- [RTP audio] ------|  (WebRTC; not signaling)
 ```

@@ -2,9 +2,9 @@
 # Generated: 2026-05-20
 # Platform: darwin/arm64 (Apple M5)
 
-goroutines start=158 1min=149 5min=146 delta(1→5)=-3
-rss_mb     start=14 1min=18 5min=18 growth(1→5)=0.0%
-packets_forwarded=0 packets_dropped=0 listener_count=1
+goroutines start=158 1min=150 5min=147 delta(1→5)=-3
+rss_mb     start=18 1min=19 5min=19 growth(1→5)=0.0%
+packets_forwarded=14956 packets_dropped=0 listener_count=1
 race_detector=clean (enforced by -race flag)
 goroutine_leak=PASS (delta -3 <= limit 10)
 rss_growth=PASS
