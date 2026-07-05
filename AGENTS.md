@@ -46,7 +46,7 @@ Before editing, read:
 
 ## Phase status
 
-**Phase 1: COMPLETE as of 2026-05-20. Audit: CONDITIONAL PASS.**
+**Phase 1 relay implementation: IMPLEMENTED. Product Phase 1 exit is not fully proven until aggregate race/soak, 30-minute browser, cross-network browser, and RED hardware proof gates are recorded.**
 
 **Phase 2: IN PROGRESS — see `RELAY_PHASE2_QUEUE.md` for the full task list. Core items shipped; SLO instrumentation + latency_estimate_ms still open.**
 
@@ -86,7 +86,7 @@ See `RELAY_PHASE2_QUEUE.md` for the full table. Summary:
 
 ## Phase gate
 
-This repo activated in **Phase 1**. Phase 1 is complete (2026-05-20, CONDITIONAL PASS). Work now targets **Phase 2**.
+This repo activated in **Phase 1**. Relay implementation work now targets **Phase 2**, but do not claim Product Phase 1 exit until the remaining proof gates are recorded.
 
 If an issue is not listed in RELAY_PHASE2_QUEUE.md, do not implement it here unless the issue has `phase-exception-approved`.
 
