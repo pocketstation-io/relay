@@ -55,6 +55,14 @@ const defaultMaxListenersPerRoom = 50
 // when MAX_ROOMS_PER_IP_PER_MINUTE is unset.
 const defaultMaxRoomsPerIPPerMinute = 10
 
+const defaultPublicReceiverURL = "https://pocketstation-receiver.fly.dev"
+const joinCodeTTL = 2 * time.Hour
+
+type joinInvite struct {
+	sessionID string
+	expiresAt time.Time
+}
+
 // Config holds the parameters for creating a Server.
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for session tokens.
@@ -101,6 +109,12 @@ type Config struct {
 	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
 	// candidates (Fly.io / NAT deployments). Env: RELAY_PUBLIC_IPS.
 	NAT1To1IPs []string
+	// PublicReceiverURL is the browser receiver origin used to construct a
+	// one-click join URL. Empty uses PUBLIC_RECEIVER_URL or the production URL.
+	PublicReceiverURL string
+	// PublicRelayURL is the externally reachable relay HTTP(S) origin returned
+	// by join-code resolution. Empty derives it from the incoming request.
+	PublicRelayURL string
 }
 
 // Server is the top-level relay server.
@@ -142,6 +156,11 @@ type Server struct {
 
 	// useTURN is set once from Config.UseTURN; propagated to ICE_RESTART msgs.
 	useTURN bool
+
+	publicReceiverURL string
+	publicRelayURL    string
+	joinMu            sync.Mutex
+	joinInvites       map[string]joinInvite
 }
 
 // New creates a Server from cfg.
@@ -169,6 +188,18 @@ func New(cfg Config) *Server {
 	regCfg := cfg.RegistryConfig
 	regCfg.MaxSubscriptions = maxSubs
 
+	publicReceiverURL := strings.TrimSpace(cfg.PublicReceiverURL)
+	if publicReceiverURL == "" {
+		publicReceiverURL = strings.TrimSpace(os.Getenv("PUBLIC_RECEIVER_URL"))
+	}
+	if publicReceiverURL == "" {
+		publicReceiverURL = defaultPublicReceiverURL
+	}
+	publicRelayURL := strings.TrimSpace(cfg.PublicRelayURL)
+	if publicRelayURL == "" {
+		publicRelayURL = strings.TrimSpace(os.Getenv("PUBLIC_RELAY_URL"))
+	}
+
 	return &Server{
 		sessions_:             graph.NewRegistryWithConfig(regCfg),
 		jwtSecret:             cfg.JWTSecret,
@@ -187,6 +218,9 @@ func New(cfg Config) *Server {
 		ipLimiter:             ipLim,
 		sessions:              make(map[string]*session),
 		useTURN:               cfg.UseTURN,
+		publicReceiverURL:     strings.TrimRight(publicReceiverURL, "/"),
+		publicRelayURL:        strings.TrimRight(publicRelayURL, "/"),
+		joinInvites:           make(map[string]joinInvite),
 	}
 }
 
@@ -198,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 
 	// v3.0 session endpoints (canonical)
 	mux.HandleFunc("POST /v1/sessions", s.createRoom)
+	mux.HandleFunc("GET /v1/join/{code}", s.resolveJoinCode)
 	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
 	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
 	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
@@ -388,13 +423,20 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
 	}
+	joinCode := newID()
+	s.joinMu.Lock()
+	s.joinInvites[joinCode] = joinInvite{sessionID: id, expiresAt: time.Now().Add(joinCodeTTL)}
+	s.joinMu.Unlock()
+	joinURL := s.publicReceiverURL + "?join=" + joinCode
 	resp := map[string]any{
 		"session_id":       id,
 		"room_id":          id, // v2.3 wire compat
 		"source_token":     sourceToken,
 		"subscriber_token": subscriberToken,
 		"listener_token":   subscriberToken, // v2.3 wire compat
-		"qr_url":           "/listen?room=" + id,
+		"join_code":        joinCode,
+		"join_url":         joinURL,
+		"qr_url":           joinURL,
 		"relay_region":     os.Getenv("FLY_REGION"),
 		"relay_app":        os.Getenv("FLY_APP_NAME"),
 	}
@@ -408,6 +450,71 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
+	setJoinCORS(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+
+	code := r.PathValue("code")
+	now := time.Now()
+	s.joinMu.Lock()
+	invite, found := s.joinInvites[code]
+	if found && now.After(invite.expiresAt) {
+		delete(s.joinInvites, code)
+		found = false
+	}
+	s.joinMu.Unlock()
+	if !found {
+		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
+		return
+	}
+	if _, active := s.sessions_.Get(invite.sessionID); !active {
+		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	token, err := auth.Sign(s.jwtSecret, invite.sessionID, auth.RoleSubscriber, joinCodeTTL)
+	if err != nil {
+		http.Error(w, `{"error":"token_error"}`, http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"session_id":       invite.sessionID,
+		"subscriber_token": token,
+		"signal_url":       s.publicSignalURL(r),
+	})
+}
+
+func (s *Server) publicSignalURL(r *http.Request) string {
+	base := s.publicRelayURL
+	if base == "" {
+		scheme := "http"
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			scheme = "https"
+		}
+		base = scheme + "://" + r.Host
+	}
+	base = strings.TrimRight(base, "/")
+	base = strings.Replace(base, "https://", "wss://", 1)
+	base = strings.Replace(base, "http://", "ws://", 1)
+	return base + "/v1/signal"
+}
+
+func setJoinCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if len(allowedOrigins) == 0 {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		return
+	}
+	for _, allowed := range allowedOrigins {
+		if origin == allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			return
+		}
+	}
 }
 
 // allowedOrigins is read once at startup from ALLOWED_ORIGINS (comma-separated).
