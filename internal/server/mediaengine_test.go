@@ -14,12 +14,19 @@ import (
 // verifies the registered Opus codec surfaces stereo=1 and sprop-stereo=1 in a
 // generated offer, at 48 kHz / 2 channels.
 func TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus(t *testing.T) {
-	m, err := newMediaEngineWithAudioNACK()
+	m, err := NewMediaEngineWithAudioNACK()
 	if err != nil {
-		t.Fatalf("newMediaEngineWithAudioNACK: %v", err)
+		t.Fatalf("NewMediaEngineWithAudioNACK: %v", err)
 	}
 
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
+	ir, err := NewInterceptorRegistry(m)
+	if err != nil {
+		t.Fatalf("NewInterceptorRegistry: %v", err)
+	}
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(m),
+		webrtc.WithInterceptorRegistry(ir),
+	)
 	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("NewPeerConnection: %v", err)
@@ -43,6 +50,10 @@ func TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus(t *t
 		"opus/48000/2",   // 48 kHz, 2 channels
 		"stereo=1",       // relay accepts stereo (receive)
 		"sprop-stereo=1", // relay will send stereo
+		"a=rtcp-fb:111 nack",
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time",
+		"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
 	} {
 		if !strings.Contains(sdp, want) {
 			t.Errorf("offer SDP must contain %q for stereo Opus negotiation; SDP:\n%s", want, sdp)

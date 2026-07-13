@@ -22,6 +22,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/callback"
+	"github.com/pocketstation-io/relay/internal/downlink"
 	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/metrics"
 	"github.com/pocketstation-io/relay/internal/ratelimit"
@@ -58,9 +59,14 @@ const defaultMaxRoomsPerIPPerMinute = 10
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for session tokens.
 	JWTSecret []byte
+	// SettingEngine is an optional Pion SettingEngine for tests (loopback ICE,
+	// aggressive timeouts). When set, the relay always builds its own API with
+	// NewMediaEngineWithAudioNACK so that RED codec registration is preserved.
+	// Preferred over API; if both are set, SettingEngine wins.
+	SettingEngine *webrtc.SettingEngine
 	// API is an optional *webrtc.API used instead of the default global API.
-	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
-	// does not need real network interfaces.
+	// Deprecated for test use: prefer SettingEngine so that codec registration
+	// (including RED) is not bypassed.
 	API *webrtc.API
 	// MaxRooms is the maximum number of concurrently active RelaySessions.
 	// Zero means use defaultMaxRooms.
@@ -101,6 +107,7 @@ type Config struct {
 type Server struct {
 	sessions_         *graph.SessionRegistry // named sessions_ to avoid collision with sessions map below
 	jwtSecret         []byte
+	settingEngine     *webrtc.SettingEngine
 	api               *webrtc.API
 	Metrics           *metrics.Registry
 	callbackClient    *callback.Client
@@ -165,6 +172,7 @@ func New(cfg Config) *Server {
 	return &Server{
 		sessions_:             graph.NewRegistryWithConfig(regCfg),
 		jwtSecret:             cfg.JWTSecret,
+		settingEngine:         cfg.SettingEngine,
 		api:                   cfg.API,
 		Metrics:               metrics.New(),
 		callbackClient:        cfg.CallbackClient,
@@ -194,6 +202,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
 	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
+	mux.HandleFunc("GET /v1/sessions/{id}/media-debug", s.mediaDebug)
 
 	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
 	// POST body: application/sdp offer. Response: 201 + application/sdp answer.
@@ -466,6 +475,32 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 	sess.run()
 }
 
+func (s *Server) broadcastSessionState(rm *graph.RelaySession) {
+	if rm == nil {
+		return
+	}
+	msg := signaling.ServerMessage{
+		Type:              signaling.TypeSessionState,
+		SourceActive:      rm.SourceActive(),
+		SubscriptionCount: rm.SubscriptionCount(),
+		Codec:             "opus",
+		SessionID:         rm.ID,
+	}
+
+	s.mu.RLock()
+	targets := make([]*session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		if sess.room == rm {
+			targets = append(targets, sess)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, sess := range targets {
+		_ = sess.send(msg)
+	}
+}
+
 // listChannels handles GET /v1/channels (spec §3.1, Phase 6).
 // Returns a JSON array of public RelaySessions. Returns [] when none exist.
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +544,29 @@ func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
 }
 
+// mediaDebug handles GET /v1/sessions/{id}/media-debug.
+// Returns per-subscriber downlink telemetry: write-duration P95, RTCP stats,
+// packet/byte counts, and NACK counts. Used for latency diagnosis.
+func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	snap := struct {
+		SessionID    string                      `json:"session_id"`
+		SourceClocks []graph.SourceClockSnapshot `json:"source_clocks"`
+		Downlinks    []downlink.DownlinkSnapshot `json:"downlinks"`
+	}{
+		SessionID:    sessionID,
+		SourceClocks: rm.SourceClockSnapshots(),
+		Downlinks:    rm.DownlinkSnapshots(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snap)
+}
+
 // packetLogMaxLimit caps the number of entries returned by packetLogHandler.
 const packetLogMaxLimit = 1000
 
@@ -519,10 +577,10 @@ const packetLogMaxLimit = 1000
 //   - bus  (required): AudioBus ID, e.g. "voice" or "music".
 //   - limit (optional): number of entries to return, 1–1000, default 100.
 //
-// Each entry is a PacketLogEntry with seq, rx_ts_ns, and tx_ts_ns.
-// tx_ts_ns - rx_ts_ns = relay-internal forwarding latency for that packet.
+// Each entry includes RTP sequence/timestamp identity plus rx_ts_ns and tx_ts_ns.
+// tx_ts_ns is the fanout-enqueue timestamp retained for artifact compatibility;
+// actual serialized write timing is exposed by the media-debug downlink fields.
 // rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
-// subscriber recv_ns - tx_ts_ns = A4 (relay → subscriber) leg latency.
 func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	rm, ok := s.sessions_.Get(sessionID)

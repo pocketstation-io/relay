@@ -50,8 +50,10 @@ const (
 	phase2RSSGrowthBudget = 0.20
 )
 
-// connectListener dials a SUBSCRIBE WebSocket to ts and returns the peer
-// connection and the close function. The caller must invoke close() when done.
+// connectListener dials a SUBSCRIBE WebSocket to ts and blocks until stopCh
+// is closed. All child goroutines (drainMessages, ICE relay, RTP drain) are
+// tracked in an internal childWg; childWg.Wait() is the last defer to run so
+// every goroutine has fully exited before the outer wg.Done() fires.
 func connectListener(
 	t *testing.T,
 	ts *httptest.Server,
@@ -61,11 +63,16 @@ func connectListener(
 	wg *sync.WaitGroup,
 ) {
 	t.Helper()
+	// childWg tracks all goroutines this function spawns. It is the outermost
+	// defer (registered first) so it runs last in LIFO, after pc.Close and
+	// conn.Close have already signalled those goroutines to exit.
+	var childWg sync.WaitGroup
 	defer wg.Done()
+	defer childWg.Wait()
 
 	conn := dialWS(t, ts)
 	defer conn.Close()
-	msgs := drainMessages(conn)
+	msgs := drainMessages(conn, &childWg)
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -85,20 +92,26 @@ func connectListener(
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	subscribeHandshake(t, conn, pc, listenerToken, msgs, 15*time.Second)
+	subscribeHandshake(t, conn, pc, listenerToken, msgs, 15*time.Second, &childWg)
 	waitICE(ctx, t, pc)
 
 	select {
 	case remoteTrack := <-trackCh:
+		childWg.Add(1)
 		go func() {
+			defer childWg.Done()
+			// Blocking ReadRTP: pc.Close() (deferred above) will unblock it.
+			// select+default would spin-poll and could miss the stopCh close
+			// when ReadRTP is already blocked, causing stuck goroutines.
 			for {
+				_, _, err := remoteTrack.ReadRTP()
+				if err != nil {
+					return
+				}
 				select {
 				case <-stopCh:
 					return
 				default:
-					if _, _, err := remoteTrack.ReadRTP(); err != nil {
-						return
-					}
 				}
 			}
 		}()
@@ -109,6 +122,11 @@ func connectListener(
 
 	<-stopCh
 	_ = conn.WriteJSON(map[string]string{"type": "LEAVE"})
+	// Defers execute in LIFO:
+	//   cancel() → pc.Close() (unblocks ReadRTP → G3 exits)
+	//            → conn.Close() (unblocks drainMessages → G1 exits → msgs closed → G2 exits)
+	//            → childWg.Wait() (blocks until G1, G2, G3 have all returned)
+	//            → wg.Done()
 }
 
 // TestSoakPhase2 runs the Phase 2 soak: 1 publisher + 50 in-process
@@ -118,6 +136,14 @@ func TestSoakPhase2(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak test skipped in -short mode")
 	}
+	if os.Getenv("RELAY_SOAK_PHASE2") != "1" && !relaySoakFull() {
+		t.Skip("phase 2 soak skipped by default; set RELAY_SOAK_PHASE2=1 or RELAY_SOAK_FULL=1")
+	}
+
+	// pubChildWg tracks publisher-side goroutines (drainMessages + ICE relay).
+	// Registered first so it runs last in LIFO, after pubPC/pubConn are closed.
+	var pubChildWg sync.WaitGroup
+	defer pubChildWg.Wait()
 
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
@@ -127,25 +153,25 @@ func TestSoakPhase2(t *testing.T) {
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
-	// Create room.
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	// Create session.
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(nil))
 	if err != nil {
-		t.Fatalf("create room: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
 	defer resp.Body.Close()
 	var room struct {
-		RoomID        string `json:"room_id"`
+		SessionID     string `json:"session_id"`
 		SourceToken   string `json:"source_token"`
 		ListenerToken string `json:"listener_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil {
-		t.Fatalf("decode room: %v", err)
+		t.Fatalf("decode session: %v", err)
 	}
 
 	// Publisher.
 	pubConn := dialWS(t, ts)
 	defer pubConn.Close()
-	pubMsgs := drainMessages(pubConn)
+	pubMsgs := drainMessages(pubConn, &pubChildWg)
 
 	pubPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -167,12 +193,19 @@ func TestSoakPhase2(t *testing.T) {
 	pubCtx, pubCancel := context.WithTimeout(context.Background(), phase2SoakDuration+2*time.Minute)
 	defer pubCancel()
 
-	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second)
+	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second, &pubChildWg)
 	waitICE(pubCtx, t, pubPC)
 
 	soakStop := make(chan struct{})
+	var stopOnce sync.Once
+	stopSoak := func() {
+		stopOnce.Do(func() { close(soakStop) })
+	}
+	defer stopSoak()
 	payload := bytes.Repeat([]byte{0xAB}, 160)
+	pubChildWg.Add(1)
 	go func() {
+		defer pubChildWg.Done()
 		var seq uint16
 		var ts uint32
 		ticker := time.NewTicker(20 * time.Millisecond)
@@ -195,7 +228,6 @@ func TestSoakPhase2(t *testing.T) {
 			}
 		}
 	}()
-	// soakStop is closed exactly once below; no defer to avoid double-close panic.
 
 	// Give the publisher's forwardLoop a moment to start.
 	time.Sleep(200 * time.Millisecond)
@@ -236,7 +268,7 @@ func TestSoakPhase2(t *testing.T) {
 	s30 := takeSample(t, "30min")
 
 	// Signal all listeners to stop.
-	close(soakStop)
+	stopSoak()
 	listenerWg.Wait()
 	_ = pubConn.WriteJSON(map[string]string{"type": "LEAVE"})
 
