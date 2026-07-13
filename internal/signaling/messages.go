@@ -3,11 +3,12 @@ package signaling
 type MessageType string
 
 const (
-	TypePublish   MessageType = "PUBLISH"
-	TypeSubscribe MessageType = "SUBSCRIBE"
-	TypeIce       MessageType = "ICE"
-	TypeLeave     MessageType = "LEAVE"
-	TypeSDPAnswer MessageType = "SDP_ANSWER"
+	TypePublish      MessageType = "PUBLISH"
+	TypeSubscribe    MessageType = "SUBSCRIBE"
+	TypeIce          MessageType = "ICE"
+	TypeLeave        MessageType = "LEAVE"
+	TypeSDPOffer     MessageType = "SDP_OFFER"
+	TypeSDPAnswer    MessageType = "SDP_ANSWER"
 	TypeSessionState MessageType = "SESSION_STATE"
 	// TypeRoomState is the deprecated v2.3 wire alias. The relay only sends
 	// TypeSessionState, but accepts both on incoming messages for backward
@@ -73,6 +74,7 @@ type ClientMessage struct {
 
 	Token     string `json:"token,omitempty"`
 	SDPOffer  string `json:"sdp_offer,omitempty"`
+	SDPAnswer string `json:"sdp_answer,omitempty"`
 	Candidate string `json:"candidate,omitempty"`
 
 	// SFrameKey is the base64-encoded SFrame key for KEY_EXCHANGE messages.
@@ -97,6 +99,7 @@ type ServerMessage struct {
 	Type MessageType `json:"type"`
 
 	SDPAnswer         string `json:"sdp_answer,omitempty"`
+	SDPOffer          string `json:"sdp_offer,omitempty"`
 	Candidate         string `json:"candidate,omitempty"`
 	SourceActive      bool   `json:"source_active,omitempty"`
 	SubscriptionCount int    `json:"subscription_count,omitempty"`

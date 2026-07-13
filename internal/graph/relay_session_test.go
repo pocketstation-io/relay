@@ -4,12 +4,17 @@
 package graph
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
+	"github.com/pocketstation-io/relay/internal/clocklineage"
+	"github.com/pocketstation-io/relay/internal/downlink"
 )
 
 // --- mock types ---
@@ -17,6 +22,13 @@ import (
 type mockSource struct {
 	ch chan *rtp.Packet
 }
+
+type mockClockLineageSource struct {
+	*mockSource
+	timeline *clocklineage.Timeline
+}
+
+func (m *mockClockLineageSource) ClockLineage() *clocklineage.Timeline { return m.timeline }
 
 func newMockSource() *mockSource           { return &mockSource{ch: make(chan *rtp.Packet, 16)} }
 func (m *mockSource) send(pkt *rtp.Packet) { m.ch <- pkt }
@@ -32,12 +44,16 @@ func (m *mockSource) ReadRTP() (*rtp.Packet, error) {
 type mockSubscription struct {
 	mu      sync.Mutex
 	packets []*rtp.Packet
+	err     error
 }
 
 func (m *mockSubscription) WriteRTP(pkt *rtp.Packet) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
 	m.packets = append(m.packets, pkt)
-	m.mu.Unlock()
 	return nil
 }
 
@@ -118,6 +134,33 @@ func TestGiven_RelaySession_When_RemoveUnknownSubscription_Then_Noop(t *testing.
 	r.RemoveSubscription("does-not-exist") // must not panic
 }
 
+func TestGiven_RelaySession_When_SubscriberWriteFailsRepeatedly_Then_Evicted(t *testing.T) {
+	r := New("room-1")
+	errCounts := make(map[string]int, 1)
+	deadSubs := make([]string, 0, 1)
+	sub := &mockSubscription{err: errors.New("write failed")}
+
+	if err := r.AddSubscription("peer-1", BusMix, sub); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	for seq := uint16(0); seq < 5; seq++ {
+		r.deliver(
+			"voice",
+			&rtp.Packet{Header: rtp.Header{SequenceNumber: seq}},
+			errCounts,
+			&deadSubs,
+		)
+	}
+
+	if got := r.SubscriptionCount(); got != 0 {
+		t.Fatalf("subscription count after repeated write failures = %d, want 0", got)
+	}
+	if _, ok := errCounts["peer-1"]; ok {
+		t.Fatal("errCounts still contains evicted subscriber")
+	}
+}
+
 func TestGiven_RelaySession_When_ClosedMultipleTimes_Then_Idempotent(t *testing.T) {
 	r := New("room-1")
 	r.Close()
@@ -133,6 +176,33 @@ func TestGiven_RelaySession_When_SetSource_Then_SourceActive(t *testing.T) {
 		t.Error("expected source active after SetSource")
 	}
 	src.close()
+}
+
+func TestGiven_SourceReconnect_When_NewPublisherHasNoSenderReport_Then_OldClockIsRejected(t *testing.T) {
+	r := New("session-clock-reconnect")
+	base := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	oldTimeline := clocklineage.NewTimeline(1)
+	oldTimeline.Observe(&rtcp.SenderReport{SSRC: 1, NTPTime: testNTP(base), RTPTime: 1000}, base)
+	oldSource := &mockClockLineageSource{mockSource: newMockSource(), timeline: oldTimeline}
+	r.SetSource("voice", BusRoleVoice, oldSource, oldSource.close)
+	bus := r.GetOrCreateBus("voice", BusRoleVoice)
+	if _, ok := bus.CaptureTime(1000, base); !ok {
+		t.Fatal("old publisher clock was not available before reconnect")
+	}
+
+	newSource := &mockClockLineageSource{mockSource: newMockSource(), timeline: clocklineage.NewTimeline(2)}
+	r.SetSource("voice", BusRoleVoice, newSource, newSource.close)
+	if _, ok := bus.CaptureTime(1000, base); ok {
+		t.Fatal("new publisher reused the previous publisher clock mapping")
+	}
+	newSource.close()
+}
+
+func testNTP(value time.Time) uint64 {
+	const offset = uint64(2_208_988_800)
+	seconds := uint64(value.Unix()) + offset
+	fraction := uint64(value.Nanosecond()) * (uint64(1) << 32) / uint64(time.Second)
+	return seconds<<32 | fraction
 }
 
 func TestGiven_RelaySession_When_SetSource_Then_BusSourceActive(t *testing.T) {
@@ -311,7 +381,36 @@ func TestGiven_SourcePublishing_When_SourceReconnects_Then_SubscriberReceivesAft
 	src2.close()
 }
 
-func TestGiven_RTPPaddingBitSet_When_Forwarded_Then_PaddingBitCleared(t *testing.T) {
+func TestGiven_ForwardDownlink_When_SourceReconnects_Then_SubscriberRTPRemainsContinuous(t *testing.T) {
+	r := New("reconnect-forward-rtp")
+	defer r.Close()
+	sub := &mockSubscription{}
+	dl := downlink.NewForwardingDownlink("peer-forward", sub, nil)
+	if err := r.AddDownlink("peer-forward", "voice", dl); err != nil {
+		t.Fatalf("AddDownlink: %v", err)
+	}
+
+	src1 := newMockSource()
+	r.SetSource("voice", BusRoleVoice, src1, src1.close)
+	src1.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: 100, Timestamp: 1000, SSRC: 7}})
+	waitFor(t, 100*time.Millisecond, func() bool { return len(sub.received()) == 1 })
+
+	src2 := newMockSource()
+	r.SetSource("voice", BusRoleVoice, src2, src2.close)
+	src2.send(&rtp.Packet{Header: rtp.Header{SequenceNumber: 5, Timestamp: 100, SSRC: 7}})
+	waitFor(t, 100*time.Millisecond, func() bool { return len(sub.received()) == 2 })
+	src2.close()
+
+	packets := sub.received()
+	if packets[0].SequenceNumber != 100 || packets[0].Timestamp != 1000 {
+		t.Fatalf("first packet = seq %d ts %d, want seq 100 ts 1000", packets[0].SequenceNumber, packets[0].Timestamp)
+	}
+	if packets[1].SequenceNumber != 101 || packets[1].Timestamp != 1960 {
+		t.Fatalf("reconnected packet = seq %d ts %d, want seq 101 ts 1960", packets[1].SequenceNumber, packets[1].Timestamp)
+	}
+}
+
+func TestGiven_ValidRTPPadding_When_Forwarded_Then_WireRoundTripPreservesPadding(t *testing.T) {
 	r := New("padding-room")
 	src := newMockSource()
 	sub := &mockSubscription{}
@@ -328,11 +427,22 @@ func TestGiven_RTPPaddingBitSet_When_Forwarded_Then_PaddingBitCleared(t *testing
 
 	waitFor(t, 100*time.Millisecond, func() bool { return len(sub.received()) == 1 })
 	received := sub.received()[0]
-	if received.Header.Padding {
-		t.Error("forwarded packet must not have padding bit set")
+	if !received.Header.Padding {
+		t.Error("forwarded packet lost padding bit")
 	}
-	if received.PaddingSize != 0 {
-		t.Errorf("forwarded PaddingSize = %d, want 0", received.PaddingSize)
+	if received.PaddingSize != 4 {
+		t.Errorf("forwarded PaddingSize = %d, want 4", received.PaddingSize)
+	}
+	wire, err := received.Marshal()
+	if err != nil {
+		t.Fatalf("marshal forwarded padded packet: %v", err)
+	}
+	var decoded rtp.Packet
+	if err := decoded.Unmarshal(wire); err != nil {
+		t.Fatalf("unmarshal forwarded padded packet: %v", err)
+	}
+	if !decoded.Padding || decoded.PaddingSize != 4 || !bytes.Equal(decoded.Payload, []byte{0xAA, 0xBB}) {
+		t.Fatalf("wire round-trip corrupted padded packet: %+v", decoded)
 	}
 	src.close()
 }
@@ -605,6 +715,35 @@ func TestGiven_PacketLog_When_WindowFull_Then_OldestOverwritten(t *testing.T) {
 	}
 }
 
+func TestGiven_PacketLog_WhenReadWhileRecording_ThenPublishedEntriesStayCoherent(t *testing.T) {
+	pl := newPacketLogStore()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10_000; i++ {
+			seq := uint16(i)
+			pl.record(PacketLogEntry{
+				Seq:          seq,
+				RtpTsSamples: uint32(seq) * 960,
+				PayloadBytes: uint64(seq) + 1,
+			})
+		}
+	}()
+
+	for {
+		for _, entry := range pl.last(100) {
+			if entry.RtpTsSamples != uint32(entry.Seq)*960 || entry.PayloadBytes != uint64(entry.Seq)+1 {
+				t.Fatalf("observed partially published packet-log entry: %+v", entry)
+			}
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}
+
 // --- BusPacketLog integration tests ---
 
 func TestGiven_RelaySession_When_BusNotFound_Then_PacketLogNil(t *testing.T) {
@@ -626,7 +765,12 @@ func TestGiven_ActiveBus_When_PacketForwarded_Then_PacketLogPopulated(t *testing
 
 	pkt := &rtp.Packet{}
 	pkt.Header.SequenceNumber = 42
-	pkt.Payload = []byte{0x01}
+	pkt.Header.Timestamp = 96_000
+	pkt.Header.PayloadType = 111
+	pkt.Header.SSRC = 7
+	pkt.Header.Padding = true
+	pkt.PaddingSize = 4
+	pkt.Payload = []byte{0x01, 0x02}
 	src.send(pkt)
 
 	// Wait for the subscriber to receive the packet (proves forwardLoop ran).
@@ -638,6 +782,15 @@ func TestGiven_ActiveBus_When_PacketForwarded_Then_PacketLogPopulated(t *testing
 	}
 	if entries[0].Seq != 42 {
 		t.Errorf("got seq %d, want 42", entries[0].Seq)
+	}
+	if entries[0].RtpTsSamples != 96_000 {
+		t.Errorf("got RTP timestamp %d, want 96000", entries[0].RtpTsSamples)
+	}
+	if entries[0].PayloadType != 111 || entries[0].Ssrc != 7 || entries[0].PayloadBytes != 2 {
+		t.Errorf("unexpected RTP identity fields: %+v", entries[0])
+	}
+	if !entries[0].Padding || entries[0].PaddingBytes != 4 {
+		t.Errorf("padding identity not preserved: %+v", entries[0])
 	}
 	if entries[0].RxTsNs == 0 {
 		t.Error("RxTsNs must not be zero after packet forwarded")

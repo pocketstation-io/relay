@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,17 +137,23 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	// connCleanup func) so each can be closed independently. Returns
 	// (nil, nil, nil, errorMessage) on failure.
 	type publisherHandles struct {
-		stopRTP chan struct{}
-		closePC func()
-		closeWS func()
+		stopRTP        chan struct{}
+		closePC        func()
+		closeWS        func()
+		// waitGoroutines must be called AFTER closePC and closeWS to ensure
+		// the drainMessages and ICE relay goroutines have fully exited.
+		waitGoroutines func()
 	}
 	connectPublisher := func(label string) (*publisherHandles, string) {
+		var connWg sync.WaitGroup
+
 		conn := dialWS(t, ts)
-		msgs := drainMessages(conn)
+		msgs := drainMessages(conn, &connWg)
 
 		pc, err := api.NewPeerConnection(webrtc.Configuration{})
 		if err != nil {
 			_ = conn.Close()
+			connWg.Wait()
 			return nil, fmt.Sprintf("[%s] new PC: %v", label, err)
 		}
 
@@ -157,24 +164,27 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 		if err != nil {
 			_ = pc.Close()
 			_ = conn.Close()
+			connWg.Wait()
 			return nil, fmt.Sprintf("[%s] new track: %v", label, err)
 		}
 		if _, err := pc.AddTrack(track); err != nil {
 			_ = pc.Close()
 			_ = conn.Close()
+			connWg.Wait()
 			return nil, fmt.Sprintf("[%s] add track: %v", label, err)
 		}
 
 		iceCtx, iceCancel := context.WithTimeout(context.Background(), reconnectMaxLatency)
 		defer iceCancel()
 
-		publishHandshake(t, conn, pc, roomPayload.SourceToken, msgs, reconnectMaxLatency)
+		publishHandshake(t, conn, pc, roomPayload.SourceToken, msgs, reconnectMaxLatency, &connWg)
 
 		dialStart := time.Now()
 		waitICE(iceCtx, t, pc)
 		if iceCtx.Err() != nil {
 			_ = pc.Close()
 			_ = conn.Close()
+			connWg.Wait()
 			return nil, fmt.Sprintf("[%s] ICE connect timeout after %s", label, time.Since(dialStart))
 		}
 
@@ -212,6 +222,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 				_ = conn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 				_ = conn.Close()
 			},
+			waitGoroutines: func() { connWg.Wait() },
 		}, ""
 	}
 
@@ -239,8 +250,9 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 
 		// Tear down current publisher session.
 		close(handles.stopRTP)
-		handles.closeWS()
 		handles.closePC()
+		handles.closeWS()
+		handles.waitGoroutines()
 		t.Logf("soak[reconnect]: publisher disconnected at t=%s (%s)",
 			scheduledAt.Truncate(time.Second), label)
 
@@ -278,8 +290,9 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	// Final cleanup.
 	if handles != nil {
 		close(handles.stopRTP)
-		handles.closeWS()
 		handles.closePC()
+		handles.closeWS()
+		handles.waitGoroutines()
 	}
 
 	// --- Report ---

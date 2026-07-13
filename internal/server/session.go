@@ -9,9 +9,12 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
+	"github.com/pocketstation-io/relay/internal/clocklineage"
+	"github.com/pocketstation-io/relay/internal/downlink"
 	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/signaling"
 	"github.com/pocketstation-io/relay/internal/webhook"
@@ -27,10 +30,11 @@ type session struct {
 	conn *websocket.Conn
 
 	pc         *webrtc.PeerConnection
+	lineage    *clocklineage.Registry
 	room       *graph.RelaySession
 	role       auth.Role
-	busID      graph.BusID  // bus this session publishes to or subscribes from
-	pendingICE []string     // candidates received before PUBLISH/SUBSCRIBE
+	busID      graph.BusID // bus this session publishes to or subscribes from
+	pendingICE []string    // candidates received before PUBLISH/SUBSCRIBE
 
 	// done is closed by cleanup() to signal teardown to scoped goroutines.
 	done     chan struct{}
@@ -39,8 +43,8 @@ type session struct {
 	// slotReserved and subscriptionRegistered guard the subscription lifecycle.
 	// slotReserved: true between TryReserveSlot and ReleaseSlot.
 	// subscriptionRegistered: true after AddSubscription succeeds (deferred to DTLS-complete).
-	slotReserved             atomic.Bool
-	subscriptionRegistered   atomic.Bool
+	slotReserved           atomic.Bool
+	subscriptionRegistered atomic.Bool
 }
 
 func (s *session) run() {
@@ -80,6 +84,8 @@ func (s *session) run() {
 			s.handleJoin(msg)
 		case signaling.TypeIce:
 			s.handleICE(msg)
+		case signaling.TypeSDPAnswer:
+			s.handleSDPAnswer(msg)
 		case signaling.TypeKeyExchange:
 			s.handleKeyExchange(msg)
 		case signaling.TypeLatencyReport:
@@ -101,20 +107,24 @@ func (s *session) cleanup() {
 	if s.room != nil {
 		switch s.role {
 		case auth.RoleSubscriber, auth.RoleListener:
-			s.room.RemoveSubscription(s.id)
 			if s.slotReserved.Swap(false) {
 				s.room.ReleaseSlot()
 			}
 			if s.subscriptionRegistered.Load() {
+				s.room.RemoveSubscription(s.id)
 				s.srv.Metrics.ListenerCount.Add(-1)
+				s.srv.broadcastSessionState(s.room)
 				if s.srv.callbackClient != nil {
 					go s.srv.callbackClient.PushListenerLeave(s.room.ID)
 				}
+			} else {
+				s.room.RemoveSubscription(s.id)
 			}
 		case auth.RoleSource:
 			if s.srv.callbackClient != nil {
 				go s.srv.callbackClient.PushSourceActive(s.room.ID, false)
 			}
+			s.srv.broadcastSessionState(s.room)
 		}
 		s.srv.webhookDispatcher.Send(webhook.Event{
 			Type:      webhook.EventSessionEnded,
@@ -201,23 +211,39 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 		"bus_id", busID,
 	)
 
-	pc, err := s.newPeerConnection()
+	pc, lineage, err := s.newPeerConnection()
 	if err != nil {
 		s.sendError(signaling.ErrCodePCError, "failed to create peer connection")
 		return
 	}
 	s.pc = pc
+	s.lineage = lineage
+	var localDescriptionSDP string
 
 	switch msg.Type {
 	case signaling.TypePublish:
+		if msg.SDPOffer == "" {
+			if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+				Direction: webrtc.RTPTransceiverDirectionRecvonly,
+			}); err != nil {
+				s.sendError(signaling.ErrCodeTrackError, "failed to add publisher audio transceiver")
+				return
+			}
+		}
 		sessionIDForCallback := sessionID
 		sessionIDForWebhook := s.id
 		busIDForLoop := busID
-		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			rm.SetSource(busIDForLoop, busRoleFor(busIDForLoop), &trackSource{track: track}, func() { _ = pc.Close() })
+		pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+			var timeline *clocklineage.Timeline
+			if lineage != nil {
+				timeline = lineage.Remote(uint32(track.SSRC()))
+			}
+			go drainPublisherRTCP(receiver)
+			rm.SetSource(busIDForLoop, busRoleFor(busIDForLoop), &trackSource{track: track, timeline: timeline}, func() { _ = pc.Close() })
 			if s.srv.callbackClient != nil {
 				go s.srv.callbackClient.PushSourceActive(sessionIDForCallback, true)
 			}
+			s.srv.broadcastSessionState(rm)
 			s.srv.webhookDispatcher.Send(webhook.Event{
 				Type:      webhook.EventSessionStarted,
 				RoomID:    sessionIDForCallback,
@@ -250,7 +276,10 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			return
 		}
 
-		// Gate AddSubscription on DTLS-complete to eliminate srtpWriterFuture
+		hintState := s.srv.roomCodecHintState(sessionID)
+		restartState := s.srv.roomICERestartState(sessionID)
+
+		// Gate AddDownlink on DTLS-complete to eliminate srtpWriterFuture
 		// silent drops (same fix as the original listener gate).
 		pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 			slog.Info("subscriber pc state", "session_id", s.id, "state", state.String())
@@ -270,13 +299,58 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 			if redEnabled() {
 				sub = newREDListener(audioTrack, opusPayloadType)
 			}
-			if err := rm.AddSubscription(s.id, s.busID, sub); err != nil {
+
+			// Create the Downlink first so the FeedbackReader writes RTCP metrics
+			// (jitter, loss, nack) into the same SenderStats that Snapshot reads.
+			dl := downlink.NewForwardingDownlink(s.id, sub, nil)
+			dl.ConfigureExtensions(localDescriptionSDP)
+			if lineage != nil {
+				parameters := sender.GetParameters()
+				if len(parameters.Encodings) > 0 {
+					dl.SetSenderTimeline(lineage.Local(uint32(parameters.Encodings[0].SSRC)))
+				}
+			}
+
+			onRecvReport := func(fractionLost float64) {
+				observedRTT := false
+				for _, stat := range pc.GetStats() {
+					remote, ok := stat.(webrtc.RemoteInboundRTPStreamStats)
+					if ok && remote.RoundTripTimeMeasurements > 0 {
+						dl.ObserveRTT(time.Duration(remote.RoundTripTime * float64(time.Second)))
+						observedRTT = true
+						break
+					}
+				}
+				if !observedRTT {
+					rttUs := dl.Stats().RttLastUs.Load()
+					if rttUs >= 0 {
+						dl.ObserveRTT(time.Duration(rttUs) * time.Microsecond)
+					}
+				}
+				hint := bitrateForLoss(fractionLost)
+				s.srv.maybeEmitCodecHint(sessionID, hint, hintState)
+				s.srv.maybeEmitICERestart(sessionID, fractionLost, restartState)
+			}
+			var onNACK downlink.NackCallback
+			if !redEnabled() {
+				onNACK = dl.HandleNACK
+			}
+			fr := downlink.StartFeedbackReader(sender, dl.Stats(), onRecvReport, onNACK)
+			dl.SetFeedback(fr)
+
+			if err := rm.AddDownlink(s.id, s.busID, dl); err != nil {
 				s.subscriptionRegistered.Store(false)
-				slog.Warn("AddSubscription post-connect failed", "session_id", s.id, "err", err)
+				dl.StopPacer()
+				// Do NOT call fr.Stop() here: ReadRTCP may be blocked, and Stop()
+				// waits for the goroutine to exit. Calling Stop() before pc.Close()
+				// can deadlock (the goroutine is stuck in ReadRTCP until the PC
+				// closes). The goroutine will exit naturally when the PC is closed.
+				slog.Warn("AddDownlink post-connect failed", "session_id", s.id, "err", err)
 				return
 			}
-			slog.Info("AddSubscription ok", "session_id", s.id)
+			slog.Info("AddDownlink ok", "session_id", s.id)
 			s.srv.Metrics.ListenerCount.Add(1)
+			s.srv.broadcastSessionState(rm)
 
 			go func() {
 				ticker := time.NewTicker(2 * time.Second)
@@ -315,33 +389,44 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 				SFrameKey: existingKey,
 			})
 		}
-
-		hintState    := s.srv.roomCodecHintState(sessionID)
-		restartState := s.srv.roomICERestartState(sessionID)
-		s.srv.startRTCPReader(sender, sessionID, hintState, restartState)
 	}
 
-	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: msg.SDPOffer}
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		s.sendError(signaling.ErrCodeSDPError, "failed to set remote description")
-		return
+	if msg.SDPOffer == "" {
+		offer, offerErr := pc.CreateOffer(nil)
+		if offerErr != nil {
+			s.sendError(signaling.ErrCodeSDPError, "failed to create offer")
+			return
+		}
+		if setErr := pc.SetLocalDescription(offer); setErr != nil {
+			s.sendError(signaling.ErrCodeSDPError, "failed to set local description")
+			return
+		}
+		localDescriptionSDP = offer.SDP
+		_ = s.send(signaling.ServerMessage{
+			Type: signaling.TypeSDPOffer, SDPOffer: offer.SDP,
+			SessionID: sessionID, BusID: busID,
+		})
+	} else {
+		offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: msg.SDPOffer}
+		if err := pc.SetRemoteDescription(offer); err != nil {
+			s.sendError(signaling.ErrCodeSDPError, "failed to set remote description")
+			return
+		}
+		answer, answerErr := pc.CreateAnswer(nil)
+		if answerErr != nil {
+			s.sendError(signaling.ErrCodeSDPError, "failed to create answer")
+			return
+		}
+		if err := pc.SetLocalDescription(answer); err != nil {
+			s.sendError(signaling.ErrCodeSDPError, "failed to set local description")
+			return
+		}
+		localDescriptionSDP = answer.SDP
+		_ = s.send(signaling.ServerMessage{
+			Type: signaling.TypeSDPAnswer, SDPAnswer: answer.SDP,
+			SessionID: sessionID, BusID: busID,
+		})
 	}
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		s.sendError(signaling.ErrCodeSDPError, "failed to create answer")
-		return
-	}
-	if err := pc.SetLocalDescription(answer); err != nil {
-		s.sendError(signaling.ErrCodeSDPError, "failed to set local description")
-		return
-	}
-
-	_ = s.send(signaling.ServerMessage{
-		Type:              signaling.TypeSDPAnswer,
-		SDPAnswer:         answer.SDP,
-		SessionID:         sessionID,
-		BusID:             busID,
-	})
 	_ = s.send(signaling.ServerMessage{
 		Type:              signaling.TypeSessionState,
 		SourceActive:      rm.SourceActive(),
@@ -357,13 +442,29 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 }
 
 func (s *session) handleICE(msg signaling.ClientMessage) {
-	if s.pc == nil {
+	if s.pc == nil || s.pc.RemoteDescription() == nil {
 		s.pendingICE = append(s.pendingICE, msg.Candidate)
 		return
 	}
 	if err := s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: msg.Candidate}); err != nil {
 		s.sendError(signaling.ErrCodeICEError, err.Error())
 	}
+}
+
+func (s *session) handleSDPAnswer(msg signaling.ClientMessage) {
+	if s.pc == nil || s.pc.LocalDescription() == nil || s.pc.RemoteDescription() != nil {
+		s.sendError(signaling.ErrCodeSDPError, "SDP_ANSWER is not expected")
+		return
+	}
+	answer := webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: msg.SDPAnswer}
+	if err := s.pc.SetRemoteDescription(answer); err != nil {
+		s.sendError(signaling.ErrCodeSDPError, "failed to set remote answer")
+		return
+	}
+	for _, candidate := range s.pendingICE {
+		_ = s.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: candidate})
+	}
+	s.pendingICE = nil
 }
 
 func (s *session) handleLatencyReport(msg signaling.ClientMessage) {
@@ -408,6 +509,9 @@ const opusPayloadType = 111
 
 // opusStereoFmtp is the SDP fmtp line the relay advertises for Opus.
 // Stereo on both legs required or Chrome silently downmixes music to mono.
+// In-band FEC remains enabled for the ordinary Opus path. Disabling it made the
+// loss benchmark codec-inequivalent to the LiveKit control and removed the
+// receiver's only recovery mechanism when RED is not negotiated.
 const opusStereoFmtp = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=131072"
 
 // redMimeType / redPayloadType identify the RFC 2198 RED codec the relay offers
@@ -417,21 +521,21 @@ const (
 	redPayloadType = 63
 )
 
-// newMediaEngineWithAudioNACK returns an audio-only MediaEngine with stereo Opus
-// + NACK. When RED is enabled, audio/red is registered first so it is preferred.
-func newMediaEngineWithAudioNACK() (*webrtc.MediaEngine, error) {
+// NewMediaEngineWithAudioNACK returns an audio-only MediaEngine with stereo Opus
+// + NACK. Opus remains first in SDP; Chrome treats RED as an associated repair
+// codec and can reject audio NACK or decode silence when RED is offered first.
+// Exported so that integration tests can build a client API with the same codec
+// configuration as the server — ensuring SDP negotiation succeeds under RELAY_ENABLE_RED.
+func NewMediaEngineWithAudioNACK() (*webrtc.MediaEngine, error) {
 	m := &webrtc.MediaEngine{}
-
-	if redEnabled() {
-		if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-			RTPCodecCapability: webrtc.RTPCodecCapability{
-				MimeType:    redMimeType,
-				ClockRate:   48000,
-				Channels:    2,
-				SDPFmtpLine: strconv.Itoa(opusPayloadType) + "/" + strconv.Itoa(opusPayloadType),
-			},
-			PayloadType: redPayloadType,
-		}, webrtc.RTPCodecTypeAudio); err != nil {
+	for _, uri := range []string{
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time",
+	} {
+		if err := m.RegisterHeaderExtension(
+			webrtc.RTPHeaderExtensionCapability{URI: uri},
+			webrtc.RTPCodecTypeAudio,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -448,18 +552,59 @@ func newMediaEngineWithAudioNACK() (*webrtc.MediaEngine, error) {
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
+	if redEnabled() {
+		if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:     redMimeType,
+				ClockRate:    48000,
+				Channels:     2,
+				SDPFmtpLine:  strconv.Itoa(opusPayloadType) + "/" + strconv.Itoa(opusPayloadType),
+				RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}},
+			},
+			PayloadType: redPayloadType,
+		}, webrtc.RTPCodecTypeAudio); err != nil {
+			return nil, err
+		}
+	}
 	return m, nil
 }
 
-func newInterceptorRegistry(m *webrtc.MediaEngine) (*interceptor.Registry, error) {
-	i := &interceptor.Registry{}
-	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
-		return nil, err
-	}
-	return i, nil
+// NewInterceptorRegistry builds the relay interceptor registry for m.
+// Subscriber-hop NACK response is intentionally owned by downlink.Downlink;
+// registering Pion's responder here would retransmit every requested packet
+// twice. Pion's generator remains enabled for source-hop loss recovery.
+func NewInterceptorRegistry(m *webrtc.MediaEngine) (*interceptor.Registry, error) {
+	registry, _, err := newInterceptorRegistryWithClockLineage(m)
+	return registry, err
 }
 
-func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
+func newInterceptorRegistryWithClockLineage(m *webrtc.MediaEngine) (*interceptor.Registry, *clocklineage.Registry, error) {
+	i := &interceptor.Registry{}
+	lineage := clocklineage.NewRegistry()
+	i.Add(&clocklineage.InterceptorFactory{Registry: lineage})
+
+	nackGenerator, err := nack.NewGeneratorInterceptor()
+	if err != nil {
+		return nil, nil, err
+	}
+	i.Add(nackGenerator)
+
+	if err := webrtc.ConfigureRTCPReports(i); err != nil {
+		return nil, nil, err
+	}
+	if err := webrtc.ConfigureSimulcastExtensionHeaders(m); err != nil {
+		return nil, nil, err
+	}
+	if err := webrtc.ConfigureTWCCSender(m, i); err != nil {
+		return nil, nil, err
+	}
+	if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, i); err != nil {
+		return nil, nil, err
+	}
+	return i, lineage, nil
+}
+
+func (s *session) newPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
 	iceServers := s.srv.iceServers
 	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
@@ -467,10 +612,30 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 	pcCfg := webrtc.Configuration{ICEServers: iceServers}
 
 	var (
-		pc  *webrtc.PeerConnection
-		err error
+		pc      *webrtc.PeerConnection
+		lineage *clocklineage.Registry
+		err     error
 	)
-	if s.srv.api != nil {
+	if s.srv.settingEngine != nil {
+		// Use the caller-supplied SettingEngine but always build a fresh
+		// MediaEngine via NewMediaEngineWithAudioNACK so that RED codec
+		// registration is never bypassed (fixes test isolation when RELAY_ENABLE_RED=1).
+		m, mErr := NewMediaEngineWithAudioNACK()
+		if mErr != nil {
+			return nil, nil, mErr
+		}
+		ir, observedLineage, irErr := newInterceptorRegistryWithClockLineage(m)
+		if irErr != nil {
+			return nil, nil, irErr
+		}
+		lineage = observedLineage
+		api := webrtc.NewAPI(
+			webrtc.WithSettingEngine(*s.srv.settingEngine),
+			webrtc.WithMediaEngine(m),
+			webrtc.WithInterceptorRegistry(ir),
+		)
+		pc, err = api.NewPeerConnection(pcCfg)
+	} else if s.srv.api != nil {
 		pc, err = s.srv.api.NewPeerConnection(pcCfg)
 	} else if s.srv.iceTCPMux != nil || s.srv.iceUDPMux != nil || len(s.srv.nat1to1IPs) > 0 {
 		se := webrtc.SettingEngine{}
@@ -483,14 +648,15 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 		if len(s.srv.nat1to1IPs) > 0 {
 			se.SetNAT1To1IPs(s.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)
 		}
-		m, mErr := newMediaEngineWithAudioNACK()
+		m, mErr := NewMediaEngineWithAudioNACK()
 		if mErr != nil {
-			return nil, mErr
+			return nil, nil, mErr
 		}
-		ir, irErr := newInterceptorRegistry(m)
+		ir, observedLineage, irErr := newInterceptorRegistryWithClockLineage(m)
 		if irErr != nil {
-			return nil, irErr
+			return nil, nil, irErr
 		}
+		lineage = observedLineage
 		api := webrtc.NewAPI(
 			webrtc.WithSettingEngine(se),
 			webrtc.WithMediaEngine(m),
@@ -498,14 +664,15 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 		)
 		pc, err = api.NewPeerConnection(pcCfg)
 	} else {
-		m, mErr := newMediaEngineWithAudioNACK()
+		m, mErr := NewMediaEngineWithAudioNACK()
 		if mErr != nil {
-			return nil, mErr
+			return nil, nil, mErr
 		}
-		ir, irErr := newInterceptorRegistry(m)
+		ir, observedLineage, irErr := newInterceptorRegistryWithClockLineage(m)
 		if irErr != nil {
-			return nil, irErr
+			return nil, nil, irErr
 		}
+		lineage = observedLineage
 		api := webrtc.NewAPI(
 			webrtc.WithMediaEngine(m),
 			webrtc.WithInterceptorRegistry(ir),
@@ -513,7 +680,7 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 		pc, err = api.NewPeerConnection(pcCfg)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -524,7 +691,7 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, error) {
 			Candidate: c.ToJSON().Candidate,
 		})
 	})
-	return pc, nil
+	return pc, lineage, nil
 }
 
 func (s *session) send(msg signaling.ServerMessage) error {
@@ -543,10 +710,24 @@ func (s *session) sendError(code signaling.ErrorCode, message string) {
 
 // trackSource adapts *webrtc.TrackRemote to graph.SourceSession.
 type trackSource struct {
-	track *webrtc.TrackRemote
+	track    *webrtc.TrackRemote
+	timeline *clocklineage.Timeline
 }
 
 func (t *trackSource) ReadRTP() (*rtp.Packet, error) {
 	pkt, _, err := t.track.ReadRTP()
 	return pkt, err
+}
+
+func (t *trackSource) ClockLineage() *clocklineage.Timeline { return t.timeline }
+
+// drainPublisherRTCP activates Pion's incoming RTCP interceptor chain. Sender
+// Reports are retained by clocklineage.InterceptorFactory; other source-hop
+// control packets remain available to Pion's configured interceptors.
+func drainPublisherRTCP(receiver *webrtc.RTPReceiver) {
+	for {
+		if _, _, err := receiver.ReadRTCP(); err != nil {
+			return
+		}
+	}
 }
