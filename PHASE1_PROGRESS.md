@@ -51,6 +51,12 @@ The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
 
 ## Completed
 
+### Fly UDP reply-path fix (2026-07-13)
+
+- Bind the shared ICE UDP mux to `fly-global-services` on Fly instead of `0.0.0.0`.
+- Real macOS exact-process proof connected over the deployed IAD relay and sent 499 RTP packets in 10 seconds.
+- Bounded relay race suites passed for `cmd/relay-server`, `internal/server`, `internal/graph`, and `internal/downlink`.
+
 ### Task 1.1 — Room → GraphSession migration (DONE, audited 2026-07-02)
 
 **Waves:** 13, 13b, 13c (pre-existing commits on test/floodtest-100m-smoke)

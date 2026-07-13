@@ -117,8 +117,9 @@ func main() {
 	// zero media. Pinning the socket to the advertised IP makes egress match the
 	// candidate. Falls back to 0.0.0.0 when no public IP is configured.
 	//
-	// On fly.io the public IP is on the anycast proxy, not assignable to a local
-	// socket. Bind to 0.0.0.0 there; fly.io routes inbound UDP by port.
+	// On Fly.io, UDP must bind to the special fly-global-services address so
+	// proxy replies retain the public source address. INADDR_ANY is not valid
+	// for this path even though it accepts the local bind.
 	udpBindIP := net.IPv4zero
 	onFlyIO := os.Getenv("FLY_APP_NAME") != ""
 	if len(cfg.NAT1To1IPs) > 0 && !onFlyIO {
@@ -126,12 +127,14 @@ func main() {
 			udpBindIP = ip
 		}
 	}
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{
-		IP:   udpBindIP,
-		Port: getenvInt("ICE_UDP_PORT", 0),
-	})
+	udpNetwork, udpAddress := iceUDPListenAddress(
+		onFlyIO,
+		udpBindIP,
+		getenvInt("ICE_UDP_PORT", 0),
+	)
+	udpConn, err := net.ListenPacket(udpNetwork, udpAddress)
 	if err != nil {
-		slog.Error("failed to bind ICE-UDP socket", "error", err)
+		slog.Error("failed to bind ICE-UDP socket", "addr", udpAddress, "error", err)
 		os.Exit(1)
 	}
 
@@ -139,11 +142,16 @@ func main() {
 	// packet drops. 2 MiB matches typical production SFU tuning (OpenAI,
 	// LiveKit). The OS may cap this below the request; that is fine.
 	const udpRecvBufBytes = 2 * 1024 * 1024
-	if err := udpConn.SetReadBuffer(udpRecvBufBytes); err != nil {
-		slog.Warn("failed to set UDP read buffer", "target_bytes", udpRecvBufBytes, "error", err)
-	}
-	if err := udpConn.SetWriteBuffer(udpRecvBufBytes); err != nil {
-		slog.Warn("failed to set UDP write buffer", "target_bytes", udpRecvBufBytes, "error", err)
+	if bufferedConn, ok := udpConn.(interface {
+		SetReadBuffer(int) error
+		SetWriteBuffer(int) error
+	}); ok {
+		if err := bufferedConn.SetReadBuffer(udpRecvBufBytes); err != nil {
+			slog.Warn("failed to set UDP read buffer", "target_bytes", udpRecvBufBytes, "error", err)
+		}
+		if err := bufferedConn.SetWriteBuffer(udpRecvBufBytes); err != nil {
+			slog.Warn("failed to set UDP write buffer", "target_bytes", udpRecvBufBytes, "error", err)
+		}
 	}
 
 	cfg.ICEUDPMux = webrtc.NewICEUDPMux(nil, udpConn)
@@ -175,6 +183,13 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("relay stopped")
+}
+
+func iceUDPListenAddress(onFlyIO bool, bindIP net.IP, port int) (network, address string) {
+	if onFlyIO {
+		return "udp", net.JoinHostPort("fly-global-services", strconv.Itoa(port))
+	}
+	return "udp4", net.JoinHostPort(bindIP.String(), strconv.Itoa(port))
 }
 
 // setupTURN starts the embedded TURN server when TURN_PUBLIC_IP is configured.
