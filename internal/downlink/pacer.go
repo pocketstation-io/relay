@@ -62,15 +62,16 @@ func (h *cadenceSpacingHistogram) percentileMs(percentile float64) float64 {
 }
 
 const (
-	audioClockRateHz         = uint64(48_000)
-	defaultPacerCapacity     = 32
-	defaultPacerMaxQueueAge  = 120 * time.Millisecond
-	defaultPacerTargetDelay  = 10 * time.Millisecond
-	defaultPacerInitialWait  = 10 * time.Millisecond
-	defaultPacerReorderWait  = 60 * time.Millisecond
-	defaultPacerMaxLead      = 250 * time.Millisecond
-	defaultPacerMaxLateness  = 40 * time.Millisecond
-	defaultPacerResetSamples = uint32(audioClockRateHz * 5)
+	audioClockRateHz            = uint64(48_000)
+	defaultPacerCapacity        = 32
+	defaultPacerMaxQueueAge     = 120 * time.Millisecond
+	defaultPacerTargetDelay     = 10 * time.Millisecond
+	defaultPacerInitialWait     = 10 * time.Millisecond
+	defaultPacerReorderWait     = 60 * time.Millisecond
+	defaultForwardReorderWaitMs = 40 * time.Millisecond
+	defaultPacerMaxLead         = 250 * time.Millisecond
+	defaultPacerMaxLateness     = 40 * time.Millisecond
+	defaultPacerResetSamples    = uint32(audioClockRateHz * 5)
 )
 
 type packetWriter func(*rtp.Packet) error
@@ -89,36 +90,41 @@ type Pacer interface {
 
 // PacerSnapshot is a point-in-time view of bounded downlink worker state.
 type PacerSnapshot struct {
-	Mode                 string
-	EnqueuedCount        uint64
-	SentCount            uint64
-	QueueFullDrops       uint64
-	StaleDrops           uint64
-	QueueDepth           uint64
-	QueuePeak            uint64
-	MaxQueueAgeNs        uint64
-	QueueAgeP95Ms        float64
-	LastSpacingNs        uint64
-	SpacingP50Ms         float64
-	SpacingP95Ms         float64
-	MaxSpacingNs         uint64
-	MaxTimerWaitNs       uint64
-	MaxTimerOversleepNs  uint64
-	MaxWriterDurationNs  uint64
-	WriterBlockedCount   uint64
-	PaddingPacketCount   uint64
-	LatePacketDropCount  uint64
-	LatePaddingDropCount uint64
-	LateMediaDropCount   uint64
-	GapTimeoutCount      uint64
-	RecoveryPacketCount  uint64
-	TimelineResets       uint64
-	NackQueueDrops       uint64
-	NackCacheHits        uint64
-	NackCacheMisses      uint64
-	NackThrottled        uint64
-	RetransmitSentCount  uint64
-	RetransmitErrorCount uint64
+	Mode                              string
+	EnqueuedCount                     uint64
+	SentCount                         uint64
+	QueueFullDrops                    uint64
+	StaleDrops                        uint64
+	QueueDepth                        uint64
+	QueuePeak                         uint64
+	MaxQueueAgeNs                     uint64
+	QueueAgeP95Ms                     float64
+	LastSpacingNs                     uint64
+	SpacingP50Ms                      float64
+	SpacingP95Ms                      float64
+	MaxSpacingNs                      uint64
+	MaxTimerWaitNs                    uint64
+	MaxTimerOversleepNs               uint64
+	MaxWriterDurationNs               uint64
+	WriterBlockedCount                uint64
+	PaddingPacketCount                uint64
+	SourcePaddingStrippedCount        uint64
+	LatePacketDropCount               uint64
+	LatePaddingDropCount              uint64
+	LateMediaDropCount                uint64
+	GapTimeoutCount                   uint64
+	RecoveryPacketCount               uint64
+	TimelineResets                    uint64
+	NackQueueDrops                    uint64
+	NackCacheHits                     uint64
+	NackCacheMisses                   uint64
+	NackThrottled                     uint64
+	RetransmitSentCount               uint64
+	RetransmitErrorCount              uint64
+	OutputSequenceDiscontinuityCount  uint64
+	OutputTimestampDiscontinuityCount uint64
+	OutputMaxSequenceDelta            uint64
+	OutputMaxTimestampDeltaSamples    uint64
 }
 
 type passThroughPacer struct {
@@ -148,6 +154,13 @@ type pacedPacket struct {
 	source           SourceIdentity
 	captureTime      time.Time
 	captureTimeKnown bool
+}
+
+type forwardOutputState struct {
+	haveOutput                 bool
+	lastOutputSequence         uint16
+	lastOutputTimestampSamples uint32
+	lastSendAtNs               int64
 }
 
 type cadenceTimeline struct {
@@ -234,35 +247,40 @@ type AudioCadencePacer struct {
 	stopped           atomic.Bool
 	maxQueueAge       time.Duration
 
-	enqueuedCount        atomic.Uint64
-	completedCount       atomic.Uint64
-	sentCount            atomic.Uint64
-	queueFullDrops       atomic.Uint64
-	staleDrops           atomic.Uint64
-	queuePeak            atomic.Uint64
-	maxQueueAgeNs        atomic.Uint64
-	queueAgeHist         cadenceSpacingHistogram
-	lastSpacingNs        atomic.Uint64
-	maxSpacingNs         atomic.Uint64
-	spacingHist          cadenceSpacingHistogram
-	maxTimerWaitNs       atomic.Uint64
-	maxTimerOversleepNs  atomic.Uint64
-	maxWriterDurationNs  atomic.Uint64
-	writerBlockedCount   atomic.Uint64
-	paddingPacketCount   atomic.Uint64
-	latePacketDropCount  atomic.Uint64
-	latePaddingDropCount atomic.Uint64
-	lateMediaDropCount   atomic.Uint64
-	gapTimeoutCount      atomic.Uint64
-	recoveryPacketCount  atomic.Uint64
-	timelineResets       atomic.Uint64
-	nackQueueDrops       atomic.Uint64
-	nackCacheHits        atomic.Uint64
-	nackCacheMisses      atomic.Uint64
-	nackThrottled        atomic.Uint64
-	retransmitSentCount  atomic.Uint64
-	retransmitErrorCount atomic.Uint64
-	retransmissionCache  retransmissionCache
+	enqueuedCount                     atomic.Uint64
+	completedCount                    atomic.Uint64
+	sentCount                         atomic.Uint64
+	queueFullDrops                    atomic.Uint64
+	staleDrops                        atomic.Uint64
+	queuePeak                         atomic.Uint64
+	maxQueueAgeNs                     atomic.Uint64
+	queueAgeHist                      cadenceSpacingHistogram
+	lastSpacingNs                     atomic.Uint64
+	maxSpacingNs                      atomic.Uint64
+	spacingHist                       cadenceSpacingHistogram
+	maxTimerWaitNs                    atomic.Uint64
+	maxTimerOversleepNs               atomic.Uint64
+	maxWriterDurationNs               atomic.Uint64
+	writerBlockedCount                atomic.Uint64
+	paddingPacketCount                atomic.Uint64
+	sourcePaddingStrippedCount        atomic.Uint64
+	latePacketDropCount               atomic.Uint64
+	latePaddingDropCount              atomic.Uint64
+	lateMediaDropCount                atomic.Uint64
+	gapTimeoutCount                   atomic.Uint64
+	recoveryPacketCount               atomic.Uint64
+	timelineResets                    atomic.Uint64
+	nackQueueDrops                    atomic.Uint64
+	nackCacheHits                     atomic.Uint64
+	nackCacheMisses                   atomic.Uint64
+	nackThrottled                     atomic.Uint64
+	retransmitSentCount               atomic.Uint64
+	retransmitErrorCount              atomic.Uint64
+	outputSequenceDiscontinuityCount  atomic.Uint64
+	outputTimestampDiscontinuityCount atomic.Uint64
+	outputMaxSequenceDelta            atomic.Uint64
+	outputMaxTimestampDeltaSamples    atomic.Uint64
+	retransmissionCache               retransmissionCache
 }
 
 func newAudioCadencePacer(write packetWriter) *AudioCadencePacer {
@@ -368,36 +386,41 @@ func (p *AudioCadencePacer) Snapshot() PacerSnapshot {
 	enqueued := p.enqueuedCount.Load()
 	completed := p.completedCount.Load()
 	return PacerSnapshot{
-		Mode:                 p.mode(),
-		EnqueuedCount:        p.enqueuedCount.Load(),
-		SentCount:            p.sentCount.Load(),
-		QueueFullDrops:       p.queueFullDrops.Load(),
-		StaleDrops:           p.staleDrops.Load(),
-		QueueDepth:           enqueued - min(enqueued, completed),
-		QueuePeak:            p.queuePeak.Load(),
-		MaxQueueAgeNs:        p.maxQueueAgeNs.Load(),
-		QueueAgeP95Ms:        p.queueAgeHist.percentileMs(0.95),
-		LastSpacingNs:        p.lastSpacingNs.Load(),
-		SpacingP50Ms:         p.spacingHist.percentileMs(0.50),
-		SpacingP95Ms:         p.spacingHist.percentileMs(0.95),
-		MaxSpacingNs:         p.maxSpacingNs.Load(),
-		MaxTimerWaitNs:       p.maxTimerWaitNs.Load(),
-		MaxTimerOversleepNs:  p.maxTimerOversleepNs.Load(),
-		MaxWriterDurationNs:  p.maxWriterDurationNs.Load(),
-		WriterBlockedCount:   p.writerBlockedCount.Load(),
-		PaddingPacketCount:   p.paddingPacketCount.Load(),
-		LatePacketDropCount:  p.latePacketDropCount.Load(),
-		LatePaddingDropCount: p.latePaddingDropCount.Load(),
-		LateMediaDropCount:   p.lateMediaDropCount.Load(),
-		GapTimeoutCount:      p.gapTimeoutCount.Load(),
-		RecoveryPacketCount:  p.recoveryPacketCount.Load(),
-		TimelineResets:       p.timelineResets.Load(),
-		NackQueueDrops:       p.nackQueueDrops.Load(),
-		NackCacheHits:        p.nackCacheHits.Load(),
-		NackCacheMisses:      p.nackCacheMisses.Load(),
-		NackThrottled:        p.nackThrottled.Load(),
-		RetransmitSentCount:  p.retransmitSentCount.Load(),
-		RetransmitErrorCount: p.retransmitErrorCount.Load(),
+		Mode:                              p.mode(),
+		EnqueuedCount:                     p.enqueuedCount.Load(),
+		SentCount:                         p.sentCount.Load(),
+		QueueFullDrops:                    p.queueFullDrops.Load(),
+		StaleDrops:                        p.staleDrops.Load(),
+		QueueDepth:                        enqueued - min(enqueued, completed),
+		QueuePeak:                         p.queuePeak.Load(),
+		MaxQueueAgeNs:                     p.maxQueueAgeNs.Load(),
+		QueueAgeP95Ms:                     p.queueAgeHist.percentileMs(0.95),
+		LastSpacingNs:                     p.lastSpacingNs.Load(),
+		SpacingP50Ms:                      p.spacingHist.percentileMs(0.50),
+		SpacingP95Ms:                      p.spacingHist.percentileMs(0.95),
+		MaxSpacingNs:                      p.maxSpacingNs.Load(),
+		MaxTimerWaitNs:                    p.maxTimerWaitNs.Load(),
+		MaxTimerOversleepNs:               p.maxTimerOversleepNs.Load(),
+		MaxWriterDurationNs:               p.maxWriterDurationNs.Load(),
+		WriterBlockedCount:                p.writerBlockedCount.Load(),
+		PaddingPacketCount:                p.paddingPacketCount.Load(),
+		SourcePaddingStrippedCount:        p.sourcePaddingStrippedCount.Load(),
+		LatePacketDropCount:               p.latePacketDropCount.Load(),
+		LatePaddingDropCount:              p.latePaddingDropCount.Load(),
+		LateMediaDropCount:                p.lateMediaDropCount.Load(),
+		GapTimeoutCount:                   p.gapTimeoutCount.Load(),
+		RecoveryPacketCount:               p.recoveryPacketCount.Load(),
+		TimelineResets:                    p.timelineResets.Load(),
+		NackQueueDrops:                    p.nackQueueDrops.Load(),
+		NackCacheHits:                     p.nackCacheHits.Load(),
+		NackCacheMisses:                   p.nackCacheMisses.Load(),
+		NackThrottled:                     p.nackThrottled.Load(),
+		RetransmitSentCount:               p.retransmitSentCount.Load(),
+		RetransmitErrorCount:              p.retransmitErrorCount.Load(),
+		OutputSequenceDiscontinuityCount:  p.outputSequenceDiscontinuityCount.Load(),
+		OutputTimestampDiscontinuityCount: p.outputTimestampDiscontinuityCount.Load(),
+		OutputMaxSequenceDelta:            p.outputMaxSequenceDelta.Load(),
+		OutputMaxTimestampDeltaSamples:    p.outputMaxTimestampDeltaSamples.Load(),
 	}
 }
 
@@ -525,9 +548,14 @@ func (p *AudioCadencePacer) run() {
 		copy(pending[:], pending[1:pendingLen])
 		pendingLen--
 		{
+			if item.packet.Padding {
+				p.paddingPacketCount.Add(1)
+			}
+			if stripSourceMediaPadding(item.packet) {
+				p.sourcePaddingStrippedCount.Add(1)
+			}
 			switch forwarder.release(item.packet, item.extSeq) {
 			case dropPadding:
-				p.paddingPacketCount.Add(1)
 				p.completedCount.Add(1)
 				continue
 			case dropLate:
@@ -616,69 +644,191 @@ func (p *AudioCadencePacer) run() {
 	}
 }
 
-// runForward serializes subscriber writes without imposing a relay cadence or
-// waiting for missing source-hop packets. Original RTP sequence numbers are
-// preserved so downstream NACK can distinguish real loss, and late source-hop
-// repairs remain eligible for forwarding instead of being hidden or dropped.
+// runForward serializes subscriber writes without imposing a relay cadence.
+// A bounded gap-only hold restores short ingress reordering while ordered
+// packets still pass immediately. Real gaps and late repairs retain their RTP
+// sequence numbers so downstream NACK can distinguish loss from continuity.
 func (p *AudioCadencePacer) runForward() {
-	var lastSendAtNs int64
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
 	var translator rtpForwardTranslator
+	var unwrapper sequenceUnwrapper
+	var output forwardOutputState
+	var pending [defaultPacerCapacity + 1]pacedPacket
+	pendingLen := 0
+	var haveReleased bool
+	var lastReleasedExtSeq int64
+	defer func() { p.completedCount.Add(uint64(pendingLen)) }()
+
 	for {
-		select {
-		case <-p.done:
-			return
-		case seq := <-p.nacks:
-			p.retransmit(seq)
-		case item := <-p.queue:
-			queueAgeNs := time.Since(item.enqueuedAt).Nanoseconds()
-			queueAge := uint64(max(queueAgeNs, 0))
-			p.queueAgeHist.observe(queueAgeNs)
-			for oldest := p.maxQueueAgeNs.Load(); queueAge > oldest; oldest = p.maxQueueAgeNs.Load() {
-				if p.maxQueueAgeNs.CompareAndSwap(oldest, queueAge) {
-					break
+		if pendingLen == 0 {
+			select {
+			case <-p.done:
+				return
+			case seq := <-p.nacks:
+				p.retransmit(seq)
+				continue
+			case pending[0] = <-p.queue:
+				p.prepareForwardItem(&pending[0], &translator, &unwrapper)
+				pendingLen = 1
+			}
+		}
+
+		for pendingLen < len(pending) {
+			select {
+			case pending[pendingLen] = <-p.queue:
+				p.prepareForwardItem(&pending[pendingLen], &translator, &unwrapper)
+				pendingLen++
+			default:
+				goto drained
+			}
+		}
+	drained:
+		sortPacedPacketsByExtendedSequence(pending[:pendingLen])
+
+	gapWait:
+		for haveReleased && pending[0].extSeq > lastReleasedExtSeq+1 && pendingLen < len(pending) {
+			gapStartedAt := pending[0].enqueuedAt
+			for i := 1; i < pendingLen; i++ {
+				if pending[i].enqueuedAt.Before(gapStartedAt) {
+					gapStartedAt = pending[i].enqueuedAt
 				}
 			}
-			if queueAgeNs > p.maxQueueAge.Nanoseconds() {
-				p.staleDrops.Add(1)
-				p.completedCount.Add(1)
-				continue
+			deadline := gapStartedAt.Add(defaultForwardReorderWaitMs)
+			wait := time.Until(deadline)
+			if wait <= 0 {
+				p.gapTimeoutCount.Add(1)
+				break
 			}
+			observeAtomicMax(&p.maxTimerWaitNs, uint64(wait))
+			timer.Reset(wait)
+			select {
+			case <-p.done:
+				return
+			case seq := <-p.nacks:
+				p.retransmit(seq)
+				stopAndDrainTimer(timer)
+			case pending[pendingLen] = <-p.queue:
+				p.prepareForwardItem(&pending[pendingLen], &translator, &unwrapper)
+				pendingLen++
+				stopAndDrainTimer(timer)
+				sortPacedPacketsByExtendedSequence(pending[:pendingLen])
+			case <-timer.C:
+				p.gapTimeoutCount.Add(1)
+				if oversleep := time.Since(deadline); oversleep > 0 {
+					observeAtomicMax(&p.maxTimerOversleepNs, uint64(oversleep))
+				}
+				break gapWait
+			}
+		}
 
-			if item.packet.Padding {
-				p.paddingPacketCount.Add(1)
-			}
-			if translator.translateAt(item.packet, item.source, item.enqueuedAt) {
-				p.timelineResets.Add(1)
-			}
-			if p.observeTranslated != nil {
-				p.observeTranslated(item.packet, item.captureTime, item.captureTimeKnown)
-			}
-			writeStarted := time.Now()
-			writeErr := p.write(item.packet)
-			writeDuration := time.Since(writeStarted)
-			observeAtomicMax(&p.maxWriterDurationNs, uint64(writeDuration))
-			if writeDuration > 100*time.Millisecond {
-				p.writerBlockedCount.Add(1)
-			}
-			if writeErr == nil {
-				p.sentCount.Add(1)
-				p.retransmissionCache.store(item.packet)
-			}
-			p.completedCount.Add(1)
+		item := pending[0]
+		copy(pending[:], pending[1:pendingLen])
+		pendingLen--
+		if !haveReleased || item.extSeq > lastReleasedExtSeq {
+			haveReleased = true
+			lastReleasedExtSeq = item.extSeq
+		}
+		p.writeForwardItem(item, &output)
+	}
+}
 
-			if item.packet.Padding {
-				continue
+func (p *AudioCadencePacer) prepareForwardItem(
+	item *pacedPacket,
+	translator *rtpForwardTranslator,
+	unwrapper *sequenceUnwrapper,
+) {
+	if translator.translateAt(item.packet, item.source, item.enqueuedAt) {
+		p.timelineResets.Add(1)
+	}
+	item.extSeq = unwrapper.unwrap(item.packet.SequenceNumber)
+}
+
+func (p *AudioCadencePacer) writeForwardItem(item pacedPacket, output *forwardOutputState) {
+	queueAgeNs := time.Since(item.enqueuedAt).Nanoseconds()
+	queueAge := uint64(max(queueAgeNs, 0))
+	p.queueAgeHist.observe(queueAgeNs)
+	observeAtomicMax(&p.maxQueueAgeNs, queueAge)
+	if queueAgeNs > p.maxQueueAge.Nanoseconds() {
+		p.staleDrops.Add(1)
+		p.completedCount.Add(1)
+		return
+	}
+
+	if item.packet.Padding {
+		p.paddingPacketCount.Add(1)
+	}
+	if stripSourceMediaPadding(item.packet) {
+		p.sourcePaddingStrippedCount.Add(1)
+	}
+	if p.observeTranslated != nil {
+		p.observeTranslated(item.packet, item.captureTime, item.captureTimeKnown)
+	}
+	writeStarted := time.Now()
+	writeErr := p.write(item.packet)
+	writeDuration := time.Since(writeStarted)
+	observeAtomicMax(&p.maxWriterDurationNs, uint64(writeDuration))
+	if writeDuration > 100*time.Millisecond {
+		p.writerBlockedCount.Add(1)
+	}
+	if writeErr == nil {
+		p.sentCount.Add(1)
+		p.retransmissionCache.store(item.packet)
+		if output.haveOutput {
+			sequenceDeltaCount := uint16(item.packet.SequenceNumber - output.lastOutputSequence)
+			timestampDeltaSamples := uint32(item.packet.Timestamp - output.lastOutputTimestampSamples)
+			if sequenceDeltaCount != 1 {
+				p.outputSequenceDiscontinuityCount.Add(1)
 			}
-			nowNs := time.Now().UnixNano()
-			if lastSendAtNs != 0 && nowNs > lastSendAtNs {
-				spacingNs := uint64(nowNs - lastSendAtNs)
-				p.lastSpacingNs.Store(spacingNs)
-				p.spacingHist.observe(int64(spacingNs))
-				observeAtomicMax(&p.maxSpacingNs, spacingNs)
+			if timestampDeltaSamples != defaultAudioFrameSamples {
+				p.outputTimestampDiscontinuityCount.Add(1)
 			}
-			lastSendAtNs = nowNs
+			observeAtomicMax(&p.outputMaxSequenceDelta, uint64(sequenceDeltaCount))
+			observeAtomicMax(&p.outputMaxTimestampDeltaSamples, uint64(timestampDeltaSamples))
+		}
+		output.haveOutput = true
+		output.lastOutputSequence = item.packet.SequenceNumber
+		output.lastOutputTimestampSamples = item.packet.Timestamp
+	}
+	p.completedCount.Add(1)
+
+	if item.packet.Padding {
+		return
+	}
+	nowNs := time.Now().UnixNano()
+	if output.lastSendAtNs != 0 && nowNs > output.lastSendAtNs {
+		spacingNs := uint64(nowNs - output.lastSendAtNs)
+		p.lastSpacingNs.Store(spacingNs)
+		p.spacingHist.observe(int64(spacingNs))
+		observeAtomicMax(&p.maxSpacingNs, spacingNs)
+	}
+	output.lastSendAtNs = nowNs
+}
+
+func stopAndDrainTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
 	}
+}
+
+// stripSourceMediaPadding removes source-hop RTP padding while preserving the
+// Opus payload. Padding is transport-local and must not be copied into the
+// independently encrypted subscriber hop. Pure padding remains marked so the
+// cadence path can handle it explicitly.
+func stripSourceMediaPadding(pkt *rtp.Packet) bool {
+	if !pkt.Padding || len(pkt.Payload) == 0 {
+		return false
+	}
+	pkt.Padding = false
+	pkt.PaddingSize = 0
+	return true
 }
 
 func (p *AudioCadencePacer) retransmit(seq uint16) {
