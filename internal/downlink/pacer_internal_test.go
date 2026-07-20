@@ -214,7 +214,7 @@ func TestGivenClusteredPackets_WhenForwardPacerRuns_ThenWritesWithoutCadenceDela
 	}
 }
 
-func TestGivenMissingPacket_WhenForwardPacerRuns_ThenGapIsForwardedImmediately(t *testing.T) {
+func TestGivenMissingPacket_WhenForwardPacerRuns_ThenGapIsReleasedAfterBoundedWait(t *testing.T) {
 	writes := make(chan time.Time, 2)
 	pacer := newAudioForwardPacer(func(*rtp.Packet) error {
 		writes <- time.Now()
@@ -239,11 +239,27 @@ func TestGivenMissingPacket_WhenForwardPacerRuns_ThenGapIsForwardedImmediately(t
 	_ = receiveWriteTime(t, writes)
 
 	elapsed := time.Since(started)
-	if elapsed > 10*time.Millisecond {
-		t.Fatalf("forward gap wait = %s, want <= 10ms", elapsed)
+	minimumWaitMs := defaultForwardReorderWaitMs - 5*time.Millisecond
+	if elapsed < minimumWaitMs || elapsed > 150*time.Millisecond {
+		t.Fatalf("forward gap wait = %s, want %s..150ms", elapsed, minimumWaitMs)
 	}
-	if got := pacer.Snapshot().GapTimeoutCount; got != 0 {
-		t.Fatalf("gap timeout count = %d, want 0", got)
+	if got := pacer.Snapshot().GapTimeoutCount; got != 1 {
+		t.Fatalf("gap timeout count = %d, want 1", got)
+	}
+	snapshot := pacer.Snapshot()
+	if snapshot.OutputSequenceDiscontinuityCount != 1 || snapshot.OutputTimestampDiscontinuityCount != 1 {
+		t.Fatalf(
+			"output sequence/timestamp discontinuities = %d/%d, want 1/1",
+			snapshot.OutputSequenceDiscontinuityCount,
+			snapshot.OutputTimestampDiscontinuityCount,
+		)
+	}
+	if snapshot.OutputMaxSequenceDelta != 2 || snapshot.OutputMaxTimestampDeltaSamples != 1_920 {
+		t.Fatalf(
+			"output max sequence/timestamp delta = %d/%d, want 2/1920",
+			snapshot.OutputMaxSequenceDelta,
+			snapshot.OutputMaxTimestampDeltaSamples,
+		)
 	}
 }
 
@@ -291,28 +307,127 @@ func TestGivenPublisherReconnect_WhenForwardPacerRuns_ThenOutgoingRTPIsContinuou
 	}
 }
 
-func TestGivenLateRepair_WhenForwardPacerRuns_ThenOriginalSequenceIsPreserved(t *testing.T) {
-	writes := make(chan uint16, 3)
+func TestGivenShortReorder_WhenForwardPacerRuns_ThenSequenceAndTimestampAreMonotonic(t *testing.T) {
+	writes := make(chan *rtp.Packet, 3)
 	pacer := newAudioForwardPacer(func(pkt *rtp.Packet) error {
-		writes <- pkt.SequenceNumber
+		writes <- pkt.Clone()
 		return nil
 	})
 	defer pacer.Stop()
 
-	for _, seq := range []uint16{100, 102, 101} {
-		if err := pacer.Enqueue(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq}}); err != nil {
-			t.Fatalf("enqueue %d: %v", seq, err)
+	packets := []*rtp.Packet{
+		{Header: rtp.Header{SequenceNumber: 100, Timestamp: 1_000}},
+		{Header: rtp.Header{SequenceNumber: 102, Timestamp: 2_920}},
+		{Header: rtp.Header{SequenceNumber: 101, Timestamp: 1_960}},
+	}
+	for _, packet := range packets {
+		if err := pacer.Enqueue(packet); err != nil {
+			t.Fatalf("enqueue %d: %v", packet.SequenceNumber, err)
 		}
 	}
-	for _, want := range []uint16{100, 102, 101} {
+	for i, wantSequence := range []uint16{100, 101, 102} {
 		select {
 		case got := <-writes:
-			if got != want {
-				t.Fatalf("forwarded sequence = %d, want %d", got, want)
+			wantTimestamp := uint32(1_000 + i*960)
+			if got.SequenceNumber != wantSequence || got.Timestamp != wantTimestamp {
+				t.Fatalf(
+					"forwarded packet = seq %d ts %d, want seq %d ts %d",
+					got.SequenceNumber,
+					got.Timestamp,
+					wantSequence,
+					wantTimestamp,
+				)
 			}
 		case <-time.After(250 * time.Millisecond):
-			t.Fatalf("timed out waiting for sequence %d", want)
+			t.Fatalf("timed out waiting for sequence %d", wantSequence)
 		}
+	}
+	snapshot := pacer.Snapshot()
+	if snapshot.GapTimeoutCount != 0 {
+		t.Fatalf("gap timeout count = %d, want 0", snapshot.GapTimeoutCount)
+	}
+	if snapshot.OutputSequenceDiscontinuityCount != 0 || snapshot.OutputTimestampDiscontinuityCount != 0 {
+		t.Fatalf(
+			"output sequence/timestamp discontinuities = %d/%d, want 0/0",
+			snapshot.OutputSequenceDiscontinuityCount,
+			snapshot.OutputTimestampDiscontinuityCount,
+		)
+	}
+}
+
+func TestGivenGapWait_WhenForwardPacerStops_ThenPendingQueueIsDrained(t *testing.T) {
+	writes := make(chan uint16, 2)
+	pacer := newAudioForwardPacer(func(pkt *rtp.Packet) error {
+		writes <- pkt.SequenceNumber
+		return nil
+	})
+
+	if err := pacer.Enqueue(&rtp.Packet{Header: rtp.Header{SequenceNumber: 100, Timestamp: 1_000}}); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	select {
+	case <-writes:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for first packet")
+	}
+	if err := pacer.Enqueue(&rtp.Packet{Header: rtp.Header{SequenceNumber: 102, Timestamp: 2_920}}); err != nil {
+		t.Fatalf("enqueue gap: %v", err)
+	}
+
+	deadline := time.Now().Add(30 * time.Millisecond)
+	for pacer.Snapshot().MaxTimerWaitNs == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if pacer.Snapshot().MaxTimerWaitNs == 0 {
+		t.Fatal("forward pacer did not enter the gap wait")
+	}
+
+	started := time.Now()
+	pacer.Stop()
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("stop during gap wait took %s, want <= 100ms", elapsed)
+	}
+	if got := pacer.Snapshot().QueueDepth; got != 0 {
+		t.Fatalf("queue depth after stop = %d, want 0", got)
+	}
+}
+
+func TestGivenMediaWithSourcePadding_WhenForwardPacerRuns_ThenPaddingIsStripped(t *testing.T) {
+	writes := make(chan *rtp.Packet, 1)
+	pacer := newAudioForwardPacer(func(pkt *rtp.Packet) error {
+		writes <- pkt.Clone()
+		return nil
+	})
+	defer pacer.Stop()
+
+	payload := []byte{0xAA, 0xBB, 0xCC}
+	packet := &rtp.Packet{
+		Header: rtp.Header{
+			Padding:        true,
+			SequenceNumber: 100,
+			Timestamp:      10_000,
+		},
+		Payload:     payload,
+		PaddingSize: 7,
+	}
+	if err := pacer.Enqueue(packet); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	written := receiveWrite(t, writes)
+	if written.Padding || written.PaddingSize != 0 {
+		t.Fatalf("forwarded padding = %t/%d, want false/0", written.Padding, written.PaddingSize)
+	}
+	if string(written.Payload) != string(payload) {
+		t.Fatalf("forwarded payload = %v, want %v", written.Payload, payload)
+	}
+	snapshot := pacer.Snapshot()
+	if snapshot.PaddingPacketCount != 1 || snapshot.SourcePaddingStrippedCount != 1 {
+		t.Fatalf(
+			"padding observed/stripped = %d/%d, want 1/1",
+			snapshot.PaddingPacketCount,
+			snapshot.SourcePaddingStrippedCount,
+		)
 	}
 }
 
