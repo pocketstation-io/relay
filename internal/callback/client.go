@@ -1,9 +1,9 @@
-// Package callback provides a best-effort HTTP client for notifying api-server
-// of relay-side events (source connect/disconnect, listener leave).
+// Package callback provides a best-effort HTTP client for notifying the
+// control plane of relay-side source and subscriber lifecycle events.
 //
 // All public methods are fire-and-forget: they spawn no goroutines themselves
 // (callers use "go c.Push…") and never return an error to the caller. If
-// api-server is unreachable the error is logged at WARN level and dropped.
+// the control plane is unreachable the error is logged at WARN level and dropped.
 // If baseURL is empty the client is a no-op and no network calls are made.
 package callback
 
@@ -21,7 +21,7 @@ import (
 // Kept short so a slow api-server does not delay session cleanup.
 const httpTimeout = 5 * time.Second
 
-// Client posts internal callback events to api-server.
+// Client posts internal callback events to the control plane.
 // The zero value is not valid; use NewClient.
 type Client struct {
 	baseURL string
@@ -43,11 +43,11 @@ type sourceActiveBody struct {
 }
 
 // PushSourceActive posts {"active": active} to
-// {baseURL}/v1/internal/rooms/{roomID}/source-active.
+// {baseURL}/v1/internal/sessions/{sessionID}/source-active.
 //
 // Best-effort: errors are logged at WARN and discarded. Never blocks the
 // audio path — callers must invoke this in a goroutine.
-func (c *Client) PushSourceActive(roomID string, active bool) {
+func (c *Client) PushSourceActive(sessionID string, active bool) {
 	if c.baseURL == "" {
 		return
 	}
@@ -57,7 +57,7 @@ func (c *Client) PushSourceActive(roomID string, active bool) {
 		slog.Warn("callback: marshal error", "event", "source_active", "error", err)
 		return
 	}
-	url := fmt.Sprintf("%s/v1/internal/rooms/%s/source-active", c.baseURL, roomID)
+	url := fmt.Sprintf("%s/v1/internal/sessions/%s/source-active", c.baseURL, sessionID)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		slog.Warn("callback: build request error", "event", "source_active", "error", err)
@@ -69,28 +69,28 @@ func (c *Client) PushSourceActive(roomID string, active bool) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		slog.Warn("callback: POST failed", "event", "source_active", "room_id", roomID, "active", active, "error", err)
+		slog.Warn("callback: POST failed", "event", "source_active", "session_id", sessionID, "active", active, "error", err)
 		return
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("callback: unexpected status", "event", "source_active", "room_id", roomID, "status", resp.StatusCode)
+		slog.Warn("callback: unexpected status", "event", "source_active", "session_id", sessionID, "status", resp.StatusCode)
 	}
 }
 
-// PushListenerLeave posts to
-// {baseURL}/v1/internal/rooms/{roomID}/listener-leave.
+// PushSubscriberLeave posts to
+// {baseURL}/v1/internal/sessions/{sessionID}/subscriber-leave.
 //
 // Best-effort: errors are logged at WARN and discarded. Never blocks the
 // audio path — callers must invoke this in a goroutine.
-func (c *Client) PushListenerLeave(roomID string) {
+func (c *Client) PushSubscriberLeave(sessionID string) {
 	if c.baseURL == "" {
 		return
 	}
-	url := fmt.Sprintf("%s/v1/internal/rooms/%s/listener-leave", c.baseURL, roomID)
+	url := fmt.Sprintf("%s/v1/internal/sessions/%s/subscriber-leave", c.baseURL, sessionID)
 	req, err := http.NewRequest(http.MethodPost, url, http.NoBody)
 	if err != nil {
-		slog.Warn("callback: build request error", "event", "listener_leave", "error", err)
+		slog.Warn("callback: build request error", "event", "subscriber_leave", "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -99,11 +99,11 @@ func (c *Client) PushListenerLeave(roomID string) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		slog.Warn("callback: POST failed", "event", "listener_leave", "room_id", roomID, "error", err)
+		slog.Warn("callback: POST failed", "event", "subscriber_leave", "session_id", sessionID, "error", err)
 		return
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("callback: unexpected status", "event", "listener_leave", "room_id", roomID, "status", resp.StatusCode)
+		slog.Warn("callback: unexpected status", "event", "subscriber_leave", "session_id", sessionID, "status", resp.StatusCode)
 	}
 }

@@ -38,7 +38,7 @@ func TestGiven_CallbackClient_When_PushSourceActive_Then_PostSent(t *testing.T) 
 	if capturedMethod != http.MethodPost {
 		t.Errorf("want POST, got %s", capturedMethod)
 	}
-	wantPath := "/v1/internal/rooms/" + roomID + "/source-active"
+	wantPath := "/v1/internal/sessions/" + roomID + "/source-active"
 	if capturedPath != wantPath {
 		t.Errorf("want path %q, got %q", wantPath, capturedPath)
 	}
@@ -78,7 +78,7 @@ func TestGiven_CallbackClient_When_ServerDown_Then_NoError(t *testing.T) {
 
 	// When / Then — must not panic
 	c.PushSourceActive("room-xyz", true)
-	c.PushListenerLeave("room-xyz")
+	c.PushSubscriberLeave("room-xyz")
 }
 
 // TestGiven_CallbackClient_When_BaseURLEmpty_Then_Noop verifies that an empty
@@ -96,7 +96,7 @@ func TestGiven_CallbackClient_When_BaseURLEmpty_Then_Noop(t *testing.T) {
 
 	// When
 	c.PushSourceActive("room-noop", true)
-	c.PushListenerLeave("room-noop")
+	c.PushSubscriberLeave("room-noop")
 
 	// Then
 	if called {
@@ -104,9 +104,9 @@ func TestGiven_CallbackClient_When_BaseURLEmpty_Then_Noop(t *testing.T) {
 	}
 }
 
-// TestGiven_CallbackClient_When_PushListenerLeave_Then_PostSent verifies that
-// PushListenerLeave sends a POST to the correct path.
-func TestGiven_CallbackClient_When_PushListenerLeave_Then_PostSent(t *testing.T) {
+// TestGiven_CallbackClient_When_PushSubscriberLeave_Then_PostSent verifies that
+// PushSubscriberLeave sends a POST to the canonical Session path.
+func TestGiven_CallbackClient_When_PushSubscriberLeave_Then_PostSent(t *testing.T) {
 	// Given
 	var (
 		capturedMethod string
@@ -123,13 +123,13 @@ func TestGiven_CallbackClient_When_PushListenerLeave_Then_PostSent(t *testing.T)
 	const roomID = "listener-room-007"
 
 	// When
-	c.PushListenerLeave(roomID)
+	c.PushSubscriberLeave(roomID)
 
 	// Then
 	if capturedMethod != http.MethodPost {
 		t.Errorf("want POST, got %s", capturedMethod)
 	}
-	wantPath := "/v1/internal/rooms/" + roomID + "/listener-leave"
+	wantPath := "/v1/internal/sessions/" + roomID + "/subscriber-leave"
 	if capturedPath != wantPath {
 		t.Errorf("want path %q, got %q", wantPath, capturedPath)
 	}

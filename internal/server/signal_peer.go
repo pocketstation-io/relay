@@ -115,7 +115,7 @@ func (s *signalPeer) cleanup() {
 				s.srv.Metrics.ListenerCount.Add(-1)
 				s.srv.broadcastSessionState(s.room)
 				if s.srv.callbackClient != nil {
-					go s.srv.callbackClient.PushListenerLeave(s.room.ID)
+					go s.srv.callbackClient.PushSubscriberLeave(s.room.ID)
 				}
 			} else {
 				s.room.RemoveSubscription(s.id)
