@@ -15,8 +15,9 @@ import (
 // TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow
 // measures the actual end-to-end RTP loss rate through the relay. The source
 // sends a known number of packets at the real 50 pkt/s production rate with
-// monotonic sequence numbers, then stops; the listener counts how many DISTINCT
-// sequence numbers survive. This is the measurement the existing forwarding
+// monotonic sequence numbers, then stops; the listener identifies measured
+// packets by payload marker and counts DISTINCT translated sequence numbers.
+// This is the measurement the existing forwarding
 // test cannot make: that test reads "until N arrive" from a 1000 pkt/s firehose,
 // so it never observes loss. Here loss is the whole point.
 //
@@ -83,7 +84,8 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 	// Start a warm-up sender so the relay's OnTrack fires and forwarding starts
 	// before the subscriber connects (relay OnTrack only fires on first packet).
 	warmStop := make(chan struct{})
-	payload := bytes.Repeat([]byte{0xAB}, 80)
+	warmupPayload := bytes.Repeat([]byte{0xAB}, 80)
+	measuredPayload := bytes.Repeat([]byte{0xCD}, 80)
 	go func() {
 		tk := time.NewTicker(sendPeriod)
 		defer tk.Stop()
@@ -96,7 +98,7 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 				_ = audioTrack.WriteRTP(&rtp.Packet{Header: rtp.Header{
 					Version: 2, PayloadType: 111, SSRC: 0xDEADBEEF,
 					SequenceNumber: 60000 + seq, Timestamp: uint32(seq) * 960,
-				}, Payload: payload})
+				}, Payload: warmupPayload})
 				seq++
 			}
 		}
@@ -125,8 +127,9 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 			if err != nil {
 				return
 			}
-			// Count only the measured range [0, sendCount).
-			if pkt.SequenceNumber < sendCount {
+			// The relay's per-subscriber forwarder translates sequence numbers,
+			// so payload identity separates measured packets from warm-up traffic.
+			if len(pkt.Payload) > 0 && pkt.Payload[0] == measuredPayload[0] {
 				mu.Lock()
 				seen[pkt.SequenceNumber] = struct{}{}
 				mu.Unlock()
@@ -142,7 +145,7 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 		_ = audioTrack.WriteRTP(&rtp.Packet{Header: rtp.Header{
 			Version: 2, PayloadType: 111, SSRC: 0xDEADBEEF,
 			SequenceNumber: uint16(i), Timestamp: uint32(i) * 960,
-		}, Payload: payload})
+		}, Payload: measuredPayload})
 	}
 
 	time.Sleep(500 * time.Millisecond) // drain in-flight

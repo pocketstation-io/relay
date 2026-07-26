@@ -22,6 +22,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/callback"
+	"github.com/pocketstation-io/relay/internal/downlink"
 	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/metrics"
 	"github.com/pocketstation-io/relay/internal/ratelimit"
@@ -54,13 +55,26 @@ const defaultMaxListenersPerRoom = 50
 // when MAX_ROOMS_PER_IP_PER_MINUTE is unset.
 const defaultMaxRoomsPerIPPerMinute = 10
 
+const defaultPublicReceiverURL = "https://pocketstation-receiver.fly.dev"
+const joinCodeTTL = 2 * time.Hour
+
+type joinInvite struct {
+	sessionID string
+	expiresAt time.Time
+}
+
 // Config holds the parameters for creating a Server.
 type Config struct {
 	// JWTSecret is the HMAC-SHA256 signing key used for session tokens.
 	JWTSecret []byte
+	// SettingEngine is an optional Pion SettingEngine for tests (loopback ICE,
+	// aggressive timeouts). When set, the relay always builds its own API with
+	// NewMediaEngineWithAudioNACK so that RED codec registration is preserved.
+	// Preferred over API; if both are set, SettingEngine wins.
+	SettingEngine *webrtc.SettingEngine
 	// API is an optional *webrtc.API used instead of the default global API.
-	// Provide a custom API in tests (e.g. with loopback ICE) so that Pion
-	// does not need real network interfaces.
+	// Deprecated for test use: prefer SettingEngine so that codec registration
+	// (including RED) is not bypassed.
 	API *webrtc.API
 	// MaxRooms is the maximum number of concurrently active RelaySessions.
 	// Zero means use defaultMaxRooms.
@@ -95,12 +109,19 @@ type Config struct {
 	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
 	// candidates (Fly.io / NAT deployments). Env: RELAY_PUBLIC_IPS.
 	NAT1To1IPs []string
+	// PublicReceiverURL is the browser receiver origin used to construct a
+	// one-click join URL. Empty uses PUBLIC_RECEIVER_URL or the production URL.
+	PublicReceiverURL string
+	// PublicRelayURL is the externally reachable relay HTTP(S) origin returned
+	// by join-code resolution. Empty derives it from the incoming request.
+	PublicRelayURL string
 }
 
 // Server is the top-level relay server.
 type Server struct {
 	sessions_         *graph.SessionRegistry // named sessions_ to avoid collision with sessions map below
 	jwtSecret         []byte
+	settingEngine     *webrtc.SettingEngine
 	api               *webrtc.API
 	Metrics           *metrics.Registry
 	callbackClient    *callback.Client
@@ -135,6 +156,11 @@ type Server struct {
 
 	// useTURN is set once from Config.UseTURN; propagated to ICE_RESTART msgs.
 	useTURN bool
+
+	publicReceiverURL string
+	publicRelayURL    string
+	joinMu            sync.Mutex
+	joinInvites       map[string]joinInvite
 }
 
 // New creates a Server from cfg.
@@ -162,9 +188,22 @@ func New(cfg Config) *Server {
 	regCfg := cfg.RegistryConfig
 	regCfg.MaxSubscriptions = maxSubs
 
+	publicReceiverURL := strings.TrimSpace(cfg.PublicReceiverURL)
+	if publicReceiverURL == "" {
+		publicReceiverURL = strings.TrimSpace(os.Getenv("PUBLIC_RECEIVER_URL"))
+	}
+	if publicReceiverURL == "" {
+		publicReceiverURL = defaultPublicReceiverURL
+	}
+	publicRelayURL := strings.TrimSpace(cfg.PublicRelayURL)
+	if publicRelayURL == "" {
+		publicRelayURL = strings.TrimSpace(os.Getenv("PUBLIC_RELAY_URL"))
+	}
+
 	return &Server{
 		sessions_:             graph.NewRegistryWithConfig(regCfg),
 		jwtSecret:             cfg.JWTSecret,
+		settingEngine:         cfg.SettingEngine,
 		api:                   cfg.API,
 		Metrics:               metrics.New(),
 		callbackClient:        cfg.CallbackClient,
@@ -179,6 +218,9 @@ func New(cfg Config) *Server {
 		ipLimiter:             ipLim,
 		sessions:              make(map[string]*session),
 		useTURN:               cfg.UseTURN,
+		publicReceiverURL:     strings.TrimRight(publicReceiverURL, "/"),
+		publicRelayURL:        strings.TrimRight(publicRelayURL, "/"),
+		joinInvites:           make(map[string]joinInvite),
 	}
 }
 
@@ -190,10 +232,12 @@ func (s *Server) Handler() http.Handler {
 
 	// v3.0 session endpoints (canonical)
 	mux.HandleFunc("POST /v1/sessions", s.createRoom)
+	mux.HandleFunc("GET /v1/join/{code}", s.resolveJoinCode)
 	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
 	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
 	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
+	mux.HandleFunc("GET /v1/sessions/{id}/media-debug", s.mediaDebug)
 
 	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
 	// POST body: application/sdp offer. Response: 201 + application/sdp answer.
@@ -379,13 +423,20 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token error", http.StatusInternalServerError)
 		return
 	}
+	joinCode := newID()
+	s.joinMu.Lock()
+	s.joinInvites[joinCode] = joinInvite{sessionID: id, expiresAt: time.Now().Add(joinCodeTTL)}
+	s.joinMu.Unlock()
+	joinURL := s.publicReceiverURL + "?join=" + joinCode
 	resp := map[string]any{
 		"session_id":       id,
 		"room_id":          id, // v2.3 wire compat
 		"source_token":     sourceToken,
 		"subscriber_token": subscriberToken,
 		"listener_token":   subscriberToken, // v2.3 wire compat
-		"qr_url":           "/listen?room=" + id,
+		"join_code":        joinCode,
+		"join_url":         joinURL,
+		"qr_url":           joinURL,
 		"relay_region":     os.Getenv("FLY_REGION"),
 		"relay_app":        os.Getenv("FLY_APP_NAME"),
 	}
@@ -399,6 +450,71 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
+	setJoinCORS(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+
+	code := r.PathValue("code")
+	now := time.Now()
+	s.joinMu.Lock()
+	invite, found := s.joinInvites[code]
+	if found && now.After(invite.expiresAt) {
+		delete(s.joinInvites, code)
+		found = false
+	}
+	s.joinMu.Unlock()
+	if !found {
+		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
+		return
+	}
+	if _, active := s.sessions_.Get(invite.sessionID); !active {
+		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	token, err := auth.Sign(s.jwtSecret, invite.sessionID, auth.RoleSubscriber, joinCodeTTL)
+	if err != nil {
+		http.Error(w, `{"error":"token_error"}`, http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"session_id":       invite.sessionID,
+		"subscriber_token": token,
+		"signal_url":       s.publicSignalURL(r),
+	})
+}
+
+func (s *Server) publicSignalURL(r *http.Request) string {
+	base := s.publicRelayURL
+	if base == "" {
+		scheme := "http"
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			scheme = "https"
+		}
+		base = scheme + "://" + r.Host
+	}
+	base = strings.TrimRight(base, "/")
+	base = strings.Replace(base, "https://", "wss://", 1)
+	base = strings.Replace(base, "http://", "ws://", 1)
+	return base + "/v1/signal"
+}
+
+func setJoinCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if len(allowedOrigins) == 0 {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		return
+	}
+	for _, allowed := range allowedOrigins {
+		if origin == allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			return
+		}
+	}
 }
 
 // allowedOrigins is read once at startup from ALLOWED_ORIGINS (comma-separated).
@@ -466,6 +582,32 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 	sess.run()
 }
 
+func (s *Server) broadcastSessionState(rm *graph.RelaySession) {
+	if rm == nil {
+		return
+	}
+	msg := signaling.ServerMessage{
+		Type:              signaling.TypeSessionState,
+		SourceActive:      rm.SourceActive(),
+		SubscriptionCount: rm.SubscriptionCount(),
+		Codec:             "opus",
+		SessionID:         rm.ID,
+	}
+
+	s.mu.RLock()
+	targets := make([]*session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		if sess.room == rm {
+			targets = append(targets, sess)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, sess := range targets {
+		_ = sess.send(msg)
+	}
+}
+
 // listChannels handles GET /v1/channels (spec §3.1, Phase 6).
 // Returns a JSON array of public RelaySessions. Returns [] when none exist.
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +651,29 @@ func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
 }
 
+// mediaDebug handles GET /v1/sessions/{id}/media-debug.
+// Returns per-subscriber downlink telemetry: write-duration P95, RTCP stats,
+// packet/byte counts, and NACK counts. Used for latency diagnosis.
+func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	rm, ok := s.sessions_.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	snap := struct {
+		SessionID    string                      `json:"session_id"`
+		SourceClocks []graph.SourceClockSnapshot `json:"source_clocks"`
+		Downlinks    []downlink.DownlinkSnapshot `json:"downlinks"`
+	}{
+		SessionID:    sessionID,
+		SourceClocks: rm.SourceClockSnapshots(),
+		Downlinks:    rm.DownlinkSnapshots(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snap)
+}
+
 // packetLogMaxLimit caps the number of entries returned by packetLogHandler.
 const packetLogMaxLimit = 1000
 
@@ -519,10 +684,10 @@ const packetLogMaxLimit = 1000
 //   - bus  (required): AudioBus ID, e.g. "voice" or "music".
 //   - limit (optional): number of entries to return, 1–1000, default 100.
 //
-// Each entry is a PacketLogEntry with seq, rx_ts_ns, and tx_ts_ns.
-// tx_ts_ns - rx_ts_ns = relay-internal forwarding latency for that packet.
+// Each entry includes RTP sequence/timestamp identity plus rx_ts_ns and tx_ts_ns.
+// tx_ts_ns is the fanout-enqueue timestamp retained for artifact compatibility;
+// actual serialized write timing is exposed by the media-debug downlink fields.
 // rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
-// subscriber recv_ns - tx_ts_ns = A4 (relay → subscriber) leg latency.
 func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	rm, ok := s.sessions_.Get(sessionID)

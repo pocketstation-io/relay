@@ -26,9 +26,9 @@ func newRateLimitTestServer(t *testing.T, maxRooms, maxListeners int) *httptest.
 	se.SetNAT1To1IPs([]string{"127.0.0.1"}, webrtc.ICECandidateTypeHost)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	srv := server.New(server.Config{
-		JWTSecret:           []byte(rateLimitJWTSecret),
-		API:                 api,
-		MaxRooms:            maxRooms,
+		JWTSecret:             []byte(rateLimitJWTSecret),
+		API:                   api,
+		MaxRooms:              maxRooms,
 		MaxSubscribersPerRoom: maxListeners,
 	})
 	ts := httptest.NewServer(srv.Handler())

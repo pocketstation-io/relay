@@ -31,10 +31,20 @@ import (
 )
 
 const (
-	soakDuration    = 5 * time.Minute
 	goroutineSlop   = 10   // allowed goroutine count drift 1min→5min
 	rssGrowthBudget = 0.20 // 20% RSS growth from 1min to 5min
 )
+
+func relaySoakFull() bool {
+	return os.Getenv("RELAY_SOAK_FULL") == "1"
+}
+
+func phase1SoakSchedule() (time.Duration, time.Duration, time.Duration) {
+	if relaySoakFull() {
+		return 5 * time.Minute, 1 * time.Minute, 4 * time.Minute
+	}
+	return 45 * time.Second, 15 * time.Second, 30 * time.Second
+}
 
 func newLoopbackAPI() *webrtc.API {
 	se := webrtc.SettingEngine{}
@@ -55,9 +65,14 @@ func dialWS(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	return conn
 }
 
-func drainMessages(conn *websocket.Conn) <-chan signaling.ServerMessage {
+// drainMessages pumps ServerMessages from conn into the returned channel until
+// conn is closed. The goroutine is registered with wg so callers can wait for
+// it to exit before completing cleanup.
+func drainMessages(conn *websocket.Conn, wg *sync.WaitGroup) <-chan signaling.ServerMessage {
+	wg.Add(1)
 	ch := make(chan signaling.ServerMessage, 64)
 	go func() {
+		defer wg.Done()
 		defer close(ch)
 		for {
 			var msg signaling.ServerMessage
@@ -89,6 +104,8 @@ func waitICE(ctx context.Context, t *testing.T, pc *webrtc.PeerConnection) {
 	}
 }
 
+// publishHandshake performs the PUBLISH WebSocket handshake and spawns an ICE
+// candidate relay goroutine. The goroutine is registered with wg.
 func publishHandshake(
 	t *testing.T,
 	conn *websocket.Conn,
@@ -96,6 +113,7 @@ func publishHandshake(
 	token string,
 	msgs <-chan signaling.ServerMessage,
 	timeout time.Duration,
+	wg *sync.WaitGroup,
 ) {
 	t.Helper()
 	offer, err := pc.CreateOffer(nil)
@@ -132,7 +150,9 @@ func publishHandshake(
 				}); err != nil {
 					t.Fatalf("set remote desc: %v", err)
 				}
+				wg.Add(1)
 				go func() {
+					defer wg.Done()
 					for m := range msgs {
 						if m.Type == signaling.TypeIce {
 							_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: m.Candidate})
@@ -150,6 +170,8 @@ func publishHandshake(
 	}
 }
 
+// subscribeHandshake performs the SUBSCRIBE WebSocket handshake and spawns an
+// ICE candidate relay goroutine. The goroutine is registered with wg.
 func subscribeHandshake(
 	t *testing.T,
 	conn *websocket.Conn,
@@ -157,6 +179,7 @@ func subscribeHandshake(
 	token string,
 	msgs <-chan signaling.ServerMessage,
 	timeout time.Duration,
+	wg *sync.WaitGroup,
 ) {
 	t.Helper()
 	if _, err := pc.AddTransceiverFromKind(
@@ -199,7 +222,9 @@ func subscribeHandshake(
 				}); err != nil {
 					t.Fatalf("set remote desc: %v", err)
 				}
+				wg.Add(1)
 				go func() {
+					defer wg.Done()
 					for m := range msgs {
 						if m.Type == signaling.TypeIce {
 							_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: m.Candidate})
@@ -243,6 +268,14 @@ func TestSoak(t *testing.T) {
 		t.Skip("soak test skipped in -short mode")
 	}
 
+	// childWg tracks all goroutines spawned by drainMessages, publishHandshake,
+	// subscribeHandshake, and the RTP drain goroutine. defer childWg.Wait() is
+	// registered first so it runs last (LIFO), after all pc.Close/conn.Close
+	// defers have already signaled those goroutines to exit.
+	var childWg sync.WaitGroup
+	defer childWg.Wait()
+
+	soakDuration, firstSampleAfter, finalSampleAfter := phase1SoakSchedule()
 	ctx, cancel := context.WithTimeout(context.Background(), soakDuration+60*time.Second)
 	defer cancel()
 
@@ -272,7 +305,7 @@ func TestSoak(t *testing.T) {
 	// Publisher.
 	pubConn := dialWS(t, ts)
 	defer pubConn.Close()
-	pubMsgs := drainMessages(pubConn)
+	pubMsgs := drainMessages(pubConn, &childWg)
 
 	pubPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -291,13 +324,15 @@ func TestSoak(t *testing.T) {
 		t.Fatalf("add track: %v", err)
 	}
 
-	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second)
+	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second, &childWg)
 	waitICE(ctx, t, pubPC)
 
 	// Start publisher send loop (triggers relay OnTrack + forwardLoop).
 	soakStop := make(chan struct{})
 	payload := bytes.Repeat([]byte{0xAB}, 160)
+	childWg.Add(1)
 	go func() {
+		defer childWg.Done()
 		var seq uint16
 		var ts uint32
 		ticker := time.NewTicker(20 * time.Millisecond)
@@ -327,7 +362,7 @@ func TestSoak(t *testing.T) {
 	// Subscriber.
 	subConn := dialWS(t, ts)
 	defer subConn.Close()
-	subMsgs := drainMessages(subConn)
+	subMsgs := drainMessages(subConn, &childWg)
 
 	subPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -343,13 +378,15 @@ func TestSoak(t *testing.T) {
 		}
 	})
 
-	subscribeHandshake(t, subConn, subPC, room.ListenerToken, subMsgs, 10*time.Second)
+	subscribeHandshake(t, subConn, subPC, room.ListenerToken, subMsgs, 10*time.Second, &childWg)
 	waitICE(ctx, t, subPC)
 
 	select {
 	case remoteTrack := <-trackCh:
 		// Drain subscriber track to prevent backpressure.
+		childWg.Add(1)
 		go func() {
+			defer childWg.Done()
 			for {
 				select {
 				case <-soakStop:
@@ -368,18 +405,18 @@ func TestSoak(t *testing.T) {
 	s0 := takeSample(t, "start")
 
 	select {
-	case <-time.After(1 * time.Minute):
+	case <-time.After(firstSampleAfter):
 	case <-ctx.Done():
-		t.Fatalf("ctx expired at 1min: %v", ctx.Err())
+		t.Fatalf("ctx expired at first sample: %v", ctx.Err())
 	}
-	s1 := takeSample(t, "1min")
+	s1 := takeSample(t, "steady")
 
 	select {
-	case <-time.After(4 * time.Minute):
+	case <-time.After(finalSampleAfter):
 	case <-ctx.Done():
-		t.Fatalf("ctx expired at 5min: %v", ctx.Err())
+		t.Fatalf("ctx expired at final sample: %v", ctx.Err())
 	}
-	s5 := takeSample(t, "5min")
+	s5 := takeSample(t, "end")
 
 	_ = pubConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 	_ = subConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
@@ -406,12 +443,14 @@ func TestSoak(t *testing.T) {
 	// Write results file.
 	results := fmt.Sprintf(
 		"# Phase 1 soak baseline\n# Generated: 2026-05-20\n# Platform: darwin/arm64 (Apple M5)\n\n"+
-			"goroutines start=%d 1min=%d 5min=%d delta(1→5)=%d\n"+
-			"rss_mb     start=%d 1min=%d 5min=%d growth(1→5)=%.1f%%\n"+
+			"duration=%s full_mode=%t first_sample_after=%s final_sample_after=%s\n"+
+			"goroutines start=%d steady=%d end=%d delta(steady→end)=%d\n"+
+			"rss_mb     start=%d steady=%d end=%d growth(steady→end)=%.1f%%\n"+
 			"packets_forwarded=%d packets_dropped=%d listener_count=%d\n"+
 			"race_detector=clean (enforced by -race flag)\n"+
 			"goroutine_leak=PASS (delta %d <= limit %d)\n"+
 			"rss_growth=PASS\n",
+		soakDuration, relaySoakFull(), firstSampleAfter, finalSampleAfter,
 		s0.goroutines, s1.goroutines, s5.goroutines, s5.goroutines-s1.goroutines,
 		s0.rssBytes>>20, s1.rssBytes>>20, s5.rssBytes>>20,
 		func() float64 {

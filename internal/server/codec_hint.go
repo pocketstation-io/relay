@@ -12,8 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -100,44 +98,6 @@ func bitrateForLoss(fractionLost float64) signaling.CodecHintPayload {
 			FrameMs:     10,
 		}
 	}
-}
-
-// startRTCPReader spawns a goroutine that reads RTCP Receiver Reports from a
-// listener's RTPSender and calls maybeEmitCodecHint and maybeEmitICERestart
-// on each report.
-// The goroutine exits when ReadRTCP returns an error (connection closed).
-//
-// sender is the RTPSender returned by pc.AddTrack for the listener's audio track.
-// hintState is the per-room debounce object for CODEC_HINT; shared across all
-// listener goroutines in the room.
-// restartState is the per-room loss tracker and debounce object for ICE_RESTART;
-// shared across all listener goroutines in the room.
-func (s *Server) startRTCPReader(
-	sender *webrtc.RTPSender,
-	roomID string,
-	hintState *codecHintState,
-	restartState *iceRestartState,
-) {
-	go func() {
-		for {
-			pkts, _, err := sender.ReadRTCP()
-			if err != nil {
-				return
-			}
-			for _, pkt := range pkts {
-				rr, ok := pkt.(*rtcp.ReceiverReport)
-				if !ok {
-					continue
-				}
-				for _, report := range rr.Reports {
-					fractionLost := float64(report.FractionLost) / 256.0
-					hint := bitrateForLoss(fractionLost)
-					s.maybeEmitCodecHint(roomID, hint, hintState)
-					s.maybeEmitICERestart(roomID, fractionLost, restartState)
-				}
-			}
-		}
-	}()
 }
 
 // maybeEmitCodecHint sends a CODEC_HINT to the source session of roomID if the

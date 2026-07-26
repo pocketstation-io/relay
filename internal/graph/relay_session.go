@@ -14,13 +14,14 @@ import (
 	"errors"
 	"log/slog"
 	"math"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/pocketstation-io/relay/internal/clocklineage"
+	"github.com/pocketstation-io/relay/internal/downlink"
 )
 
 // latencyWindowSizeCount is the rolling window depth for P50 percentile
@@ -128,58 +129,98 @@ func p50(v []float64) float64 {
 
 // PacketLogEntry holds the relay-side timestamps for one forwarded RTP packet.
 // RxTsNs is stamped immediately after ReadRTP returns (ingress).
-// TxTsNs is stamped immediately after deliver completes (egress).
-// TxTsNs - RxTsNs = relay-internal forwarding latency for that packet.
+// TxTsNs is retained for artifact compatibility and stamped after fanout
+// enqueue. With asynchronous downlink pacing it is not a network-write time.
 type PacketLogEntry struct {
-	Seq    uint16 `json:"seq"`
-	RxTsNs int64  `json:"rx_ts_ns"`
-	TxTsNs int64  `json:"tx_ts_ns"`
+	Seq          uint16 `json:"seq"`
+	RtpTsSamples uint32 `json:"rtp_ts_samples"`
+	PayloadType  uint8  `json:"payload_type"`
+	Ssrc         uint32 `json:"ssrc"`
+	PayloadBytes uint64 `json:"payload_bytes"`
+	Padding      bool   `json:"padding"`
+	PaddingBytes uint8  `json:"padding_bytes"`
+	RxTsNs       int64  `json:"rx_ts_ns"`
+	TxTsNs       int64  `json:"tx_ts_ns"` // deprecated: fanout enqueue timestamp
 }
 
 // packetLogStore accumulates PacketLogEntry values in a fixed-size ring.
-// Safe for concurrent use.
+// One AudioBus forwarding goroutine writes each store. Readers may snapshot it
+// concurrently. Slots use a publication generation so record() performs no
+// allocation, locking, or blocking on the RTP hot path.
 type packetLogStore struct {
-	mu      sync.Mutex
-	entries []PacketLogEntry
-	head    int
-	full    bool
+	entries    [packetLogWindowSize]packetLogSlot
+	writeCount atomic.Uint64
+}
+
+type packetLogSlot struct {
+	generation   atomic.Uint64
+	seq          atomic.Uint32
+	rtpTsSamples atomic.Uint32
+	payloadType  atomic.Uint32
+	ssrc         atomic.Uint32
+	payloadBytes atomic.Uint64
+	padding      atomic.Bool
+	paddingBytes atomic.Uint32
+	rxTsNs       atomic.Int64
+	txTsNs       atomic.Int64
 }
 
 func newPacketLogStore() *packetLogStore {
-	return &packetLogStore{entries: make([]PacketLogEntry, packetLogWindowSize)}
+	return &packetLogStore{}
 }
 
 func (pl *packetLogStore) record(e PacketLogEntry) {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-	pl.entries[pl.head] = e
-	pl.head = (pl.head + 1) % packetLogWindowSize
-	if pl.head == 0 {
-		pl.full = true
-	}
+	position := pl.writeCount.Load()
+	slot := &pl.entries[position%packetLogWindowSize]
+	publishedGeneration := position*2 + 2
+	slot.generation.Store(publishedGeneration - 1)
+	slot.seq.Store(uint32(e.Seq))
+	slot.rtpTsSamples.Store(e.RtpTsSamples)
+	slot.payloadType.Store(uint32(e.PayloadType))
+	slot.ssrc.Store(e.Ssrc)
+	slot.payloadBytes.Store(e.PayloadBytes)
+	slot.padding.Store(e.Padding)
+	slot.paddingBytes.Store(uint32(e.PaddingBytes))
+	slot.rxTsNs.Store(e.RxTsNs)
+	slot.txTsNs.Store(e.TxTsNs)
+	slot.generation.Store(publishedGeneration)
+	pl.writeCount.Store(position + 1)
 }
 
 // last returns the most recent limit entries in chronological order.
 // Returns an empty slice (not nil) when no entries exist yet.
 func (pl *packetLogStore) last(limit int) []PacketLogEntry {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	count := pl.head
-	if pl.full {
-		count = packetLogWindowSize
-	}
-	if limit > count {
-		limit = count
+	writeCount := pl.writeCount.Load()
+	count := min(writeCount, uint64(packetLogWindowSize))
+	if uint64(limit) > count {
+		limit = int(count)
 	}
 	if limit == 0 {
 		return []PacketLogEntry{}
 	}
 
-	out := make([]PacketLogEntry, limit)
-	start := (pl.head - limit + packetLogWindowSize*2) % packetLogWindowSize
-	for i := 0; i < limit; i++ {
-		out[i] = pl.entries[(start+i)%packetLogWindowSize]
+	out := make([]PacketLogEntry, 0, limit)
+	start := writeCount - uint64(limit)
+	for position := start; position < writeCount; position++ {
+		slot := &pl.entries[position%packetLogWindowSize]
+		expectedGeneration := position*2 + 2
+		if slot.generation.Load() != expectedGeneration {
+			continue
+		}
+		entry := PacketLogEntry{
+			Seq:          uint16(slot.seq.Load()),
+			RtpTsSamples: slot.rtpTsSamples.Load(),
+			PayloadType:  uint8(slot.payloadType.Load()),
+			Ssrc:         slot.ssrc.Load(),
+			PayloadBytes: slot.payloadBytes.Load(),
+			Padding:      slot.padding.Load(),
+			PaddingBytes: uint8(slot.paddingBytes.Load()),
+			RxTsNs:       slot.rxTsNs.Load(),
+			TxTsNs:       slot.txTsNs.Load(),
+		}
+		if slot.generation.Load() == expectedGeneration {
+			out = append(out, entry)
+		}
 	}
 	return out
 }
@@ -281,19 +322,23 @@ type SourceSession interface {
 	ReadRTP() (*rtp.Packet, error)
 }
 
+type clockLineageSource interface {
+	ClockLineage() *clocklineage.Timeline
+}
+
 // BusSubscription is the write-side of an audio stream delivered to a subscriber.
 // *webrtc.TrackLocalStaticRTP satisfies this interface directly.
 type BusSubscription interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
 
-// subscriptionEntry pairs a subscriber ID with its BusSubscription and the
-// BusID it selected. busID == BusMix means "all buses" (relay.out("mix")
-// semantics); any other value receives only that bus's RTP (spec §7).
+// subscriptionEntry pairs a subscriber ID with its Downlink and the BusID it
+// selected. busID == BusMix means "all buses" (relay.out("mix") semantics);
+// any other value receives only that bus's RTP (spec §7).
 type subscriptionEntry struct {
 	subscriberID string
 	busID        BusID
-	sub          BusSubscription
+	dl           *downlink.Downlink
 }
 
 // AudioBus is one named forwarding lane: one SourceSession → N BusSubscriptions.
@@ -320,7 +365,9 @@ type AudioBus struct {
 	// lastRTPAtNanos is the UnixNano timestamp of the most recently forwarded
 	// RTP packet (0 = none yet). The media watchdog reads it to tell a live but
 	// silent source from a healthy one — WebSocket liveness ≠ media liveness.
-	lastRTPAtNanos atomic.Int64
+	lastRTPAtNanos   atomic.Int64
+	sourceTimeline   atomic.Pointer[clocklineage.Timeline]
+	sourceGeneration atomic.Uint64
 
 	// packetLog is a fixed-size ring of per-packet relay timestamps used to
 	// compute A3 (WebRTC→relay) and A4 (relay→subscriber) §11.3 budgets.
@@ -361,8 +408,9 @@ func newAudioBus(id BusID, role BusRole, graphID string, inactivityTimeout, reco
 // SetSource sets the audio source and starts the forward loop.
 // If a previous source is active (ICE restart), it is closed first.
 // deliver is called for each received RTP packet to write to subscribers.
-func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp.Packet)) {
+func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp.Packet, uint64)) {
 	newLoopDone := make(chan struct{})
+	generation := b.sourceGeneration.Add(1)
 
 	b.sourceMu.Lock()
 	prevCloser := b.sourceCloser
@@ -371,6 +419,11 @@ func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp
 	b.sourceCloser = closer
 	b.loopDone = newLoopDone
 	b.sourceMu.Unlock()
+	var timeline *clocklineage.Timeline
+	if source, ok := src.(clockLineageSource); ok {
+		timeline = source.ClockLineage()
+	}
+	b.sourceTimeline.Store(timeline)
 
 	if prevCloser != nil {
 		prevCloser()
@@ -390,7 +443,7 @@ func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp
 	// Seed the watchdog clock so a freshly-attached source is not reported as
 	// stalled before its first packet arrives.
 	b.lastRTPAtNanos.Store(time.Now().UnixNano())
-	go b.forwardLoop(src, newLoopDone, deliver)
+	go b.forwardLoop(src, generation, newLoopDone, deliver)
 }
 
 // SourceActive reports whether a source is currently attached to this bus.
@@ -398,6 +451,45 @@ func (b *AudioBus) SourceActive() bool {
 	b.sourceMu.Lock()
 	defer b.sourceMu.Unlock()
 	return b.source != nil
+}
+
+// CaptureTime maps an RTP timestamp onto the active publisher's NTP clock.
+// The timeline pointer is replaced on every source attach, so reconnects cannot
+// reuse the previous publisher's clock mapping.
+func (b *AudioBus) CaptureTime(rtpTimestamp uint32, now time.Time) (time.Time, bool) {
+	timeline := b.sourceTimeline.Load()
+	if timeline == nil {
+		return time.Time{}, false
+	}
+	return timeline.CaptureTime(rtpTimestamp, now, 48_000, 10*time.Second)
+}
+
+// SourceClockSnapshot is the bounded publisher Sender Report state exposed by
+// the media-debug endpoint for one AudioBus.
+type SourceClockSnapshot struct {
+	BusID        BusID  `json:"bus_id"`
+	Known        bool   `json:"known"`
+	SSRC         uint32 `json:"ssrc"`
+	NTPTime      uint64 `json:"ntp_time"`
+	RTPTime      uint32 `json:"rtp_time"`
+	ObservedAtNs int64  `json:"observed_at_ns"`
+	ReportCount  uint64 `json:"report_count"`
+}
+
+func (b *AudioBus) SourceClockSnapshot() SourceClockSnapshot {
+	result := SourceClockSnapshot{BusID: b.ID}
+	timeline := b.sourceTimeline.Load()
+	if timeline == nil {
+		return result
+	}
+	snapshot, ok := timeline.Snapshot()
+	result.Known = ok
+	result.SSRC = snapshot.SSRC
+	result.NTPTime = snapshot.NTPTime
+	result.RTPTime = snapshot.RTPTime
+	result.ObservedAtNs = snapshot.ObservedAtNs
+	result.ReportCount = snapshot.ReportCount
+	return result
 }
 
 // LastRTPAge returns how long since this bus last forwarded an RTP packet.
@@ -464,18 +556,19 @@ func (b *AudioBus) close() {
 
 // forwardLoop reads RTP from src and calls deliver for each packet until src
 // errors or the bus is closed. loopDone is closed on exit.
-//
-// LockOSThread pins this goroutine to a single OS thread for CPU cache
-// locality on the hot forwarding path (same technique as OpenAI's Go relay).
-func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, deliver func(*rtp.Packet)) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+func (b *AudioBus) forwardLoop(
+	src SourceSession,
+	generation uint64,
+	loopDone chan struct{},
+	deliver func(*rtp.Packet, uint64),
+) {
 	defer close(loopDone)
 	defer func() {
 		b.sourceMu.Lock()
 		if b.source == src {
 			b.source = nil
 			b.sourceCloser = nil
+			b.sourceTimeline.Store(nil)
 		}
 		b.sourceMu.Unlock()
 
@@ -504,18 +597,18 @@ func (b *AudioBus) forwardLoop(src SourceSession, loopDone chan struct{}, delive
 		b.ByteCount.Add(uint64(len(pkt.Payload)))
 		b.lastRTPAtNanos.Store(rxTs)
 
-		// Normalise padding before forwarding (radio-glitch fix: pion strips
-		// padding bytes but leaves Header.Padding=true; receivers then read
-		// the last payload byte as padding length and discard the packet).
-		pkt.Header.Padding = false
-		pkt.PaddingSize = 0
-
-		deliver(pkt)
+		deliver(pkt, generation)
 		txTs := time.Now().UnixNano() // A3/A4 measurement: egress timestamp
 		b.packetLog.record(PacketLogEntry{
-			Seq:    pkt.Header.SequenceNumber,
-			RxTsNs: rxTs,
-			TxTsNs: txTs,
+			Seq:          pkt.Header.SequenceNumber,
+			RtpTsSamples: pkt.Header.Timestamp,
+			PayloadType:  pkt.Header.PayloadType,
+			Ssrc:         pkt.Header.SSRC,
+			PayloadBytes: uint64(len(pkt.Payload)),
+			Padding:      pkt.Header.Padding,
+			PaddingBytes: pkt.PaddingSize,
+			RxTsNs:       rxTs,
+			TxTsNs:       txTs,
 		})
 	}
 }
@@ -664,8 +757,17 @@ func (r *RelaySession) SetSource(busID BusID, role BusRole, src SourceSession, c
 	errCounts := make(map[string]int, 8)
 	deadSubs := make([]string, 0, 8)
 
-	bus.SetSource(src, closer, func(pkt *rtp.Packet) {
-		r.deliver(busID, pkt, errCounts, &deadSubs)
+	bus.SetSource(src, closer, func(pkt *rtp.Packet, generation uint64) {
+		captureTime, captureTimeKnown := bus.CaptureTime(pkt.Timestamp, time.Now())
+		r.deliverWithSource(
+			busID,
+			pkt,
+			captureTime,
+			captureTimeKnown,
+			downlink.SourceIdentity{BusID: string(busID), Generation: generation, SSRC: pkt.SSRC},
+			errCounts,
+			&deadSubs,
+		)
 	})
 }
 
@@ -674,34 +776,50 @@ func (r *RelaySession) SetSource(busID BusID, role BusRole, src SourceSession, c
 // or the virtual mix (entry.busID == BusMix). A BusMix subscriber therefore
 // receives RTP from all buses — byte-identical to the room-wide behavior.
 //
-// Allocation-free on the fast path: errCounts and deadSubs are pre-allocated
-// per-bus in the SetSource closure and reused across calls.
+// errCounts and deadSubs are pre-allocated per bus. A subscriber with
+// negotiated packet mutation currently requires a deep RTP header clone; that
+// clone allocates extension storage and remains a measured optimization target.
 func (r *RelaySession) deliver(busID BusID, pkt *rtp.Packet, errCounts map[string]int, deadSubs *[]string) {
+	r.deliverWithSource(busID, pkt, time.Time{}, false, downlink.SourceIdentity{}, errCounts, deadSubs)
+}
+
+func (r *RelaySession) deliverWithSource(
+	busID BusID,
+	pkt *rtp.Packet,
+	captureTime time.Time,
+	captureTimeKnown bool,
+	source downlink.SourceIdentity,
+	errCounts map[string]int,
+	deadSubs *[]string,
+) {
 	const maxConsecutiveErrors = 5
 
 	ls := *r.subscriptions.Load()
 
-	for k := range errCounts {
-		delete(errCounts, k)
-	}
 	*deadSubs = (*deadSubs)[:0]
 
 	for _, e := range ls {
 		if e.busID != busID && e.busID != BusMix {
 			continue
 		}
-		if wErr := e.sub.WriteRTP(pkt); wErr != nil {
+		out := pkt
+		if e.dl.RequiresPacketCopy() {
+			header := pkt.Header.Clone()
+			out = &rtp.Packet{Header: header, Payload: pkt.Payload, PaddingSize: pkt.PaddingSize}
+		}
+		if wErr := e.dl.WriteRTPWithSource(out, captureTime, captureTimeKnown, source); wErr != nil {
 			errCounts[e.subscriberID]++
 			if errCounts[e.subscriberID] >= maxConsecutiveErrors {
 				*deadSubs = append(*deadSubs, e.subscriberID)
 			}
 		} else {
-			errCounts[e.subscriberID] = 0
+			delete(errCounts, e.subscriberID)
 		}
 	}
 
 	for _, id := range *deadSubs {
 		r.RemoveSubscription(id)
+		delete(errCounts, id)
 		slog.Warn("evicted dead subscription", "relay_session_id", r.ID, "subscriber_id", id)
 	}
 }
@@ -710,7 +828,17 @@ func (r *RelaySession) deliver(busID BusID, pkt *rtp.Packet, errCounts map[strin
 // BusMix to receive RTP from every bus (relay.out("mix") semantics); pass a
 // concrete BusID (e.g. "voice") to receive only that bus (spec §7).
 // Returns ErrRoomFull when r.maxSubscriptions > 0 and capacity is reached.
+//
+// sub is wrapped in a passthrough Downlink (no RTCP reader, no abs-send-time).
+// Use AddDownlink when a full Downlink with RTCP stats is available.
 func (r *RelaySession) AddSubscription(subscriberID string, busID BusID, sub BusSubscription) error {
+	return r.AddDownlink(subscriberID, busID, downlink.NewPassthrough(subscriberID, sub))
+}
+
+// AddDownlink registers a full Downlink (with RTCP stats) for subscriberID.
+// session.go uses this path for WebRTC listeners where an RTPSender is available.
+// Returns ErrRoomFull when r.maxSubscriptions > 0 and capacity is reached.
+func (r *RelaySession) AddDownlink(subscriberID string, busID BusID, dl *downlink.Downlink) error {
 	r.subscriptionsMu.Lock()
 	defer r.subscriptionsMu.Unlock()
 
@@ -720,24 +848,55 @@ func (r *RelaySession) AddSubscription(subscriberID string, busID BusID, sub Bus
 	}
 	next := make([]*subscriptionEntry, len(old)+1)
 	copy(next, old)
-	next[len(old)] = &subscriptionEntry{subscriberID: subscriberID, busID: busID, sub: sub}
+	next[len(old)] = &subscriptionEntry{subscriberID: subscriberID, busID: busID, dl: dl}
 	r.subscriptions.Store(&next)
 	return nil
+}
+
+// DownlinkSnapshots returns telemetry snapshots for all active subscribers.
+// BusID is populated here from the subscriptionEntry because Downlink itself
+// is bus-agnostic. Called from the HTTP handler goroutine; all reads are atomic.
+func (r *RelaySession) DownlinkSnapshots() []downlink.DownlinkSnapshot {
+	ls := *r.subscriptions.Load()
+	snaps := make([]downlink.DownlinkSnapshot, 0, len(ls))
+	for _, e := range ls {
+		snap := e.dl.Snapshot()
+		snap.BusID = string(e.busID)
+		snaps = append(snaps, snap)
+	}
+	return snaps
+}
+
+// SourceClockSnapshots returns one bounded publisher clock snapshot per bus.
+func (r *RelaySession) SourceClockSnapshots() []SourceClockSnapshot {
+	r.busesMu.RLock()
+	defer r.busesMu.RUnlock()
+	snapshots := make([]SourceClockSnapshot, 0, len(r.buses))
+	for _, bus := range r.buses {
+		snapshots = append(snapshots, bus.SourceClockSnapshot())
+	}
+	return snapshots
 }
 
 // RemoveSubscription deregisters the subscription for subscriberID. No-op if absent.
 func (r *RelaySession) RemoveSubscription(subscriberID string) {
 	r.subscriptionsMu.Lock()
-	defer r.subscriptionsMu.Unlock()
-
 	old := *r.subscriptions.Load()
 	next := make([]*subscriptionEntry, 0, len(old))
+	var removed []*subscriptionEntry
 	for _, e := range old {
 		if e.subscriberID != subscriberID {
 			next = append(next, e)
+		} else {
+			removed = append(removed, e)
 		}
 	}
 	r.subscriptions.Store(&next)
+	r.subscriptionsMu.Unlock()
+
+	for _, e := range removed {
+		e.dl.StopPacer()
+	}
 }
 
 // TryReserveSlot atomically reserves a pending subscription slot.
@@ -845,6 +1004,9 @@ func (r *RelaySession) AnyBusStalled(threshold time.Duration) bool {
 func (r *RelaySession) Close() {
 	r.closeOnce.Do(func() {
 		close(r.done)
+		for _, e := range *r.subscriptions.Load() {
+			e.dl.StopPacer()
+		}
 		r.expiryMu.Lock()
 		if r.expiryTimer != nil {
 			r.expiryTimer.Stop()

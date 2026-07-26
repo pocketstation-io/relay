@@ -38,6 +38,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
+	"github.com/pocketstation-io/relay/internal/clocklineage"
+	"github.com/pocketstation-io/relay/internal/downlink"
 	"github.com/pocketstation-io/relay/internal/graph"
 )
 
@@ -116,7 +118,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 
 	rm := s.sessions_.GetOrCreate(sessionID)
 
-	pc, err := s.newWHIPPeerConnection()
+	pc, lineage, err := s.newWHIPPeerConnection()
 	if err != nil {
 		slog.Error("WHIP: failed to create peer connection", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -127,8 +129,13 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 
 	if isPublish {
 		busCapture := busID
-		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			rm.SetSource(busCapture, busRoleFor(busCapture), &trackSource{track: track}, func() { _ = pc.Close() })
+		pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+			var timeline *clocklineage.Timeline
+			if lineage != nil {
+				timeline = lineage.Remote(uint32(track.SSRC()))
+			}
+			go drainPublisherRTCP(receiver)
+			rm.SetSource(busCapture, busRoleFor(busCapture), &trackSource{track: track, timeline: timeline}, func() { _ = pc.Close() })
 		})
 	} else {
 		listenerMime := webrtc.MimeTypeOpus
@@ -144,7 +151,8 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 			http.Error(w, "failed to create audio track", http.StatusInternalServerError)
 			return
 		}
-		if _, aErr := pc.AddTrack(audioTrack); aErr != nil {
+		sender, aErr := pc.AddTrack(audioTrack)
+		if aErr != nil {
 			_ = pc.Close()
 			http.Error(w, "failed to add audio track", http.StatusInternalServerError)
 			return
@@ -158,7 +166,24 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 				if redEnabled() {
 					sub = newREDListener(audioTrack, opusPayloadType)
 				}
-				_ = rm.AddSubscription(connCapture, busCapture, sub)
+				dl := downlink.NewForwardingDownlink(connCapture, sub, nil)
+				if localDescription := pc.LocalDescription(); localDescription != nil {
+					dl.ConfigureExtensions(localDescription.SDP)
+				}
+				if lineage != nil {
+					parameters := sender.GetParameters()
+					if len(parameters.Encodings) > 0 {
+						dl.SetSenderTimeline(lineage.Local(uint32(parameters.Encodings[0].SSRC)))
+					}
+				}
+				var onNACK downlink.NackCallback
+				if !redEnabled() {
+					onNACK = dl.HandleNACK
+				}
+				dl.SetFeedback(downlink.StartFeedbackReader(sender, dl.Stats(), nil, onNACK))
+				if err := rm.AddDownlink(connCapture, busCapture, dl); err != nil {
+					dl.StopPacer()
+				}
 			case webrtc.PeerConnectionStateFailed,
 				webrtc.PeerConnectionStateClosed,
 				webrtc.PeerConnectionStateDisconnected:
@@ -300,20 +325,20 @@ func (s *Server) handleWHIPDelete(w http.ResponseWriter, r *http.Request) {
 // newWHIPPeerConnection creates a PeerConnection for WHIP/WHEP connections.
 // Unlike WebSocket sessions, WHIP PCs do not wire OnICECandidate to a WebSocket.
 // ICE gathering completes synchronously before the HTTP response is returned.
-func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, error) {
+func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
 	iceServers := s.iceServers
 	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
 	}
 	pcCfg := webrtc.Configuration{ICEServers: iceServers}
 
-	m, err := newMediaEngineWithAudioNACK()
+	m, err := NewMediaEngineWithAudioNACK()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	ir, err := newInterceptorRegistry(m)
+	ir, lineage, err := newInterceptorRegistryWithClockLineage(m)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if s.iceUDPMux != nil || s.iceTCPMux != nil || len(s.nat1to1IPs) > 0 {
@@ -332,11 +357,13 @@ func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, error) {
 			webrtc.WithMediaEngine(m),
 			webrtc.WithInterceptorRegistry(ir),
 		)
-		return api.NewPeerConnection(pcCfg)
+		pc, pcErr := api.NewPeerConnection(pcCfg)
+		return pc, lineage, pcErr
 	}
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(m),
 		webrtc.WithInterceptorRegistry(ir),
 	)
-	return api.NewPeerConnection(pcCfg)
+	pc, pcErr := api.NewPeerConnection(pcCfg)
+	return pc, lineage, pcErr
 }
