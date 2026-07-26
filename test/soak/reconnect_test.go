@@ -137,9 +137,9 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	// connCleanup func) so each can be closed independently. Returns
 	// (nil, nil, nil, errorMessage) on failure.
 	type publisherHandles struct {
-		stopRTP        chan struct{}
-		closePC        func()
-		closeWS        func()
+		stopRTP chan struct{}
+		closePC func()
+		closeWS func()
 		// waitGoroutines must be called AFTER closePC and closeWS to ensure
 		// the drainMessages and ICE relay goroutines have fully exited.
 		waitGoroutines func()

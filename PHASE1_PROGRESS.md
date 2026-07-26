@@ -76,17 +76,29 @@ Verification:
   scheduler oversleep can no longer fail an unrelated exact-bucket assertion.
 - `go vet ./...`: PASS.
 - `go test -short ./...`: PASS.
+- `go test -race ./...`: PASS on the formatting/workflow follow-up; the soak
+  package completed in 312.288 seconds.
+- The full 14-gate `pocketstation-lab` candidate and independent verifier:
+  PASS.
+- Remote CI exposed five pre-existing files that were not canonical `gofmt`
+  output. The merge candidate applies only the formatter's mechanical changes
+  to those files so the repository-wide format gate is reproducible locally.
+- The same CI audit found the explicit session-latency step still referenced
+  the removed `internal/room` package. It now runs real canonical
+  `/v1/sessions/{id}/latency` success and not-found regressions in
+  `internal/server`; the repository-wide race suite still covers every package.
 
-**Status:** `SAFE-TO-TEST`. The repository-local regression is fixed. Full
-`go test -race ./...` and the clean `pocketstation-lab` candidate remain the
-merge gates.
+**Status:** `SAFE-TO-MERGE` locally. The repository-local format, vet,
+short-test, focused endpoint, and full race gates pass. The exact remote head
+must still be green before merge.
 
 ### Staff Bar Self-Check — cadence catch-up bound
 
 - Smallest correct design: yes — one cadence-relative lower bound in the
   experimental pacing path
 - Tests added or updated: yes — deterministic helper/histogram coverage and
-  100 repetitions of the original wall-clock regression
+  100 repetitions of the original wall-clock regression, plus canonical
+  session-latency endpoint coverage replacing a stale CI target
 - Hot-path safe: yes — no allocation, lock, blocking call, logging, panic, or
   asynchronous work was added to packet scheduling
 - Public API changed: no
@@ -94,7 +106,7 @@ merge gates.
 - Phase scope respected: yes — this fixes a W11 acceptance failure in existing
   relay behavior
 - Unsafe added: no
-- Remaining risk: full race and clean product-proof acceptance have not yet run
+- Remaining risk: remote CI must pass on the exact formatting follow-up head
 
 ### Forward RTP reorder hardening (PARTIAL, 2026-07-18)
 
