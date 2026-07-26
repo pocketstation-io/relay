@@ -21,7 +21,7 @@ jobs:
       - run: go vet ./...
       - run: go test -race -short ./...
       - name: Session latency endpoint tests
-        run: go test -race -run "TestLatencyReport" ./internal/room/
+        run: go test -race -run "LatencyEndpoint" ./internal/server/
 
   shutdown:
     runs-on: ubuntu-latest

@@ -10,8 +10,8 @@ import (
 type Role string
 
 const (
-	RoleSource   Role = "source"
-	RoleListener Role = "listener" // v2.3 alias; v3.0 uses RoleSubscriber
+	RoleSource     Role = "source"
+	RoleListener   Role = "listener" // v2.3 alias; v3.0 uses RoleSubscriber
 	RoleSubscriber Role = "subscriber"
 )
 
