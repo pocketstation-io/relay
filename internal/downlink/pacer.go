@@ -62,16 +62,18 @@ func (h *cadenceSpacingHistogram) percentileMs(percentile float64) float64 {
 }
 
 const (
-	audioClockRateHz            = uint64(48_000)
-	defaultPacerCapacity        = 32
-	defaultPacerMaxQueueAge     = 120 * time.Millisecond
-	defaultPacerTargetDelay     = 10 * time.Millisecond
-	defaultPacerInitialWait     = 10 * time.Millisecond
-	defaultPacerReorderWait     = 60 * time.Millisecond
-	defaultForwardReorderWaitMs = 40 * time.Millisecond
-	defaultPacerMaxLead         = 250 * time.Millisecond
-	defaultPacerMaxLateness     = 40 * time.Millisecond
-	defaultPacerResetSamples    = uint32(audioClockRateHz * 5)
+	audioClockRateHz                      = uint64(48_000)
+	defaultPacerCapacity                  = 32
+	defaultPacerMaxQueueAge               = 120 * time.Millisecond
+	defaultPacerTargetDelay               = 10 * time.Millisecond
+	defaultPacerInitialWait               = 10 * time.Millisecond
+	defaultPacerReorderWait               = 60 * time.Millisecond
+	defaultForwardReorderWaitMs           = 40 * time.Millisecond
+	defaultPacerMaxLead                   = 250 * time.Millisecond
+	defaultPacerMaxLateness               = 40 * time.Millisecond
+	defaultPacerResetSamples              = uint32(audioClockRateHz * 5)
+	minimumCadenceSpacingNumeratorRatio   = int64(4)
+	minimumCadenceSpacingDenominatorRatio = int64(5)
 )
 
 type packetWriter func(*rtp.Packet) error
@@ -447,6 +449,7 @@ func (p *AudioCadencePacer) run() {
 	}
 	defer timer.Stop()
 	var lastSendAtNs int64
+	var lastPrimaryWriteStartedAt time.Time
 	var pending [defaultPacerCapacity + 1]pacedPacket
 	pendingLen := 0
 	var forwarder sequenceForwarder
@@ -576,6 +579,8 @@ func (p *AudioCadencePacer) run() {
 			}
 			isPrimaryMedia := true
 			if p.paceMedia {
+				timelineWasInitialized := timeline.initialized
+				previousDueAt := timeline.lastDueAt
 				dueAt, reset, advances := timeline.dueAt(item.packet.Timestamp, item.enqueuedAt)
 				isPrimaryMedia = advances
 				if reset {
@@ -583,6 +588,13 @@ func (p *AudioCadencePacer) run() {
 				}
 				if !isPrimaryMedia {
 					p.recoveryPacketCount.Add(1)
+				}
+				if timelineWasInitialized && advances && !reset && !lastPrimaryWriteStartedAt.IsZero() {
+					mediaSpacingNs := dueAt.Sub(previousDueAt)
+					minimumDueAt := lastPrimaryWriteStartedAt.Add(minimumCadenceSpacingNs(mediaSpacingNs))
+					if minimumDueAt.After(dueAt) {
+						dueAt = minimumDueAt
+					}
 				}
 				waitStarted := time.Now()
 				requestedWait := max(dueAt.Sub(waitStarted), 0)
@@ -639,6 +651,7 @@ func (p *AudioCadencePacer) run() {
 			}
 			if isPrimaryMedia {
 				lastSendAtNs = nowNs
+				lastPrimaryWriteStartedAt = writeStarted
 			}
 		}
 	}
@@ -889,6 +902,16 @@ func (p *AudioCadencePacer) waitUntil(timer *time.Timer, dueAt time.Time) bool {
 			return false
 		}
 	}
+}
+
+func minimumCadenceSpacingNs(mediaSpacingNs time.Duration) time.Duration {
+	if mediaSpacingNs <= 0 {
+		return 0
+	}
+	// Bound catch-up after a late scheduler wake so the relay can recover
+	// media time without turning that recovery into a subscriber-visible burst.
+	return mediaSpacingNs * time.Duration(minimumCadenceSpacingNumeratorRatio) /
+		time.Duration(minimumCadenceSpacingDenominatorRatio)
 }
 
 func observeAtomicMax(target *atomic.Uint64, value uint64) {

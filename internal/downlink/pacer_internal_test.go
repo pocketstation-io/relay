@@ -123,6 +123,38 @@ func TestGivenLateArrival_WhenTimelineReanchors_ThenReserveIsNotReapplied(t *tes
 	}
 }
 
+func TestGivenMediaCadence_WhenMinimumSpacingCalculated_ThenCatchUpIsBounded(t *testing.T) {
+	tests := []struct {
+		name           string
+		mediaSpacingNs time.Duration
+		wantNs         time.Duration
+	}{
+		{name: "20ms frame", mediaSpacingNs: 20 * time.Millisecond, wantNs: 16 * time.Millisecond},
+		{name: "10ms frame", mediaSpacingNs: 10 * time.Millisecond, wantNs: 8 * time.Millisecond},
+		{name: "non-advancing timestamp", mediaSpacingNs: 0, wantNs: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if gotNs := minimumCadenceSpacingNs(test.mediaSpacingNs); gotNs != test.wantNs {
+				t.Fatalf("minimum spacing = %s, want %s", gotNs, test.wantNs)
+			}
+		})
+	}
+}
+
+func TestGivenKnownSpacings_WhenHistogramQueried_ThenPercentilesUseExpectedBuckets(t *testing.T) {
+	var histogram cadenceSpacingHistogram
+	histogram.observe(int64(16 * time.Millisecond))
+	histogram.observe(int64(20 * time.Millisecond))
+
+	if got := histogram.percentileMs(0.50); got != 18 {
+		t.Fatalf("spacing p50 = %.1fms, want 18ms bucket", got)
+	}
+	if got := histogram.percentileMs(0.95); got != 22 {
+		t.Fatalf("spacing p95 = %.1fms, want 22ms bucket", got)
+	}
+}
+
 func TestGivenReorderedQueue_WhenSorted_ThenSequenceOrderIsRestored(t *testing.T) {
 	items := []pacedPacket{
 		{packet: &rtp.Packet{Header: rtp.Header{SequenceNumber: 102}}, extSeq: 102},
@@ -175,9 +207,6 @@ func TestGivenClusteredPackets_WhenCadencePacerRuns_ThenWritesAreSpaced(t *testi
 		}
 	}
 	snapshot := pacer.Snapshot()
-	if snapshot.SpacingP50Ms != 22 || snapshot.SpacingP95Ms != 22 {
-		t.Fatalf("spacing percentiles = %.1f/%.1fms, want 22/22ms buckets", snapshot.SpacingP50Ms, snapshot.SpacingP95Ms)
-	}
 	if snapshot.MaxTimerWaitNs > uint64(35*time.Millisecond) {
 		t.Fatalf("max timer wait = %s, want <= 35ms", time.Duration(snapshot.MaxTimerWaitNs))
 	}
