@@ -52,6 +52,26 @@ The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
 
 ## Completed
 
+### Main workflow reproducibility (SAFE-TO-TEST, 2026-07-26)
+
+The first W11 merge exposed two pre-existing workflow defects that pull
+requests could not observe:
+
+- The smoke job asked `go build` to compile two commands without `-o`, then
+  attempted to execute root-level binaries that Go had not produced.
+- The deploy setup action installed `flyctl`, while the deploy step invoked the
+  absent `fly` alias.
+
+The workflow now builds each smoke binary to the runner temporary directory,
+uses a cleanup trap for the relay process, and invokes `flyctl` by its installed
+name. Shutdown, integration, smoke, and short-soak jobs run on pull requests as
+well as `main`, so a green PR now exercises the same component gates that run
+after merge. Deployment remains a `main`-only real external action and requires
+the repository-scoped `FLY_API_TOKEN` secret.
+
+This is CI/deployment orchestration only. No relay runtime, media-plane,
+threshold, product path, scaffold, mock, fallback, or loopback claim changes.
+
 ### Cadence catch-up bound (SAFE-TO-TEST, 2026-07-26)
 
 The W11 clean-candidate gate reproduced an intermittent cadence-pacer write
