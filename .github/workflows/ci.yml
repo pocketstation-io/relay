@@ -60,7 +60,8 @@ jobs:
           go build -o "${RUNNER_TEMP}/fake-source" ./cmd/fake-source
       - name: Smoke test — fake-source against live relay
         run: |
-          POCKETSTATION_JWT_SECRET=smoke-secret "${RUNNER_TEMP}/relay-server" &
+          PORT=8080 POCKETSTATION_JWT_SECRET=smoke-secret \
+            "${RUNNER_TEMP}/relay-server" &
           relay_pid=$!
           trap 'kill "${relay_pid}" 2>/dev/null || true' EXIT
           sleep 1

@@ -61,6 +61,9 @@ requests could not observe:
   attempted to execute root-level binaries that Go had not produced.
 - The deploy setup action installed `flyctl`, while the deploy step invoked the
   absent `fly` alias.
+- The subprocess smoke relied on the relay's former port 8080 even after the
+  binary default moved to 4800. The fixture now sets port 8080 explicitly for
+  both sides instead of depending on a mutable production default.
 
 The workflow now builds each smoke binary to the runner temporary directory,
 uses a cleanup trap for the relay process, and invokes `flyctl` by its installed
