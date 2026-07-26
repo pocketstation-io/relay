@@ -11,7 +11,7 @@ import (
 // that the relay never holds plaintext audio.
 //
 // Invariant: only the source role may send KEY_EXCHANGE.
-func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
+func (s *signalPeer) handleKeyExchange(msg signaling.ClientMessage) {
 	if s.role != auth.RoleSource {
 		s.sendError(signaling.ErrCodeRoleMismatch, "KEY_EXCHANGE requires a source token")
 		return
@@ -27,18 +27,18 @@ func (s *session) handleKeyExchange(msg signaling.ClientMessage) {
 	}
 
 	s.srv.mu.RLock()
-	sessions := make([]*session, 0, len(s.srv.sessions))
-	for _, sess := range s.srv.sessions {
-		sessions = append(sessions, sess)
+	peers := make([]*signalPeer, 0, len(s.srv.signalPeers))
+	for _, peer := range s.srv.signalPeers {
+		peers = append(peers, peer)
 	}
 	s.srv.mu.RUnlock()
 
-	for _, sess := range sessions {
-		if sess.id == s.id || sess.room == nil || sess.room.ID != s.room.ID {
+	for _, peer := range peers {
+		if peer.id == s.id || peer.room == nil || peer.room.ID != s.room.ID {
 			continue
 		}
-		if sess.role == auth.RoleSubscriber || sess.role == auth.RoleListener {
-			_ = sess.send(forward)
+		if peer.role == auth.RoleSubscriber || peer.role == auth.RoleListener {
+			_ = peer.send(forward)
 		}
 	}
 

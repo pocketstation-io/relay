@@ -93,7 +93,7 @@ func TestGiven_FractionLostFromRTCP_When_Converted_Then_MapsCorrectly(t *testing
 }
 
 func TestGiven_NoSourceInRoom_When_MaybeEmitCodecHint_Then_NoPanic(t *testing.T) {
-	srv := &Server{sessions: make(map[string]*session)}
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := &codecHintState{}
 	hint := bitrateForLoss(0.10)
 	// Must not panic when no source session exists for the room.
@@ -101,7 +101,7 @@ func TestGiven_NoSourceInRoom_When_MaybeEmitCodecHint_Then_NoPanic(t *testing.T)
 }
 
 func TestGiven_DebouncePeriodNotElapsed_When_MaybeEmitCodecHint_Then_StateUnchanged(t *testing.T) {
-	srv := &Server{sessions: make(map[string]*session)}
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	before := time.Now().Add(-1 * time.Millisecond) // lastSent is effectively "just now"
 	state := &codecHintState{lastSent: before}
 	hint := bitrateForLoss(0.10)
@@ -137,7 +137,7 @@ func TestGiven_TwoRooms_When_RoomCodecHintState_Then_DifferentPointers(t *testin
 // maybeEmitCodecHint to actual CODEC_HINT delivery on the source WebSocket.
 //
 // Setup: a real gorilla WebSocket pair (source side) is injected directly into
-// Server.sessions so the white-box call to maybeEmitCodecHint can find it.
+// Server.signalPeers so the white-box call to maybeEmitCodecHint can find it.
 // The debounce is cleared (lastSent = zero) so the first call always emits.
 //
 // The RTCP→sender.ReadRTCP path that calls maybeEmitCodecHint is exercised via
@@ -181,13 +181,13 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 	serverConn := <-serverConnCh
 	defer serverConn.Close()
 
-	// Build a relay Server whose sessions map contains one source session
-	// backed by the server-side WebSocket conn.
-	srv := &Server{sessions: make(map[string]*session)}
+	// Build a relay Server whose signaling-peer map contains one source peer
+	// backed by the server-side WebSocket connection.
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	rm := graph.New(roomID)
 	defer rm.Close()
 
-	sourceSess := &session{
+	sourcePeer := &signalPeer{
 		id:   "src-session-e2e",
 		srv:  srv,
 		conn: serverConn,
@@ -195,7 +195,7 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 		role: auth.RoleSource,
 	}
 	srv.mu.Lock()
-	srv.sessions[sourceSess.id] = sourceSess
+	srv.signalPeers[sourcePeer.id] = sourcePeer
 	srv.mu.Unlock()
 
 	// Drain source WebSocket messages into a buffered channel.

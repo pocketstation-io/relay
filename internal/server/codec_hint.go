@@ -116,21 +116,21 @@ func (s *Server) maybeEmitCodecHint(
 	state.lastSent = time.Now()
 	state.mu.Unlock()
 
-	// Find the source session for this room. Takes s.mu briefly.
+	// Find the source signaling peer for this RelaySession. Takes s.mu briefly.
 	s.mu.Lock()
-	var sourceSess *session
-	for _, sess := range s.sessions {
-		if sess.room != nil && sess.room.ID == roomID && sess.role == auth.RoleSource {
-			sourceSess = sess
+	var sourcePeer *signalPeer
+	for _, peer := range s.signalPeers {
+		if peer.room != nil && peer.room.ID == roomID && peer.role == auth.RoleSource {
+			sourcePeer = peer
 			break
 		}
 	}
 	s.mu.Unlock()
 
-	if sourceSess == nil {
+	if sourcePeer == nil {
 		return
 	}
-	_ = sourceSess.send(signaling.ServerMessage{
+	_ = sourcePeer.send(signaling.ServerMessage{
 		Type:      signaling.TypeCodecHint,
 		CodecHint: &hint,
 	})

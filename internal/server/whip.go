@@ -116,7 +116,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		return
 	}
 
-	rm := s.sessions_.GetOrCreate(sessionID)
+	rm := s.relaySessions.GetOrCreate(sessionID)
 
 	pc, lineage, err := s.newWHIPPeerConnection()
 	if err != nil {

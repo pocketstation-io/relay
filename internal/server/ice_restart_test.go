@@ -87,7 +87,7 @@ func TestGiven_TrackerTriggered_When_Reset_Then_RequiresThreeMoreReports(t *test
 
 func TestGiven_NoDebounceElapsed_When_MaybeEmitICERestart_Then_NoMessageSent(t *testing.T) {
 	// Given: a server with no sessions and a state that was last sent "just now".
-	srv := &Server{sessions: make(map[string]*session)}
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := newICERestartState()
 	// Seed the tracker so it will trigger on the next report.
 	state.tracker.record(0.20)
@@ -111,7 +111,7 @@ func TestGiven_NoDebounceElapsed_When_MaybeEmitICERestart_Then_NoMessageSent(t *
 func TestGiven_DebounceElapsed_When_ThreeConsecutiveHighLoss_Then_StateUpdated(t *testing.T) {
 	// Given: a server with no source sessions (so no WS write occurs) and a
 	// state whose lastSent is older than the debounce window.
-	srv := &Server{sessions: make(map[string]*session)}
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := newICERestartState()
 	state.lastSent = time.Now().Add(-(iceRestartDebounce + time.Second))
 
@@ -129,7 +129,7 @@ func TestGiven_DebounceElapsed_When_ThreeConsecutiveHighLoss_Then_StateUpdated(t
 
 func TestGiven_ICERestartJustSent_When_AnotherThreeHighLoss_Then_DebounceBlocks(t *testing.T) {
 	// Given: an ICE_RESTART was sent (lastSent = now, tracker reset).
-	srv := &Server{sessions: make(map[string]*session)}
+	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := newICERestartState()
 	// Simulate having just sent a restart.
 	state.lastSent = time.Now()

@@ -119,7 +119,7 @@ type Config struct {
 
 // Server is the top-level relay server.
 type Server struct {
-	sessions_         *graph.SessionRegistry // named sessions_ to avoid collision with sessions map below
+	relaySessions     *graph.SessionRegistry
 	jwtSecret         []byte
 	settingEngine     *webrtc.SettingEngine
 	api               *webrtc.API
@@ -139,10 +139,10 @@ type Server struct {
 	// Nil when per-IP limiting is disabled (MaxRoomsPerIPPerMinute == -1).
 	ipLimiter *ratelimit.IPLimiter
 
-	// mu guards httpServer and active WebSocket session map.
-	mu         sync.RWMutex
-	httpServer *http.Server
-	sessions   map[string]*session // active WebSocket sessions
+	// mu guards httpServer and the active signaling-peer map.
+	mu          sync.RWMutex
+	httpServer  *http.Server
+	signalPeers map[string]*signalPeer
 
 	// codecHintStates and iceRestartStates are keyed by RelaySession ID.
 	// sync.Map for concurrent access from multiple subscriber RTCP goroutines.
@@ -201,7 +201,7 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
-		sessions_:             graph.NewRegistryWithConfig(regCfg),
+		relaySessions:         graph.NewRegistryWithConfig(regCfg),
 		jwtSecret:             cfg.JWTSecret,
 		settingEngine:         cfg.SettingEngine,
 		api:                   cfg.API,
@@ -216,7 +216,7 @@ func New(cfg Config) *Server {
 		maxRooms:              maxRooms,
 		maxSubscribersPerRoom: maxSubs,
 		ipLimiter:             ipLim,
-		sessions:              make(map[string]*session),
+		signalPeers:           make(map[string]*signalPeer),
 		useTURN:               cfg.UseTURN,
 		publicReceiverURL:     strings.TrimRight(publicReceiverURL, "/"),
 		publicRelayURL:        strings.TrimRight(publicRelayURL, "/"),
@@ -293,10 +293,10 @@ func (s *Server) Serve(addr string) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	hs := s.httpServer
-	// Snapshot the live sessions to close them without holding the lock.
-	toClose := make([]*session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		toClose = append(toClose, sess)
+	// Snapshot the live signaling peers to close them without holding the lock.
+	toClose := make([]*signalPeer, 0, len(s.signalPeers))
+	for _, peer := range s.signalPeers {
+		toClose = append(toClose, peer)
 	}
 	s.mu.Unlock()
 
@@ -307,9 +307,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		Code:    "RELAY_SHUTTING_DOWN",
 		Message: "relay restarting, reconnect",
 	}
-	for _, sess := range toClose {
-		_ = sess.send(shuttingDown)
-		sess.closeConn()
+	for _, peer := range toClose {
+		_ = peer.send(shuttingDown)
+		peer.closeConn()
 	}
 
 	if hs != nil {
@@ -321,7 +321,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	// Close all active rooms so forwardLoops exit and peer connections are
 	// cleaned up before the process exits.
-	s.sessions_.CloseAll()
+	s.relaySessions.CloseAll()
 
 	// Stop the per-IP rate limiter's background goroutine.
 	if s.ipLimiter != nil {
@@ -371,10 +371,10 @@ func (s *Server) echo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
-	fwd, drop := s.sessions_.PacketStats()
+	fwd, drop := s.relaySessions.PacketStats()
 	s.Metrics.PacketsForwarded.Store(fwd)
 	s.Metrics.PacketsDropped.Store(drop)
-	s.Metrics.RoomsActive.Store(int64(s.sessions_.RoomCount()))
+	s.Metrics.RoomsActive.Store(int64(s.relaySessions.RoomCount()))
 	if s.webhookDispatcher != nil {
 		s.Metrics.WebhookErrorsTotal.Store(s.webhookDispatcher.ErrorsTotal())
 	}
@@ -402,7 +402,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limit: reject when the room count has reached the ceiling.
-	if s.sessions_.RoomCount() >= s.maxRooms {
+	if s.relaySessions.RoomCount() >= s.maxRooms {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room_limit_exceeded"})
@@ -410,7 +410,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := newID()
-	s.sessions_.GetOrCreate(id)
+	s.relaySessions.GetOrCreate(id)
 	s.Metrics.RoomsActive.Add(1)
 	slog.Info("session created", "session_id", id)
 	sourceToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSource, 2*time.Hour)
@@ -470,7 +470,7 @@ func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
 		return
 	}
-	if _, active := s.sessions_.Get(invite.sessionID); !active {
+	if _, active := s.relaySessions.Get(invite.sessionID); !active {
 		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
 		return
 	}
@@ -561,25 +561,25 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	sess := &session{
+	peer := &signalPeer{
 		id:   newID(),
 		srv:  s,
 		conn: conn,
 		done: make(chan struct{}),
 	}
-	// Register session so Shutdown can close it.
+	// Register the signaling peer so Shutdown can close it.
 	s.mu.Lock()
-	s.sessions[sess.id] = sess
+	s.signalPeers[peer.id] = peer
 	s.mu.Unlock()
 
 	s.Metrics.SessionsTotal.Add(1)
 	defer func() {
 		s.mu.Lock()
-		delete(s.sessions, sess.id)
+		delete(s.signalPeers, peer.id)
 		s.mu.Unlock()
-		sess.cleanup()
+		peer.cleanup()
 	}()
-	sess.run()
+	peer.run()
 }
 
 func (s *Server) broadcastSessionState(rm *graph.RelaySession) {
@@ -595,16 +595,16 @@ func (s *Server) broadcastSessionState(rm *graph.RelaySession) {
 	}
 
 	s.mu.RLock()
-	targets := make([]*session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		if sess.room == rm {
-			targets = append(targets, sess)
+	targets := make([]*signalPeer, 0, len(s.signalPeers))
+	for _, peer := range s.signalPeers {
+		if peer.room == rm {
+			targets = append(targets, peer)
 		}
 	}
 	s.mu.RUnlock()
 
-	for _, sess := range targets {
-		_ = sess.send(msg)
+	for _, peer := range targets {
+		_ = peer.send(msg)
 	}
 }
 
@@ -615,7 +615,7 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	channels := s.sessions_.ListPublic()
+	channels := s.relaySessions.ListPublic()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(channels)
 }
@@ -625,7 +625,7 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 // Returns 404 when the session does not exist.
 func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	rm, ok := s.sessions_.Get(sessionID)
+	rm, ok := s.relaySessions.Get(sessionID)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -641,7 +641,7 @@ func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 // from WebSocket liveness).
 func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	rm, ok := s.sessions_.Get(sessionID)
+	rm, ok := s.relaySessions.Get(sessionID)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -656,7 +656,7 @@ func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 // packet/byte counts, and NACK counts. Used for latency diagnosis.
 func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	rm, ok := s.sessions_.Get(sessionID)
+	rm, ok := s.relaySessions.Get(sessionID)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -690,7 +690,7 @@ const packetLogMaxLimit = 1000
 // rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
 func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	rm, ok := s.sessions_.Get(sessionID)
+	rm, ok := s.relaySessions.Get(sessionID)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -739,7 +739,7 @@ const sseKeepaliveInterval = 20 * time.Second
 // and keepalives keep the connection alive. Phase 2 wires room-state deltas.
 func (s *Server) sessionSSE(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	rm, ok := s.sessions_.Get(sessionID)
+	rm, ok := s.relaySessions.Get(sessionID)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return

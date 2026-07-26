@@ -26,7 +26,7 @@ func TestGivenLatencySampleWhenCanonicalEndpointQueriedThenP50StatsReturned(t *t
 	if err := json.Unmarshal(createRecorder.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	relaySession, found := relayServer.sessions_.Get(created.SessionID)
+	relaySession, found := relayServer.relaySessions.Get(created.SessionID)
 	if !found {
 		t.Fatalf("created session %q not found", created.SessionID)
 	}

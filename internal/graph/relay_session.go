@@ -836,7 +836,7 @@ func (r *RelaySession) AddSubscription(subscriberID string, busID BusID, sub Bus
 }
 
 // AddDownlink registers a full Downlink (with RTCP stats) for subscriberID.
-// session.go uses this path for WebRTC listeners where an RTPSender is available.
+// signal_peer.go uses this path for WebRTC subscribers with an RTPSender.
 // Returns ErrRoomFull when r.maxSubscriptions > 0 and capacity is reached.
 func (r *RelaySession) AddDownlink(subscriberID string, busID BusID, dl *downlink.Downlink) error {
 	r.subscriptionsMu.Lock()

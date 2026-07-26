@@ -20,9 +20,9 @@ import (
 	"github.com/pocketstation-io/relay/internal/webhook"
 )
 
-// session represents one WebSocket peer connection.
+// signalPeer owns one WebSocket signaling and WebRTC peer connection.
 // wmu serialises WebSocket writes from the read loop and Pion's ICE goroutine.
-type session struct {
+type signalPeer struct {
 	id  string
 	srv *Server
 
@@ -47,7 +47,7 @@ type session struct {
 	subscriptionRegistered atomic.Bool
 }
 
-func (s *session) run() {
+func (s *signalPeer) run() {
 	_ = s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
 	s.conn.SetPongHandler(func(string) error {
 		return s.conn.SetReadDeadline(time.Now().Add(wsKeepAliveTimeout))
@@ -98,7 +98,7 @@ func (s *session) run() {
 	}
 }
 
-func (s *session) cleanup() {
+func (s *signalPeer) cleanup() {
 	s.doneOnce.Do(func() { close(s.done) })
 
 	if s.pc != nil {
@@ -135,7 +135,7 @@ func (s *session) cleanup() {
 	slog.Info("session cleaned up", "session_id", s.id)
 }
 
-func (s *session) closeConn() {
+func (s *signalPeer) closeConn() {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	_ = s.conn.WriteMessage(
@@ -150,7 +150,7 @@ func (s *session) closeConn() {
 //
 // PUBLISH: the session publishes a named bus (msg.BusID, default "voice").
 // SUBSCRIBE: the session subscribes to relay.out("mix") or a named bus.
-func (s *session) handleJoin(msg signaling.ClientMessage) {
+func (s *signalPeer) handleJoin(msg signaling.ClientMessage) {
 	if s.pc != nil {
 		s.sendError(signaling.ErrCodeAlreadyJoined, "session has already joined a room")
 		return
@@ -178,7 +178,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 	if sessionID == "" {
 		sessionID = msg.EffectiveSessionID()
 	}
-	rm := s.srv.sessions_.GetOrCreate(sessionID)
+	rm := s.srv.relaySessions.GetOrCreate(sessionID)
 	s.room = rm
 	s.role = claims.Role
 
@@ -441,7 +441,7 @@ func (s *session) handleJoin(msg signaling.ClientMessage) {
 	s.pendingICE = nil
 }
 
-func (s *session) handleICE(msg signaling.ClientMessage) {
+func (s *signalPeer) handleICE(msg signaling.ClientMessage) {
 	if s.pc == nil || s.pc.RemoteDescription() == nil {
 		s.pendingICE = append(s.pendingICE, msg.Candidate)
 		return
@@ -451,7 +451,7 @@ func (s *session) handleICE(msg signaling.ClientMessage) {
 	}
 }
 
-func (s *session) handleSDPAnswer(msg signaling.ClientMessage) {
+func (s *signalPeer) handleSDPAnswer(msg signaling.ClientMessage) {
 	if s.pc == nil || s.pc.LocalDescription() == nil || s.pc.RemoteDescription() != nil {
 		s.sendError(signaling.ErrCodeSDPError, "SDP_ANSWER is not expected")
 		return
@@ -467,7 +467,7 @@ func (s *session) handleSDPAnswer(msg signaling.ClientMessage) {
 	s.pendingICE = nil
 }
 
-func (s *session) handleLatencyReport(msg signaling.ClientMessage) {
+func (s *signalPeer) handleLatencyReport(msg signaling.ClientMessage) {
 	if s.room == nil {
 		s.sendError(signaling.ErrCodeNotJoined, "join a session before sending LATENCY_REPORT")
 		return
@@ -604,7 +604,7 @@ func newInterceptorRegistryWithClockLineage(m *webrtc.MediaEngine) (*interceptor
 	return i, lineage, nil
 }
 
-func (s *session) newPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
+func (s *signalPeer) newPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
 	iceServers := s.srv.iceServers
 	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
@@ -694,7 +694,7 @@ func (s *session) newPeerConnection() (*webrtc.PeerConnection, *clocklineage.Reg
 	return pc, lineage, nil
 }
 
-func (s *session) send(msg signaling.ServerMessage) error {
+func (s *signalPeer) send(msg signaling.ServerMessage) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	err := s.conn.WriteJSON(msg)
@@ -704,7 +704,7 @@ func (s *session) send(msg signaling.ServerMessage) error {
 	return err
 }
 
-func (s *session) sendError(code signaling.ErrorCode, message string) {
+func (s *signalPeer) sendError(code signaling.ErrorCode, message string) {
 	s.send(signaling.ServerMessage{Type: signaling.TypeError, Code: string(code), Message: message})
 }
 
