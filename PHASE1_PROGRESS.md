@@ -52,6 +52,50 @@ The relay is fully v3.0-vocabulary. All claimed "not started" items are done.
 
 ## Completed
 
+### Cadence catch-up bound (SAFE-TO-TEST, 2026-07-26)
+
+The W11 clean-candidate gate reproduced an intermittent cadence-pacer write
+interval below its existing 15 ms lower bound: 13.920834 ms in the acceptance
+run and 13.402625 ms in a focused 100-repetition run. The experimental cadence
+pacer kept due times anchored to the original RTP timeline after a late
+scheduler wake, so a following write could consume the accumulated timing debt
+as a subscriber-visible burst.
+
+The cadence path now limits catch-up to 20% of the current RTP frame spacing.
+This preserves a 16 ms minimum for the default 20 ms profile and an 8 ms
+minimum for the optional 10 ms profile. Recovery packets, explicit timeline
+resets, and the production forward-pacer path are unchanged. This follows the
+bounded elapsed-time/budget pattern used by libwebrtc pacing while retaining
+PocketStation's RTP-timestamp schedule.
+
+Verification:
+
+- Focused cadence scheduler, catch-up, and histogram tests passed 100
+  repetitions while retaining the original 15–35 ms raw-spacing contract.
+- Histogram bucket behavior is tested separately with deterministic inputs;
+  scheduler oversleep can no longer fail an unrelated exact-bucket assertion.
+- `go vet ./...`: PASS.
+- `go test -short ./...`: PASS.
+
+**Status:** `SAFE-TO-TEST`. The repository-local regression is fixed. Full
+`go test -race ./...` and the clean `pocketstation-lab` candidate remain the
+merge gates.
+
+### Staff Bar Self-Check — cadence catch-up bound
+
+- Smallest correct design: yes — one cadence-relative lower bound in the
+  experimental pacing path
+- Tests added or updated: yes — deterministic helper/histogram coverage and
+  100 repetitions of the original wall-clock regression
+- Hot-path safe: yes — no allocation, lock, blocking call, logging, panic, or
+  asynchronous work was added to packet scheduling
+- Public API changed: no
+- New dependency: no
+- Phase scope respected: yes — this fixes a W11 acceptance failure in existing
+  relay behavior
+- Unsafe added: no
+- Remaining risk: full race and clean product-proof acceptance have not yet run
+
 ### Forward RTP reorder hardening (PARTIAL, 2026-07-18)
 
 The forward downlink previously serialized RTP in arrival order. Under
