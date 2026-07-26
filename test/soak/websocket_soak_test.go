@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,6 +85,9 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		t.Skip("soak test skipped in -short mode")
 	}
 
+	var childWg sync.WaitGroup
+	defer childWg.Wait()
+
 	duration := soakDurationForWS()
 	t.Logf("soak[ws-keepalive]: duration=%s (RELAY_SOAK_FULL=%s)",
 		duration, os.Getenv("RELAY_SOAK_FULL"))
@@ -114,9 +118,11 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 
 	// --- Publisher WebSocket ---
 	pubConn := dialWS(t, ts)
+	defer pubConn.Close()
 
 	// Track whether the relay closed the connection unexpectedly.
 	var wsClosedUnexpectedly atomic.Bool
+	var pingCount atomic.Int64
 	pubConn.SetCloseHandler(func(code int, text string) error {
 		// Normal application-initiated close (1000) is expected at cleanup.
 		// Any other close code while the soak is still running is a failure.
@@ -125,8 +131,20 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		}
 		return nil
 	})
+	// SetPingHandler must be installed before drainMessages starts ReadJSON.
+	// Gorilla invokes the handler from the read path, and mutating handlers while
+	// another goroutine is reading is a data race under `go test -race`.
+	pubConn.SetPingHandler(func(data string) error {
+		pingCount.Add(1)
+		// Gorilla requires explicit pong when custom PingHandler is set.
+		return pubConn.WriteControl(
+			websocket.PongMessage,
+			[]byte(data),
+			time.Now().Add(5*time.Second),
+		)
+	})
 
-	pubMsgs := drainMessages(pubConn)
+	pubMsgs := drainMessages(pubConn, &childWg)
 
 	// --- Publisher PeerConnection + RTP track ---
 	pubPC, err := api.NewPeerConnection(webrtc.Configuration{})
@@ -149,7 +167,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	iceCtx, iceCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer iceCancel()
 
-	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second)
+	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second, &childWg)
 	waitICE(iceCtx, t, pubPC)
 
 	// --- RTP send loop ---
@@ -184,7 +202,6 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	// --- Progress logging goroutine ---
 	// Logs ping count and elapsed time every soakProgressLogInterval.
 	soakStart := time.Now()
-	var pingCount atomic.Int64
 
 	progressStop := make(chan struct{})
 	defer close(progressStop)
@@ -205,22 +222,11 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		}
 	}()
 
-	// --- Ping-counting goroutine ---
+	// --- Ping counting ---
 	// The relay sends WebSocket PingMessages; the Gorilla library automatically
 	// replies with PongMessages. We count pings by intercepting the ping handler
 	// and pongs by the PongHandler registered above.
-	//
-	// Note: SetPingHandler replaces Gorilla's default auto-pong handler, so we
-	// must send the pong explicitly to keep the relay's read deadline alive.
-	pubConn.SetPingHandler(func(data string) error {
-		pingCount.Add(1)
-		// Gorilla requires explicit pong when custom PingHandler is set.
-		return pubConn.WriteControl(
-			websocket.PongMessage,
-			[]byte(data),
-			time.Now().Add(5*time.Second),
-		)
-	})
+	// The handler is installed before drainMessages starts reading.
 
 	// --- Soak wait ---
 	select {

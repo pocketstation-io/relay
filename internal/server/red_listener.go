@@ -32,11 +32,11 @@ func redEnabled() bool {
 // graph.AudioBus.forwardLoop stays codec-agnostic — it just calls WriteRTP; the RED framing
 // lives here.
 type redListener struct {
-	inner                   graph.BusSubscription // underlying audio/red TrackLocalStaticRTP
-	opusPT                  uint8         // Opus payload type carried inside RED blocks
-	prevPayload             []byte        // previous Opus payload — the next packet's redundant block
-	prevTimestampSamples    uint32        // previous packet's RTP timestamp in 48 kHz samples
-	havePrev                bool
+	inner                graph.BusSubscription // underlying audio/red TrackLocalStaticRTP
+	opusPT               uint8                 // Opus payload type carried inside RED blocks
+	prevPayload          []byte                // previous Opus payload — the next packet's redundant block
+	prevTimestampSamples uint32                // previous packet's RTP timestamp in 48 kHz samples
+	havePrev             bool
 }
 
 // newREDListener wraps inner so forwarded Opus is RED-encoded. opusPT is the Opus
