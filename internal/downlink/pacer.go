@@ -1,7 +1,6 @@
 package downlink
 
 import (
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,71 +8,11 @@ import (
 	"github.com/pion/rtp"
 )
 
-var cadenceSpacingBucketMaxNs = [...]int64{
-	1 * int64(time.Millisecond),
-	5 * int64(time.Millisecond),
-	10 * int64(time.Millisecond),
-	15 * int64(time.Millisecond),
-	18 * int64(time.Millisecond),
-	22 * int64(time.Millisecond),
-	25 * int64(time.Millisecond),
-	30 * int64(time.Millisecond),
-	40 * int64(time.Millisecond),
-	50 * int64(time.Millisecond),
-	60 * int64(time.Millisecond),
-	70 * int64(time.Millisecond),
-	80 * int64(time.Millisecond),
-	100 * int64(time.Millisecond),
-	150 * int64(time.Millisecond),
-	250 * int64(time.Millisecond),
-}
-
-type cadenceSpacingHistogram struct {
-	counts [len(cadenceSpacingBucketMaxNs)]atomic.Uint64
-}
-
-func (h *cadenceSpacingHistogram) observe(spacingNs int64) {
-	for i := 0; i < len(cadenceSpacingBucketMaxNs)-1; i++ {
-		if spacingNs < cadenceSpacingBucketMaxNs[i] {
-			h.counts[i].Add(1)
-			return
-		}
-	}
-	h.counts[len(h.counts)-1].Add(1)
-}
-
-func (h *cadenceSpacingHistogram) percentileMs(percentile float64) float64 {
-	var total uint64
-	for i := range h.counts {
-		total += h.counts[i].Load()
-	}
-	if total == 0 {
-		return 0
-	}
-	target := max(uint64(math.Ceil(float64(total)*percentile)), 1)
-	var cumulative uint64
-	for i := range h.counts {
-		cumulative += h.counts[i].Load()
-		if cumulative >= target {
-			return float64(cadenceSpacingBucketMaxNs[i]) / float64(time.Millisecond)
-		}
-	}
-	return float64(cadenceSpacingBucketMaxNs[len(cadenceSpacingBucketMaxNs)-1]) / float64(time.Millisecond)
-}
-
 const (
-	audioClockRateHz                      = uint64(48_000)
-	defaultPacerCapacity                  = 32
-	defaultPacerMaxQueueAge               = 120 * time.Millisecond
-	defaultPacerTargetDelay               = 10 * time.Millisecond
-	defaultPacerInitialWait               = 10 * time.Millisecond
-	defaultPacerReorderWait               = 60 * time.Millisecond
-	defaultForwardReorderWaitMs           = 40 * time.Millisecond
-	defaultPacerMaxLead                   = 250 * time.Millisecond
-	defaultPacerMaxLateness               = 40 * time.Millisecond
-	defaultPacerResetSamples              = uint32(audioClockRateHz * 5)
-	minimumCadenceSpacingNumeratorRatio   = int64(4)
-	minimumCadenceSpacingDenominatorRatio = int64(5)
+	defaultPacerCapacity    = 32
+	defaultPacerMaxQueueAge = 120 * time.Millisecond
+	defaultPacerInitialWait = 10 * time.Millisecond
+	defaultPacerReorderWait = 60 * time.Millisecond
 )
 
 type packetWriter func(*rtp.Packet) error
@@ -156,81 +95,6 @@ type pacedPacket struct {
 	source           SourceIdentity
 	captureTime      time.Time
 	captureTimeKnown bool
-}
-
-type forwardOutputState struct {
-	haveOutput                 bool
-	lastOutputSequence         uint16
-	lastOutputTimestampSamples uint32
-	lastSendAtNs               int64
-}
-
-type cadenceTimeline struct {
-	initialized    bool
-	lastRtpTs      uint32
-	lastDueAt      time.Time
-	nominalSamples uint32
-	maxLead        time.Duration
-	maxLateness    time.Duration
-	resetSamples   uint32
-}
-
-func (t *cadenceTimeline) reset() {
-	t.initialized = false
-	t.nominalSamples = 0
-}
-
-func newCadenceTimeline() cadenceTimeline {
-	return cadenceTimeline{
-		maxLead:      defaultPacerMaxLead,
-		maxLateness:  defaultPacerMaxLateness,
-		resetSamples: defaultPacerResetSamples,
-	}
-}
-
-// dueAt maps RTP media time to a monotonic send time. uint32 subtraction
-// intentionally handles timestamp wraparound. Large jumps and stale timelines
-// re-anchor immediately instead of accumulating latency.
-func (t *cadenceTimeline) dueAt(rtpTs uint32, arrival time.Time) (due time.Time, reset bool, advances bool) {
-	if !t.initialized {
-		t.initialized = true
-		t.lastRtpTs = rtpTs
-		t.lastDueAt = arrival.Add(defaultPacerTargetDelay)
-		return t.lastDueAt, false, true
-	}
-
-	signedDeltaSamples := int32(rtpTs - t.lastRtpTs)
-	if signedDeltaSamples <= 0 {
-		return arrival, false, false
-	}
-	deltaSamples := uint32(signedDeltaSamples)
-	if deltaSamples > t.resetSamples {
-		t.lastRtpTs = rtpTs
-		t.lastDueAt = arrival.Add(defaultPacerTargetDelay)
-		return t.lastDueAt, true, true
-	}
-	if t.nominalSamples == 0 {
-		t.nominalSamples = deltaSamples
-	} else if deltaSamples > t.nominalSamples {
-		// A missing ingress packet must remain an RTP sequence/timestamp gap, but
-		// it must not create an equal wall-clock hole on the subscriber leg.
-		deltaSamples = t.nominalSamples
-	}
-
-	due = t.lastDueAt.Add(time.Duration(uint64(deltaSamples) * uint64(time.Second) / audioClockRateHz))
-	if due.Sub(arrival) > t.maxLead {
-		t.lastRtpTs = rtpTs
-		t.lastDueAt = arrival.Add(defaultPacerTargetDelay)
-		return t.lastDueAt, true, true
-	}
-	if arrival.Sub(due) > t.maxLateness {
-		t.lastRtpTs = rtpTs
-		t.lastDueAt = arrival
-		return arrival, true, true
-	}
-	t.lastRtpTs = rtpTs
-	t.lastDueAt = due
-	return due, false, true
 }
 
 // AudioCadencePacer smooths clustered Opus arrivals according to their RTP
@@ -657,180 +521,6 @@ func (p *AudioCadencePacer) run() {
 	}
 }
 
-// runForward serializes subscriber writes without imposing a relay cadence.
-// A bounded gap-only hold restores short ingress reordering while ordered
-// packets still pass immediately. Real gaps and late repairs retain their RTP
-// sequence numbers so downstream NACK can distinguish loss from continuity.
-func (p *AudioCadencePacer) runForward() {
-	timer := time.NewTimer(time.Hour)
-	if !timer.Stop() {
-		<-timer.C
-	}
-	defer timer.Stop()
-
-	var translator rtpForwardTranslator
-	var unwrapper sequenceUnwrapper
-	var output forwardOutputState
-	var pending [defaultPacerCapacity + 1]pacedPacket
-	pendingLen := 0
-	var haveReleased bool
-	var lastReleasedExtSeq int64
-	defer func() { p.completedCount.Add(uint64(pendingLen)) }()
-
-	for {
-		if pendingLen == 0 {
-			select {
-			case <-p.done:
-				return
-			case seq := <-p.nacks:
-				p.retransmit(seq)
-				continue
-			case pending[0] = <-p.queue:
-				p.prepareForwardItem(&pending[0], &translator, &unwrapper)
-				pendingLen = 1
-			}
-		}
-
-		for pendingLen < len(pending) {
-			select {
-			case pending[pendingLen] = <-p.queue:
-				p.prepareForwardItem(&pending[pendingLen], &translator, &unwrapper)
-				pendingLen++
-			default:
-				goto drained
-			}
-		}
-	drained:
-		sortPacedPacketsByExtendedSequence(pending[:pendingLen])
-
-	gapWait:
-		for haveReleased && pending[0].extSeq > lastReleasedExtSeq+1 && pendingLen < len(pending) {
-			gapStartedAt := pending[0].enqueuedAt
-			for i := 1; i < pendingLen; i++ {
-				if pending[i].enqueuedAt.Before(gapStartedAt) {
-					gapStartedAt = pending[i].enqueuedAt
-				}
-			}
-			deadline := gapStartedAt.Add(defaultForwardReorderWaitMs)
-			wait := time.Until(deadline)
-			if wait <= 0 {
-				p.gapTimeoutCount.Add(1)
-				break
-			}
-			observeAtomicMax(&p.maxTimerWaitNs, uint64(wait))
-			timer.Reset(wait)
-			select {
-			case <-p.done:
-				return
-			case seq := <-p.nacks:
-				p.retransmit(seq)
-				stopAndDrainTimer(timer)
-			case pending[pendingLen] = <-p.queue:
-				p.prepareForwardItem(&pending[pendingLen], &translator, &unwrapper)
-				pendingLen++
-				stopAndDrainTimer(timer)
-				sortPacedPacketsByExtendedSequence(pending[:pendingLen])
-			case <-timer.C:
-				p.gapTimeoutCount.Add(1)
-				if oversleep := time.Since(deadline); oversleep > 0 {
-					observeAtomicMax(&p.maxTimerOversleepNs, uint64(oversleep))
-				}
-				break gapWait
-			}
-		}
-
-		item := pending[0]
-		copy(pending[:], pending[1:pendingLen])
-		pendingLen--
-		if !haveReleased || item.extSeq > lastReleasedExtSeq {
-			haveReleased = true
-			lastReleasedExtSeq = item.extSeq
-		}
-		p.writeForwardItem(item, &output)
-	}
-}
-
-func (p *AudioCadencePacer) prepareForwardItem(
-	item *pacedPacket,
-	translator *rtpForwardTranslator,
-	unwrapper *sequenceUnwrapper,
-) {
-	if translator.translateAt(item.packet, item.source, item.enqueuedAt) {
-		p.timelineResets.Add(1)
-	}
-	item.extSeq = unwrapper.unwrap(item.packet.SequenceNumber)
-}
-
-func (p *AudioCadencePacer) writeForwardItem(item pacedPacket, output *forwardOutputState) {
-	queueAgeNs := time.Since(item.enqueuedAt).Nanoseconds()
-	queueAge := uint64(max(queueAgeNs, 0))
-	p.queueAgeHist.observe(queueAgeNs)
-	observeAtomicMax(&p.maxQueueAgeNs, queueAge)
-	if queueAgeNs > p.maxQueueAge.Nanoseconds() {
-		p.staleDrops.Add(1)
-		p.completedCount.Add(1)
-		return
-	}
-
-	if item.packet.Padding {
-		p.paddingPacketCount.Add(1)
-	}
-	if stripSourceMediaPadding(item.packet) {
-		p.sourcePaddingStrippedCount.Add(1)
-	}
-	if p.observeTranslated != nil {
-		p.observeTranslated(item.packet, item.captureTime, item.captureTimeKnown)
-	}
-	writeStarted := time.Now()
-	writeErr := p.write(item.packet)
-	writeDuration := time.Since(writeStarted)
-	observeAtomicMax(&p.maxWriterDurationNs, uint64(writeDuration))
-	if writeDuration > 100*time.Millisecond {
-		p.writerBlockedCount.Add(1)
-	}
-	if writeErr == nil {
-		p.sentCount.Add(1)
-		p.retransmissionCache.store(item.packet)
-		if output.haveOutput {
-			sequenceDeltaCount := uint16(item.packet.SequenceNumber - output.lastOutputSequence)
-			timestampDeltaSamples := uint32(item.packet.Timestamp - output.lastOutputTimestampSamples)
-			if sequenceDeltaCount != 1 {
-				p.outputSequenceDiscontinuityCount.Add(1)
-			}
-			if timestampDeltaSamples != defaultAudioFrameSamples {
-				p.outputTimestampDiscontinuityCount.Add(1)
-			}
-			observeAtomicMax(&p.outputMaxSequenceDelta, uint64(sequenceDeltaCount))
-			observeAtomicMax(&p.outputMaxTimestampDeltaSamples, uint64(timestampDeltaSamples))
-		}
-		output.haveOutput = true
-		output.lastOutputSequence = item.packet.SequenceNumber
-		output.lastOutputTimestampSamples = item.packet.Timestamp
-	}
-	p.completedCount.Add(1)
-
-	if item.packet.Padding {
-		return
-	}
-	nowNs := time.Now().UnixNano()
-	if output.lastSendAtNs != 0 && nowNs > output.lastSendAtNs {
-		spacingNs := uint64(nowNs - output.lastSendAtNs)
-		p.lastSpacingNs.Store(spacingNs)
-		p.spacingHist.observe(int64(spacingNs))
-		observeAtomicMax(&p.maxSpacingNs, spacingNs)
-	}
-	output.lastSendAtNs = nowNs
-}
-
-func stopAndDrainTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-}
-
 // stripSourceMediaPadding removes source-hop RTP padding while preserving the
 // Opus payload. Padding is transport-local and must not be copied into the
 // independently encrypted subscriber hop. Pure padding remains marked so the
@@ -842,24 +532,6 @@ func stripSourceMediaPadding(pkt *rtp.Packet) bool {
 	pkt.Padding = false
 	pkt.PaddingSize = 0
 	return true
-}
-
-func (p *AudioCadencePacer) retransmit(seq uint16) {
-	pkt, hit, throttled := p.retransmissionCache.load(seq, time.Now())
-	if !hit {
-		p.nackCacheMisses.Add(1)
-		return
-	}
-	p.nackCacheHits.Add(1)
-	if throttled {
-		p.nackThrottled.Add(1)
-		return
-	}
-	if err := p.write(pkt.Clone()); err != nil {
-		p.retransmitErrorCount.Add(1)
-		return
-	}
-	p.retransmitSentCount.Add(1)
 }
 
 func sortPacedPacketsByExtendedSequence(items []pacedPacket) {
@@ -902,16 +574,6 @@ func (p *AudioCadencePacer) waitUntil(timer *time.Timer, dueAt time.Time) bool {
 			return false
 		}
 	}
-}
-
-func minimumCadenceSpacingNs(mediaSpacingNs time.Duration) time.Duration {
-	if mediaSpacingNs <= 0 {
-		return 0
-	}
-	// Bound catch-up after a late scheduler wake so the relay can recover
-	// media time without turning that recovery into a subscriber-visible burst.
-	return mediaSpacingNs * time.Duration(minimumCadenceSpacingNumeratorRatio) /
-		time.Duration(minimumCadenceSpacingDenominatorRatio)
 }
 
 func observeAtomicMax(target *atomic.Uint64, value uint64) {
