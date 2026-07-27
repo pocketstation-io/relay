@@ -340,9 +340,9 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 // The relay echoes each message back with the relay's receive timestamp added:
 // {"send_timestamp_ns": <int64>, "recv_timestamp_ns": <int64>}.
 //
-// This is used by the capture-to-cloud benchmark CLI (cmd/benchmark) to measure
-// the relay-visible portion of end-to-end latency without audio pipeline overhead.
-// The endpoint requires no authentication — it is a pure timing mirror.
+// PocketStation Bench uses this endpoint to measure the relay-visible portion
+// of end-to-end latency without audio pipeline overhead. The endpoint requires
+// no authentication — it is a pure timing mirror.
 func (s *Server) echo(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

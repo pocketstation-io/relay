@@ -14,9 +14,6 @@ coverage/
 # Compiled Go binaries (never commit these — platform-specific)
 fake-source
 relay-server
-benchmark
-media-bench
-/floodtest
 .claude/
 soak/results/
 benches/results/
