@@ -1,105 +1,117 @@
-# relay
+# PocketStation Relay
 
-**Organization:** `pocketstation-io`  
-**Repository:** `pocketstation-io/relay`  
-**v2.3 tier:** Tier 3 — Server Services  
-**Current phase:** Phase 2 (activated Phase 1; Phase 1 COMPLETE 2026-05-20)  
-**Language/package:** Go + Pion v4  
-**Release strategy:** SemVer independent; Docker image on tag
+`pocketstation-io/relay` is the Go/Pion media plane for PocketStation. It
+accepts source audio over WebRTC or WHIP, preserves named source/bus identity,
+and forwards bounded RTP subscriptions to browser or remote receivers.
 
-This is an independently releasable PocketStation v2.3 repository folder. It is not meant to be merged permanently into a monorepo.
+It does not capture audio, compile the PocketStation pipeline, run connectors,
+record stems, or own durable product Session state.
 
-Agents must respect the phase gate in `docs/REPO_CONTRACT.md`.
-
----
-
-## Phase 1 Token Authority Decision
-
-**Decision (2026-05-20): relay owns room creation and JWT issuance for Phase 1.**
-
-The relay's `POST /v1/rooms` endpoint creates rooms and issues two JWTs (HS256, shared
-secret via `POCKETSTATION_JWT_SECRET`):
-
-- `source_token` — role `source`, TTL 15 minutes
-- `listener_token` — role `listener`, TTL 2 hours
-
-These tokens are accepted by the relay's `POST /v1/signal` WebSocket endpoint via
-`internal/auth.Verify`.
-
-The api-server (`POST /v1/rooms` on port 8090) issues opaque hex bearer tokens that are
-**not** accepted by the relay's JWT verifier. In Phase 1 the api-server is a separate
-control-plane stub. Clients and the fake-source tool connect directly to the relay for
-room creation.
-
-**Phase 2 resolution:** api-server will be updated to call `auth.Sign` with the shared
-secret and issue compatible JWTs, making it a true front-end proxy for the relay. This
-will be validated by an integration test that calls api-server's `/v1/rooms` and uses the
-returned token with relay's `/v1/signal`.
-
-**Integration test:** `test/integration/relay_test.go`
-`TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted` proves that a token issued
-by `POST relay/v1/rooms` is accepted by `POST relay/v1/signal`.
-
----
-
-## Deployment
-
-### Multi-region Fly.io deploy (Phase 6)
-
-The relay runs on Fly.io edge nodes across three regions: EU, US, and APAC. The origin
-audio relay is hosted on Hetzner CX23; Fly.io handles the 30+ city edge layer with
-pay-per-second billing.
-
-**Region topology** (documented in `fly.regions.toml`):
-
-| Region | Fly.io codes             |
-|--------|--------------------------|
-| EU     | `fra` (Frankfurt), `ams` (Amsterdam) |
-| US     | `iad` (Ashburn), `lax` (Los Angeles) |
-| APAC   | `nrt` (Tokyo), `sin` (Singapore) |
-
-**Prerequisites:**
-
-- `flyctl` installed (`brew install flyctl` or https://fly.io/docs/getting-started/installing-flyctl/)
-- `FLY_API_TOKEN` set in your environment
-- Authenticated: `fly auth login`
-
-**Initial deploy:**
+## Local run
 
 ```bash
-fly launch --no-deploy   # first-time only, creates the app
-./scripts/deploy-multi-region.sh
+POCKETSTATION_JWT_SECRET=development-only-secret \
+  go run ./cmd/relay-server
 ```
 
-`deploy-multi-region.sh` runs three commands in sequence:
+The local default is `http://localhost:4800`.
 
-1. `fly deploy --remote-only` — builds and pushes the Docker image via Fly builders
-2. `fly scale count 2 --region fra,iad,nrt` — places two instances in each primary region
-3. `fly status` — confirms all instances are running
-
-**Continuous deployment:**
-
-`.github/workflows/deploy.yml` triggers on every push to `main`. It installs `flyctl`
-and runs `fly deploy --remote-only` using the `FLY_API_TOKEN` repository secret.
-
-Set the secret once:
+Health, metrics, and canonical Session creation:
 
 ```bash
-fly secrets set FLY_API_TOKEN="$(fly auth token)"
-# or via GitHub: Settings → Secrets → Actions → New repository secret
+curl -sf http://localhost:4800/healthz
+curl -sf http://localhost:4800/metrics
+curl -sS -X POST http://localhost:4800/v1/sessions
 ```
 
-**Environment variables** required at runtime (set with `fly secrets set`):
+The Session response includes `session_id`, `source_token`, and
+`subscriber_token`. The relay WebSocket is `/v1/signal`; WHIP and WHEP are
+available under `/v1/sessions/{id}/whip` and `/v1/sessions/{id}/whep`.
 
-| Variable | Description |
-|----------|-------------|
-| `POCKETSTATION_JWT_SECRET` | HS256 shared secret for room JWTs |
-| `RELAY_API_SERVER_URL` | Optional — api-server callback URL |
-| `TURN_PUBLIC_IP` | Public IP for embedded TURN (omit for STUN-only mode) |
+The control-plane can also issue compatible Session credentials and TURN
+metadata. Relay callbacks target its canonical internal Session/subscriber
+paths. `RELAY_API_SERVER_URL` is the retained environment-variable spelling for
+that control-plane callback base URL.
 
-**Adding a region:**
+## Architecture and ownership
+
+The media path is:
+
+```text
+source
+  → RelaySession
+      → named AudioBus
+          → bounded BusSubscription
+              → pacing / continuity / repair
+                  → subscriber
+```
+
+The relay owns WebRTC signaling adaptation, SDP/ICE, WHIP/WHEP, RTP/RTCP,
+Opus/RED negotiation, pacing, continuity, repair, embedded TURN/ICE-TCP, and
+transport telemetry.
+
+`pocketstation-io/protocol` owns cross-language wire schemas.
+`internal/signaling` is the relay's package-private Go adapter.
+`pocketstation-bench` owns neutral transport measurement tools, and
+`pocketstation-lab` owns cross-repository product-proof orchestration.
+
+See [the repository contract](docs/REPO_CONTRACT.md) and
+[the architecture authority note](docs/architecture/pocketstation-v3.0.md).
+
+## Compatibility
+
+Current primary vocabulary is Session/subscriber:
+
+```text
+/v1/sessions · session_id · subscriber_token · SESSION_STATE
+```
+
+Selected `/v1/rooms`, `room_id`, `listener_token`, and `ROOM_STATE` surfaces
+remain as explicitly tested wire aliases. They are compatibility debt, not the
+primary API.
+
+## Configuration
+
+| Variable | Purpose | Local default |
+|---|---|---|
+| `PORT` | HTTP/WebSocket listen port | `4800` |
+| `POCKETSTATION_JWT_SECRET` | HS256 Session credential secret | insecure development fallback |
+| `RELAY_API_SERVER_URL` | Optional control-plane callback base URL | disabled |
+| `RELAY_MAX_ROOMS` | Maximum active RelaySessions | package default |
+| `RELAY_MAX_LISTENERS_PER_ROOM` | Maximum subscribers per RelaySession; legacy variable spelling | package default |
+| `ROOM_EXPIRY_MINUTES` | Inactive RelaySession expiry; legacy variable spelling | `30` |
+| `SOURCE_RECONNECT_WINDOW_SEC` | Source reconnection window | `60` |
+| `ICE_UDP_PORT` | Shared Pion UDP mux port; zero selects an ephemeral local port | `0` |
+| `ICE_TCP_PORT` | Enables shared ICE-TCP mux | disabled |
+| `RELAY_PUBLIC_IPS` | Advertised public IPs or `auto` | unset |
+| `TURN_PUBLIC_IP` | Enables the embedded TURN server | unset |
+| `TURN_UDP_PORT` | TURN UDP port | `3478` |
+| `TURN_TCP_PORT` | TURN TCP port | `3478` |
+| `TURN_TLS_PORT` | TURNS port; zero disables TLS | `0` |
+| `RELAY_ENABLE_RED` | Opt in to RFC 2198 RED wrapping | disabled |
+
+Fly uses port `8080` through deployment configuration; that does not change the
+local binary default.
+
+## Verification
 
 ```bash
-fly regions add sin
-fly scale count 2 --region sin
+test -z "$(gofmt -l .)"
+go vet ./...
+go test -short ./...
+go test -race ./...
 ```
+
+The full race suite includes bounded local soak cells. Use `-short` for fast
+iteration. Explicit long-soak environment flags are reserved for one frozen
+candidate after preflights pass.
+
+## Claim boundary
+
+- Phase 1 relay transport is `REAL`.
+- Same-host Pion and CI results are component or `LOOPBACK-ONLY` evidence.
+- The Fly deployment is cross-network calibration evidence, not proof of
+  production readiness or multi-region session migration.
+- Competitive latency and quality claims require PocketStation Bench artifacts.
+- End-to-end product claims require immutable PocketStation Lab artifacts with
+  exact repository commits, devices, and network conditions.
