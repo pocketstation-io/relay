@@ -182,16 +182,25 @@ func (s *signalPeer) handleJoin(msg signaling.ClientMessage) {
 	s.room = rm
 	s.role = claims.Role
 
-	// Resolve the bus ID: prefer the message field, then the token claim,
-	// then default to "voice" for PUBLISH and BusMix for SUBSCRIBE.
-	busID := msg.BusID
-	if busID == "" {
-		busID = claims.BusID
-	}
-	if busID == "" {
-		if msg.Type == signaling.TypePublish {
-			busID = "voice"
-		} else {
+	var publishBuses *publishBusPlan
+	var busID graph.BusID
+	if msg.Type == signaling.TypePublish {
+		publishBuses, err = newPublishBusPlan(msg, claims)
+		if err != nil {
+			s.sendError(signaling.ErrCodeBadRequest, err.Error())
+			return
+		}
+		busID = publishBuses.primaryBusID()
+	} else {
+		if len(msg.PublishBuses) != 0 {
+			s.sendError(signaling.ErrCodeBadRequest, "publish_buses is valid only for PUBLISH")
+			return
+		}
+		busID = msg.BusID
+		if busID == "" {
+			busID = claims.BusID
+		}
+		if busID == "" {
 			busID = graph.BusMix
 		}
 	}
@@ -209,6 +218,7 @@ func (s *signalPeer) handleJoin(msg signaling.ClientMessage) {
 		"relay_session_id", sessionID,
 		"role", string(claims.Role),
 		"bus_id", busID,
+		"publish_bus_count", len(msg.PublishBuses),
 	)
 
 	pc, lineage, err := s.newPeerConnection()
@@ -232,14 +242,20 @@ func (s *signalPeer) handleJoin(msg signaling.ClientMessage) {
 		}
 		sessionIDForCallback := sessionID
 		sessionIDForWebhook := s.id
-		busIDForLoop := busID
+		publishBusesForLoop := publishBuses
 		pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+			trackBusID, claimErr := publishBusesForLoop.claim(track.StreamID())
+			if claimErr != nil {
+				s.sendError(signaling.ErrCodeTrackError, claimErr.Error())
+				_ = pc.Close()
+				return
+			}
 			var timeline *clocklineage.Timeline
 			if lineage != nil {
 				timeline = lineage.Remote(uint32(track.SSRC()))
 			}
 			go drainPublisherRTCP(receiver)
-			rm.SetSource(busIDForLoop, busRoleFor(busIDForLoop), &trackSource{track: track, timeline: timeline}, func() { _ = pc.Close() })
+			rm.SetSource(trackBusID, busRoleFor(trackBusID), &trackSource{track: track, timeline: timeline}, func() { _ = pc.Close() })
 			if s.srv.callbackClient != nil {
 				go s.srv.callbackClient.PushSourceActive(sessionIDForCallback, true)
 			}

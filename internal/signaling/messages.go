@@ -53,6 +53,14 @@ type CodecHintPayload struct {
 	FrameMs     int  `json:"frame_ms"`     // Opus frame duration: 10 or 20
 }
 
+// PublishBusBinding binds one WebRTC MediaStream identifier to one named
+// AudioBus. A finite list lets one authenticated publisher PeerConnection carry
+// independent stems without assigning the entire connection to one bus.
+type PublishBusBinding struct {
+	StreamID string `json:"stream_id"`
+	BusID    string `json:"bus_id"`
+}
+
 // ClientMessage is sent from a client to the relay over the /v1/signal WebSocket.
 //
 // v3.0 fields (SessionID, BusID, GraphID) identify the graph session and named
@@ -71,6 +79,10 @@ type ClientMessage struct {
 	// BusID names the audio bus to publish to or subscribe from.
 	// "voice", "music", "agent_voice", "events". Absent or "mix" = all buses.
 	BusID string `json:"bus_id,omitempty"`
+	// PublishBuses is the canonical multi-bus publisher declaration. It is
+	// rejected for subscribers. An absent list retains the legacy one-bus
+	// behavior selected by BusID or the token claim.
+	PublishBuses []PublishBusBinding `json:"publish_buses,omitempty"`
 
 	Token     string `json:"token,omitempty"`
 	SDPOffer  string `json:"sdp_offer,omitempty"`
