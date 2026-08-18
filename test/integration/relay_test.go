@@ -150,6 +150,26 @@ func doPublishHandshake(
 	msgs <-chan signaling.ServerMessage,
 	timeout time.Duration,
 ) {
+	doPublishHandshakeWithMessage(
+		t,
+		conn,
+		pc,
+		token,
+		signaling.ClientMessage{},
+		msgs,
+		timeout,
+	)
+}
+
+func doPublishHandshakeWithMessage(
+	t *testing.T,
+	conn *websocket.Conn,
+	pc *webrtc.PeerConnection,
+	token string,
+	message signaling.ClientMessage,
+	msgs <-chan signaling.ServerMessage,
+	timeout time.Duration,
+) {
 	t.Helper()
 
 	offer, err := pc.CreateOffer(nil)
@@ -160,11 +180,10 @@ func doPublishHandshake(
 		t.Fatalf("set local description: %v", err)
 	}
 
-	if err := conn.WriteJSON(signaling.ClientMessage{
-		Type:     signaling.TypePublish,
-		Token:    token,
-		SDPOffer: offer.SDP,
-	}); err != nil {
+	message.Type = signaling.TypePublish
+	message.Token = token
+	message.SDPOffer = offer.SDP
+	if err := conn.WriteJSON(message); err != nil {
 		t.Fatalf("send PUBLISH: %v", err)
 	}
 

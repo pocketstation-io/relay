@@ -36,7 +36,7 @@ func newPublishBusPlan(
 	message signaling.ClientMessage,
 	claims *auth.Claims,
 ) (*publishBusPlan, error) {
-	if len(message.PublishBuses) == 0 {
+	if message.PublishBuses == nil {
 		busID := message.BusID
 		if claims.BusID != "" && busID != "" && busID != claims.BusID {
 			return nil, errPublishBusScope
@@ -52,7 +52,7 @@ func newPublishBusPlan(
 	if message.BusID != "" {
 		return nil, errAmbiguousPublishBus
 	}
-	if len(message.PublishBuses) > maxPublishBusBindings {
+	if len(message.PublishBuses) == 0 || len(message.PublishBuses) > maxPublishBusBindings {
 		return nil, errPublishBusCount
 	}
 

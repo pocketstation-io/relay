@@ -38,6 +38,21 @@ func TestGivenMultiBusPublishWhenEncodedThenWireNamesMatchCanonicalV2Schema(t *t
 	}
 }
 
+func TestGivenExplicitEmptyMultiBusDeclarationOnWireWhenPlannedThenItIsRejected(t *testing.T) {
+	var message signaling.ClientMessage
+	if err := json.Unmarshal([]byte(`{"type":"PUBLISH","publish_buses":[]}`), &message); err != nil {
+		t.Fatalf("decode explicit empty declaration: %v", err)
+	}
+	if message.PublishBuses == nil {
+		t.Fatal("explicit publish_buses must retain presence after JSON decoding")
+	}
+
+	_, err := newPublishBusPlan(message, &auth.Claims{})
+	if !errors.Is(err, errPublishBusCount) {
+		t.Fatalf("error = %v, want %v", err, errPublishBusCount)
+	}
+}
+
 func TestGivenLegacyPublishWhenTrackArrivesThenSingleBusIsClaimedOnce(t *testing.T) {
 	plan, err := newPublishBusPlan(
 		signaling.ClientMessage{Type: signaling.TypePublish, BusID: "application"},
