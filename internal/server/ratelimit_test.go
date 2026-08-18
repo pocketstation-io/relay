@@ -63,10 +63,10 @@ func dialRateLimitSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	return conn
 }
 
-// TestGiven_MaxRoomsReached_When_CreateRoom_Then_429 verifies that once the
+// TestGivenMaxRoomsReachedWhenCreateRoomThen429 verifies that once the
 // room count reaches MaxRooms, POST /v1/rooms returns HTTP 429 with
 // {"error":"room_limit_exceeded"}.
-func TestGiven_MaxRoomsReached_When_CreateRoom_Then_429(t *testing.T) {
+func TestGivenMaxRoomsReachedWhenCreateRoomThen429(t *testing.T) {
 	// Given — a server with a limit of 2 rooms.
 	const limit = 2
 	ts := newRateLimitTestServer(t, limit, defaultMaxListenersForTest)
@@ -91,10 +91,46 @@ func TestGiven_MaxRoomsReached_When_CreateRoom_Then_429(t *testing.T) {
 	}
 }
 
-// TestGiven_MaxListenersReached_When_Subscribe_Then_ErrorFrame verifies that
+func TestGivenHandshakeCapacityOccupiedWhenAnotherWebSocketConnectsThenItIsRejected(t *testing.T) {
+	server := server.New(server.Config{
+		JWTSecret:               []byte(rateLimitJWTSecret),
+		MaxConcurrentHandshakes: 1,
+	})
+	testServer := httptest.NewServer(server.Handler())
+	t.Cleanup(testServer.Close)
+
+	endpoint, err := url.Parse(testServer.URL)
+	if err != nil {
+		t.Fatalf("parse test URL: %v", err)
+	}
+	endpoint.Scheme = "ws"
+	endpoint.Path = "/v1/signal"
+	first, _, err := websocket.DefaultDialer.Dial(endpoint.String(), nil)
+	if err != nil {
+		t.Fatalf("dial first WebSocket: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+
+	second, response, err := websocket.DefaultDialer.Dial(endpoint.String(), nil)
+	if second != nil {
+		_ = second.Close()
+	}
+	if err == nil {
+		t.Fatal("second WebSocket unexpectedly connected")
+	}
+	if response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("second handshake status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
+// TestGivenMaxListenersReachedWhenSubscribeThenErrorFrame verifies that
 // when a room has reached MaxListenersPerRoom, a new SUBSCRIBE receives a
 // WebSocket ERROR frame with code "listener_limit_exceeded".
-func TestGiven_MaxListenersReached_When_Subscribe_Then_ErrorFrame(t *testing.T) {
+func TestGivenMaxListenersReachedWhenSubscribeThenErrorFrame(t *testing.T) {
 	// Given — a server with a limit of 1 listener per room.
 	const listenerLimit = 1
 	ts := newRateLimitTestServer(t, defaultMaxRoomsForTest, listenerLimit)

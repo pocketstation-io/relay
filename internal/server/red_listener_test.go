@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/pion/rtp"
-	"github.com/pocketstation-io/relay/internal/red"
+	"github.com/pocketstation-io/relay/internal/media/red"
 )
 
 // captureListener records the packets written to it (the underlying audio/red track).
@@ -20,12 +20,12 @@ func (c *captureListener) WriteRTP(pkt *rtp.Packet) error {
 	return nil
 }
 
-// TestGiven_REDListener_When_ConsecutiveFrames_Then_SecondCarriesFirstAsRedundancy
+// TestGivenREDListenerWhenConsecutiveFramesThenSecondCarriesFirstAsRedundancy
 // verifies the redListener wraps Opus in RFC 2198 RED: the first frame is sent
 // primary-only; the second carries the first as a redundant block with the
 // correct 20 ms (960-sample) timestamp offset. The RTP header (seq/ts/ssrc) is
 // preserved so the receiver's clock is unaffected.
-func TestGiven_REDListener_When_ConsecutiveFrames_Then_SecondCarriesFirstAsRedundancy(t *testing.T) {
+func TestGivenREDListenerWhenConsecutiveFramesThenSecondCarriesFirstAsRedundancy(t *testing.T) {
 	const opusPT = 111
 	inner := &captureListener{}
 	rl := newREDListener(inner, opusPT)

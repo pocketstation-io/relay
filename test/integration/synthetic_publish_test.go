@@ -30,7 +30,7 @@ import (
 //	SYNTH_PUBLISH=1
 //	LIVE_RELAY_WS        ws://<host>:8080/v1/signal
 //	SYNTH_SOURCE_TOKEN   <source JWT for the live room>
-func TestSyntheticPublish(t *testing.T) {
+func TestGivenSyntheticPublisherWhenAudioIsSentThenSubscriberReceivesIt(t *testing.T) {
 	if os.Getenv("SYNTH_PUBLISH") != "1" {
 		t.Skip("set SYNTH_PUBLISH=1, LIVE_RELAY_WS, SYNTH_SOURCE_TOKEN to run the synthetic publisher")
 	}

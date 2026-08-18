@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -129,16 +128,11 @@ func connectListener(
 	//            → wg.Done()
 }
 
-// TestSoakPhase2 runs the Phase 2 soak: 1 publisher + 50 in-process
+// TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded runs the Phase 2 soak: 1 publisher + 50 in-process
 // subscribers, 30 minutes, race detector active. Asserts no goroutine leak
 // between the 5-minute and 30-minute samples and no unbounded RSS growth.
-func TestSoakPhase2(t *testing.T) {
-	if testing.Short() {
-		t.Skip("soak test skipped in -short mode")
-	}
-	if os.Getenv("RELAY_SOAK_PHASE2") != "1" && !relaySoakFull() {
-		t.Skip("phase 2 soak skipped by default; set RELAY_SOAK_PHASE2=1 or RELAY_SOAK_FULL=1")
-	}
+func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_PHASE2")
 
 	// pubChildWg tracks publisher-side goroutines (drainMessages + ICE relay).
 	// Registered first so it runs last in LIFO, after pubPC/pubConn are closed.
@@ -325,7 +319,6 @@ func TestSoakPhase2(t *testing.T) {
 		goroutineLeakVerdict, delta, phase2GoroutineSlop,
 		rssVerdict,
 	)
-	_ = os.MkdirAll("../../soak/results", 0755)
-	_ = os.WriteFile("../../soak/results/phase2-baseline.txt", []byte(results), 0644)
+	writeSoakArtifact(t, "phase2-baseline.txt", []byte(results))
 	t.Logf("soak results:\n%s", results)
 }

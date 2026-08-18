@@ -291,9 +291,9 @@ Listener              Relay
 | Concern            | File                                          |
 |--------------------|-----------------------------------------------|
 | Message types/structs | `internal/signaling/messages.go`           |
-| Dispatch loop      | `internal/server/server.go` `session.run()`   |
+| Dispatch loop      | `internal/server/signal_peer.go`              |
 | SFrame forwarding  | `internal/server/sframe_handler.go`           |
-| Keepalive          | `internal/server/keepalive.go`                |
+| Keepalive          | `internal/server/signal_peer.go`              |
 | ICE restart logic  | `internal/server/ice_restart.go`              |
 | CODEC_HINT logic   | `internal/server/codec_hint.go`               |
 | Auth / JWT         | `internal/auth/`                              |

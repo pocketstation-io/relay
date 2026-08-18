@@ -9,7 +9,7 @@ import (
 
 var testSecret = []byte("test-turn-secret")
 
-func TestGiven_ValidSecret_When_CredentialsGenerated_Then_PasswordValidates(t *testing.T) {
+func TestGivenValidSecretWhenCredentialsGeneratedThenPasswordValidates(t *testing.T) {
 	// Given
 	roomID := "room-abc-123"
 	ttl := 1 * time.Hour
@@ -26,7 +26,7 @@ func TestGiven_ValidSecret_When_CredentialsGenerated_Then_PasswordValidates(t *t
 	}
 }
 
-func TestGiven_ExpiredCredential_When_Validate_Then_ReturnsFalse(t *testing.T) {
+func TestGivenExpiredCredentialWhenValidateThenReturnsFalse(t *testing.T) {
 	// Given — negative TTL places expiry in the past
 	username, password := turn.Credentials(testSecret, "room-xyz", -1*time.Second)
 
@@ -36,7 +36,7 @@ func TestGiven_ExpiredCredential_When_Validate_Then_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestGiven_WrongSecret_When_Validate_Then_ReturnsFalse(t *testing.T) {
+func TestGivenWrongSecretWhenValidateThenReturnsFalse(t *testing.T) {
 	// Given
 	username, password := turn.Credentials(testSecret, "room-xyz", 1*time.Hour)
 	wrongSecret := []byte("different-secret")
@@ -47,7 +47,7 @@ func TestGiven_WrongSecret_When_Validate_Then_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestGiven_TamperedPassword_When_Validate_Then_ReturnsFalse(t *testing.T) {
+func TestGivenTamperedPasswordWhenValidateThenReturnsFalse(t *testing.T) {
 	// Given
 	username, _ := turn.Credentials(testSecret, "room-xyz", 1*time.Hour)
 
@@ -57,7 +57,7 @@ func TestGiven_TamperedPassword_When_Validate_Then_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestGiven_MalformedUsername_When_Validate_Then_ReturnsFalse(t *testing.T) {
+func TestGivenMalformedUsernameWhenValidateThenReturnsFalse(t *testing.T) {
 	for _, username := range []string{"", "nocolon", "notseconds:room"} {
 		if turn.Validate(testSecret, username, "any") {
 			t.Errorf("Validate returned true for malformed username %q", username)
@@ -65,7 +65,7 @@ func TestGiven_MalformedUsername_When_Validate_Then_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestGiven_SameRoomDifferentCalls_When_CredentialsGenerated_Then_PasswordsDiffer(t *testing.T) {
+func TestGivenSameRoomDifferentCallsWhenCredentialsGeneratedThenPasswordsDiffer(t *testing.T) {
 	// Given — two calls are far enough apart that expiry timestamps differ
 	u1, p1 := turn.Credentials(testSecret, "room-xyz", 1*time.Hour)
 	time.Sleep(1 * time.Second)

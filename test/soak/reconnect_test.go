@@ -2,8 +2,8 @@
 //
 // Run:
 //
-//	RELAY_SOAK_FULL=1 go test -race -timeout 145m -run TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores ./test/soak/
-//	go test -race -timeout 5m  -run TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores ./test/soak/
+//	RELAY_SOAK_FULL=1 go test -race -timeout 145m -run TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores ./test/soak/
+//	go test -race -timeout 5m  -run TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores ./test/soak/
 //
 // Reconnect intervals:
 //
@@ -36,8 +36,8 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/graph"
 	"github.com/pocketstation-io/relay/internal/server"
+	"github.com/pocketstation-io/relay/internal/session"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
@@ -88,20 +88,18 @@ type reconnectResult struct {
 	failureMessage string
 }
 
-// TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores
+// TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores
 // verifies that a publisher can disconnect and reconnect at defined intervals
 // and that the relay accepts each reconnect in under reconnectMaxLatency.
-func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *testing.T) {
-	if testing.Short() {
-		t.Skip("soak test skipped in -short mode")
-	}
+func TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_RECONNECT")
 
 	intervals := reconnectIntervals()
 	window := reconnectWindow()
 	t.Logf("soak[reconnect]: intervals=%v reconnect_window=%s (RELAY_SOAK_FULL=%s)",
 		intervals, window, os.Getenv("RELAY_SOAK_FULL"))
 
-	// --- Server ---
+	// Server.
 	// Use a short inactivity timeout (equal to the reconnect window) so the
 	// test room does not linger. The reconnect window is set long enough that
 	// the room survives each deliberate disconnect.
@@ -109,7 +107,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	srv := server.New(server.Config{
 		JWTSecret: []byte("reconnect-soak-secret"),
 		API:       api,
-		RegistryConfig: graph.RegistryConfig{
+		RegistryConfig: session.RegistryConfig{
 			InactivityTimeout: window + 10*time.Minute,
 			ReconnectWindow:   window,
 		},
@@ -118,7 +116,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
-	// --- Room ---
+	// Room.
 	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
 	if err != nil {
 		t.Fatalf("create room: %v", err)
@@ -226,7 +224,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 		}, ""
 	}
 
-	// --- Initial connection ---
+	// Initial connection.
 	soakStart := time.Now()
 	handles, errMsg := connectPublisher("initial")
 	if errMsg != "" {
@@ -234,7 +232,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	}
 	t.Logf("soak[reconnect]: initial connection established at t=0")
 
-	// --- Reconnect loop ---
+	// Reconnect loop.
 	results := make([]reconnectResult, 0, len(intervals))
 	prevInterval := time.Duration(0)
 
@@ -295,7 +293,7 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 		handles.waitGoroutines()
 	}
 
-	// --- Report ---
+	// Report.
 	totalElapsed := time.Since(soakStart).Truncate(time.Second)
 	allPassed := true
 	reportLines := fmt.Sprintf(
@@ -327,7 +325,6 @@ func TestGiven_Publisher_When_ReconnectsAtIntervals_Then_SessionRestores(t *test
 	}
 	reportLines += fmt.Sprintf("overall_verdict=%s\n", soakVerdict(allPassed))
 
-	_ = os.MkdirAll("../../soak/results", 0755)
-	_ = os.WriteFile("../../soak/results/reconnect-soak.txt", []byte(reportLines), 0644)
+	writeSoakArtifact(t, "reconnect-soak.txt", []byte(reportLines))
 	t.Logf("soak results:\n%s", reportLines)
 }

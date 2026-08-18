@@ -17,11 +17,11 @@
 //
 // Run short (default, ~2s, two payload profiles):
 //
-//	go test -race -run TestGiven_RelaySession_When_LongMediaSoak ./test/soak/bussub/
+//	go test -race -run TestGivenRelaySessionWhenLongMediaSoak ./test/soak/bussub/
 //
 // Run the full 24h endurance soak:
 //
-//	RELAY_SOAK_FULL=1 go test -timeout 25h -run TestGiven_RelaySession_When_LongMediaSoak ./test/soak/bussub/
+//	RELAY_SOAK_FULL=1 go test -timeout 25h -run TestGivenRelaySessionWhenLongMediaSoak ./test/soak/bussub/
 package bussub_test
 
 import (
@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
 const (
@@ -98,7 +98,13 @@ type busSoakProfile struct {
 	payloadBytes int
 }
 
-func TestGiven_RelaySession_When_LongMediaSoak_Then_NoLeakAndCountsMatch(t *testing.T) {
+func TestGivenRelaySessionWhenLongMediaSoakThenNoLeakAndCountsMatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("media soak is excluded from the short test tier")
+	}
+	if os.Getenv("RELAY_SOAK") != "1" && os.Getenv("RELAY_SOAK_BUS_SUBSCRIPTION") != "1" && os.Getenv("RELAY_SOAK_FULL") != "1" {
+		t.Skip("set RELAY_SOAK=1, RELAY_SOAK_BUS_SUBSCRIPTION=1, or RELAY_SOAK_FULL=1")
+	}
 	duration := busSoakShortDuration
 	if os.Getenv("RELAY_SOAK_FULL") == "1" {
 		duration = busSoakFullDuration
@@ -123,12 +129,12 @@ func runBusSubscriptionSoak(t *testing.T, p busSoakProfile, duration time.Durati
 	runtime.GC()
 	baselineGoroutines := runtime.NumGoroutine()
 
-	r := graph.New("soak-" + p.name)
+	r := session.New("soak-" + p.name)
 
 	mixSub := &countingSubscription{}   // BusMix: must receive voice + music
 	voiceSub := &countingSubscription{} // "voice": must receive only voice
 	musicSub := &countingSubscription{} // "music": must receive only music
-	if err := r.AddSubscription("mix-peer", graph.BusMix, mixSub); err != nil {
+	if err := r.AddSubscription("mix-peer", session.BusMix, mixSub); err != nil {
 		t.Fatalf("AddSubscription mix: %v", err)
 	}
 	if err := r.AddSubscription("voice-peer", "voice", voiceSub); err != nil {
@@ -140,8 +146,8 @@ func runBusSubscriptionSoak(t *testing.T, p busSoakProfile, duration time.Durati
 
 	voiceSrc := newPacedSource(p.interval, p.payloadBytes, 0x11111111)
 	musicSrc := newPacedSource(p.interval, p.payloadBytes, 0x22222222)
-	r.SetSource("voice", graph.BusRoleVoice, voiceSrc, nil)
-	r.SetSource("music", graph.BusRoleMusic, musicSrc, nil)
+	r.SetSource("voice", session.BusRoleVoice, voiceSrc, nil)
+	r.SetSource("music", session.BusRoleMusic, musicSrc, nil)
 
 	time.Sleep(duration)
 

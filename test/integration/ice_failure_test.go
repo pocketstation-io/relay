@@ -18,10 +18,10 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-// TestGiven_SourceIceFails_When_PeerConnectionClosed_Then_RelayHealthy verifies
+// TestGivenSourceIceFailsWhenPeerConnectionClosedThenRelayHealthy verifies
 // that when the source's PeerConnection is forcibly closed (simulating ICE
 // failure / hard disconnect), the relay does not panic and remains healthy.
-func TestGiven_SourceIceFails_When_PeerConnectionClosed_Then_RelayHealthy(t *testing.T) {
+func TestGivenSourceIceFailsWhenPeerConnectionClosedThenRelayHealthy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("ICE failure test skipped in -short mode")
 	}
@@ -109,9 +109,9 @@ func TestGiven_SourceIceFails_When_PeerConnectionClosed_Then_RelayHealthy(t *tes
 	_ = subConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 }
 
-// TestGiven_BothIceFail_Simultaneously_Then_RelayHealthy verifies that when
+// TestGivenBothIceFailSimultaneouslyThenRelayHealthy verifies that when
 // both source and listener ICE fail simultaneously, the relay remains healthy.
-func TestGiven_BothIceFail_Simultaneously_Then_RelayHealthy(t *testing.T) {
+func TestGivenBothPeersWhenIceFailsSimultaneouslyThenRelayRemainsHealthy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("ICE failure test skipped in -short mode")
 	}

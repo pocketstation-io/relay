@@ -13,15 +13,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
-      - name: gofmt check
-        run: |
-          BAD=$(gofmt -l .)
-          if [ -n "$BAD" ]; then echo "needs gofmt:"; echo "$BAD"; exit 1; fi
-      - run: go test -short ./...
-      - run: go vet ./...
+      - name: CODE_PROTOCOL
+        run: scripts/check-code-protocol.sh
       - run: go test -race -short ./...
       - name: Session latency endpoint tests
-        run: go test -race -run "LatencyEndpoint" ./internal/server/
+        run: go test -race -run "TestGiven(LatencySample|UnknownSession)WhenLatencyEndpoint" ./internal/server/
 
   shutdown:
     runs-on: ubuntu-latest
@@ -30,7 +26,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
-      - run: go test -race -timeout 60s -run TestGiven_RelayShutdown ./internal/server/
+      - run: go test -race -timeout 60s -run TestGivenRelayShutdownWhenActiveConnectionThenPeerReceivesLeave ./internal/server/
 
   integration:
     # Runs only tests that do not require real Pion ICE (loopback ICE is
@@ -42,12 +38,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
-      - run: go test -race -timeout 2m -run "TestGiven_ApiServerToken" ./test/integration/
+      - run: go test -race -timeout 2m -run "TestGivenApiServerToken" ./test/integration/
 
   smoke:
     # P5-PROD-004: binary subprocess smoke test.
-    # Builds fake-source and relay-server binaries; starts relay-server in the
-    # background; runs fake-source against it for 3 seconds; verifies clean exit.
+    # Builds relay-test-source and relay-server binaries; starts relay-server in the
+    # background; runs relay-test-source against it for 3 seconds; verifies clean exit.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,22 +53,22 @@ jobs:
       - name: Build binaries
         run: |
           go build -o "${RUNNER_TEMP}/relay-server" ./cmd/relay-server
-          go build -o "${RUNNER_TEMP}/fake-source" ./cmd/fake-source
-      - name: Smoke test — fake-source against live relay
+          go build -o "${RUNNER_TEMP}/relay-test-source" ./cmd/relay-test-source
+      - name: Smoke test — relay-test-source against live relay
         run: |
           PORT=8080 POCKETSTATION_JWT_SECRET=smoke-secret \
             "${RUNNER_TEMP}/relay-server" &
           relay_pid=$!
           trap 'kill "${relay_pid}" 2>/dev/null || true' EXIT
           sleep 1
-          # fake-source connects, publishes for 3 seconds, exits 0
-          timeout 10s "${RUNNER_TEMP}/fake-source" \
+          # relay-test-source connects, publishes for 3 seconds, exits 0
+          timeout 10s "${RUNNER_TEMP}/relay-test-source" \
             --relay http://localhost:8080 \
             --duration 3s
 
   soak:
     # Soak test requires Pion ICE loopback which is unreliable in GitHub Actions
-    # containers. Run locally: go test -race -timeout 10m ./test/soak/
+    # containers. Run locally with RELAY_SOAK=1 and an explicit output directory.
     # This job verifies the soak package compiles and Short()-guarded fast path
     # runs; full 5-minute soak is a local/nightly manual check.
     runs-on: ubuntu-latest

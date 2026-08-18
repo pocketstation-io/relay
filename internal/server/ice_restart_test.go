@@ -3,16 +3,14 @@ package server
 // Unit tests for ICE restart loss tracking and debounce (spec §10.4).
 //
 // Test naming follows the GWT convention established by codec_hint_test.go:
-// TestGiven_[context]_When_[action]_Then_[expected].
+// TestGiven[context]_When_[action]_Then_[expected].
 
 import (
 	"testing"
 	"time"
 )
 
-// --- lossTracker unit tests ---
-
-func TestGiven_TwoHighLossReports_When_ThirdArrives_Then_TrackerTriggers(t *testing.T) {
+func TestGivenTwoHighLossReportsWhenThirdArrivesThenTrackerTriggers(t *testing.T) {
 	// Given: two consecutive high-loss reports have been recorded.
 	tracker := newLossTracker()
 	if tracker.record(0.20) {
@@ -29,7 +27,7 @@ func TestGiven_TwoHighLossReports_When_ThirdArrives_Then_TrackerTriggers(t *test
 	}
 }
 
-func TestGiven_TwoHighLossReports_When_LowLossArrives_Then_TrackerResets(t *testing.T) {
+func TestGivenTwoHighLossReportsWhenLowLossArrivesThenTrackerResets(t *testing.T) {
 	// Given: two consecutive high-loss reports.
 	tracker := newLossTracker()
 	tracker.record(0.20)
@@ -46,7 +44,7 @@ func TestGiven_TwoHighLossReports_When_LowLossArrives_Then_TrackerResets(t *test
 	}
 }
 
-func TestGiven_ExactlyAtThreshold_When_Recorded_Then_NotHighLoss(t *testing.T) {
+func TestGivenExactlyAtThresholdWhenRecordedThenNotHighLoss(t *testing.T) {
 	// Given: loss exactly at lossICEThreshold (not strictly greater than).
 	tracker := newLossTracker()
 	for i := 0; i < iceRestartConsecutiveRequired; i++ {
@@ -56,7 +54,7 @@ func TestGiven_ExactlyAtThreshold_When_Recorded_Then_NotHighLoss(t *testing.T) {
 	}
 }
 
-func TestGiven_LossJustAboveThreshold_When_ThreeConsecutive_Then_Triggers(t *testing.T) {
+func TestGivenLossJustAboveThresholdWhenThreeConsecutiveThenTriggers(t *testing.T) {
 	tracker := newLossTracker()
 	const justAbove = lossICEThreshold + 0.001
 	tracker.record(justAbove)
@@ -66,7 +64,7 @@ func TestGiven_LossJustAboveThreshold_When_ThreeConsecutive_Then_Triggers(t *tes
 	}
 }
 
-func TestGiven_TrackerTriggered_When_Reset_Then_RequiresThreeMoreReports(t *testing.T) {
+func TestGivenTrackerTriggeredWhenResetThenRequiresThreeMoreReports(t *testing.T) {
 	// Given: tracker has just triggered (3 consecutive high-loss reports).
 	tracker := newLossTracker()
 	tracker.record(0.20)
@@ -83,9 +81,7 @@ func TestGiven_TrackerTriggered_When_Reset_Then_RequiresThreeMoreReports(t *test
 	}
 }
 
-// --- iceRestartState debounce tests ---
-
-func TestGiven_NoDebounceElapsed_When_MaybeEmitICERestart_Then_NoMessageSent(t *testing.T) {
+func TestGivenNoDebounceElapsedWhenMaybeEmitICERestartThenNoMessageSent(t *testing.T) {
 	// Given: a server with no sessions and a state that was last sent "just now".
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := newICERestartState()
@@ -108,7 +104,7 @@ func TestGiven_NoDebounceElapsed_When_MaybeEmitICERestart_Then_NoMessageSent(t *
 	}
 }
 
-func TestGiven_DebounceElapsed_When_ThreeConsecutiveHighLoss_Then_StateUpdated(t *testing.T) {
+func TestGivenDebounceElapsedWhenThreeConsecutiveHighLossThenStateUpdated(t *testing.T) {
 	// Given: a server with no source sessions (so no WS write occurs) and a
 	// state whose lastSent is older than the debounce window.
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
@@ -127,7 +123,7 @@ func TestGiven_DebounceElapsed_When_ThreeConsecutiveHighLoss_Then_StateUpdated(t
 	}
 }
 
-func TestGiven_ICERestartJustSent_When_AnotherThreeHighLoss_Then_DebounceBlocks(t *testing.T) {
+func TestGivenICERestartJustSentWhenAnotherThreeHighLossThenDebounceBlocks(t *testing.T) {
 	// Given: an ICE_RESTART was sent (lastSent = now, tracker reset).
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := newICERestartState()
@@ -148,9 +144,7 @@ func TestGiven_ICERestartJustSent_When_AnotherThreeHighLoss_Then_DebounceBlocks(
 	}
 }
 
-// --- roomICERestartState helper ---
-
-func TestGiven_RoomICERestartState_When_CalledTwice_Then_SamePointer(t *testing.T) {
+func TestGivenRoomICERestartStateWhenCalledTwiceThenSamePointer(t *testing.T) {
 	srv := &Server{}
 	s1 := srv.roomICERestartState("room-ice-1")
 	s2 := srv.roomICERestartState("room-ice-1")
@@ -159,7 +153,7 @@ func TestGiven_RoomICERestartState_When_CalledTwice_Then_SamePointer(t *testing.
 	}
 }
 
-func TestGiven_TwoRooms_When_RoomICERestartState_Then_DifferentPointers(t *testing.T) {
+func TestGivenTwoRoomsWhenRoomICERestartStateThenDifferentPointers(t *testing.T) {
 	srv := &Server{}
 	s1 := srv.roomICERestartState("room-ice-a")
 	s2 := srv.roomICERestartState("room-ice-b")

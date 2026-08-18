@@ -4,7 +4,7 @@
 //
 //	go test -race -run TestFiftyListeners ./test/stress/
 //
-// The test uses the graph package directly — no real WebRTC, no network.
+// The test uses the Session package directly — no real WebRTC, no network.
 // It verifies the copy-on-write subscription slice (RELAY-005) is free of data
 // races and that the RelaySession reaches a clean steady state after 50 concurrent
 // join/leave cycles.
@@ -18,13 +18,11 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
 // listenerCount is the Phase 2 exit criterion value.
 const listenerCount = 50
-
-// --- mock types -------------------------------------------------------
 
 // mockSource delivers packets from a buffered channel and signals EOF on close.
 type mockSource struct {
@@ -59,8 +57,6 @@ func (ml *mockSubscription) WriteRTP(_ *rtp.Packet) error {
 	return nil
 }
 
-// --- helpers ----------------------------------------------------------
-
 // makePacket returns a minimal valid RTP packet for forwarding.
 func makePacket() *rtp.Packet {
 	return &rtp.Packet{
@@ -69,17 +65,15 @@ func makePacket() *rtp.Packet {
 	}
 }
 
-// --- tests ------------------------------------------------------------
-
 // TestFiftyListenersJoinLeaveRapidly verifies the Phase 2 exit criterion:
 // "Relay handles 50 subscribers joining/leaving rapidly without crash."
 //
 // Given: a RelaySession with an active source forwarding RTP at ~1 kHz.
 // When:  50 goroutines each add a subscription, yield the CPU once, then remove it.
 // Then:  no panics, no data races (-race), and final subscription count is 0.
-func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
+func TestGivenFiftySubscribersWhenJoiningAndLeavingRapidlyThenRelayRemainsHealthy(t *testing.T) {
 	// Given — RelaySession with short expiry timers so the test does not block.
-	reg := graph.NewRegistryWithConfig(graph.RegistryConfig{
+	reg := session.NewRegistryWithConfig(session.RegistryConfig{
 		InactivityTimeout: 5 * time.Minute,
 		ReconnectWindow:   5 * time.Minute,
 	})
@@ -87,7 +81,7 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 	defer reg.Delete("stress-room-1")
 
 	src := newMockSource()
-	r.SetSource("voice", graph.BusRoleVoice, src, nil)
+	r.SetSource("voice", session.BusRoleVoice, src, nil)
 
 	// stopSending is closed by the test body to signal the sender goroutine to
 	// exit before src.stop() closes the channel. This prevents a concurrent
@@ -126,7 +120,7 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 			defer wg.Done()
 			peerID := fmt.Sprintf("peer-%03d", idx)
 			ml := &mockSubscription{}
-			if err := r.AddSubscription(peerID, graph.BusMix, ml); err != nil {
+			if err := r.AddSubscription(peerID, session.BusMix, ml); err != nil {
 				// ErrRoomFull would only fire if MaxSubscriptions were set; it is not.
 				t.Errorf("AddSubscription(%s): unexpected error: %v", peerID, err)
 				return
@@ -160,8 +154,8 @@ func TestFiftyListenersJoinLeaveRapidly(t *testing.T) {
 // Given: a RelaySession with no source.
 // When:  50 goroutines each add then immediately remove a subscription.
 // Then:  no panics, no data races, final subscription count is 0.
-func TestFiftyListenersNoSource(t *testing.T) {
-	reg := graph.NewRegistryWithConfig(graph.RegistryConfig{
+func TestGivenFiftySubscribersWhenNoSourceExistsThenRelayRemainsHealthy(t *testing.T) {
+	reg := session.NewRegistryWithConfig(session.RegistryConfig{
 		InactivityTimeout: 5 * time.Minute,
 		ReconnectWindow:   5 * time.Minute,
 	})
@@ -176,7 +170,7 @@ func TestFiftyListenersNoSource(t *testing.T) {
 			defer wg.Done()
 			peerID := fmt.Sprintf("peer-%03d", idx)
 			ml := &mockSubscription{}
-			if err := r.AddSubscription(peerID, graph.BusMix, ml); err != nil {
+			if err := r.AddSubscription(peerID, session.BusMix, ml); err != nil {
 				t.Errorf("AddSubscription(%s): unexpected error: %v", peerID, err)
 				return
 			}

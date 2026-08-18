@@ -30,6 +30,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,34 +39,87 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/clocklineage"
-	"github.com/pocketstation-io/relay/internal/downlink"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/media/clocklineage"
+	"github.com/pocketstation-io/relay/internal/media/downlink"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
 // whipConn holds the PeerConnection for a WHIP/WHEP HTTP connection.
 // Keyed by connID in Server.whipConns.
 type whipConn struct {
 	pc      *webrtc.PeerConnection
-	room    *graph.RelaySession
-	busID   graph.BusID
+	room    *session.RelaySession
+	busID   session.BusID
 	connID  string
 	created time.Time
+}
+
+type whipDirection uint8
+
+const (
+	whipIngress whipDirection = iota
+	whepEgress
+)
+
+var errInvalidWHIPDirection = errors.New("invalid WHIP direction")
+
+type whipPolicy struct {
+	requiredRole   auth.Role
+	compatibleRole auth.Role
+	defaultBus     session.BusID
+}
+
+func (direction whipDirection) policy() (whipPolicy, error) {
+	switch direction {
+	case whipIngress:
+		return whipPolicy{requiredRole: auth.RoleSource, defaultBus: "voice"}, nil
+	case whepEgress:
+		return whipPolicy{
+			requiredRole:   auth.RoleSubscriber,
+			compatibleRole: auth.RoleListener,
+			defaultBus:     session.BusMix,
+		}, nil
+	default:
+		return whipPolicy{}, errInvalidWHIPDirection
+	}
+}
+
+func (direction whipDirection) String() string {
+	switch direction {
+	case whipIngress:
+		return "ingress"
+	case whepEgress:
+		return "egress"
+	default:
+		return "unknown"
+	}
 }
 
 // handleWHIP processes a WHIP ingest request (publisher → relay, RFC 9725).
 // POST /v1/sessions/{id}/whip
 func (s *Server) handleWHIP(w http.ResponseWriter, r *http.Request) {
-	s.handleWHIPRequest(w, r, true)
+	s.handleWHIPRequest(w, r, whipIngress)
 }
 
 // handleWHEP processes a WHEP egress request (relay → subscriber, WHEP draft).
 // POST /v1/sessions/{id}/whep
 func (s *Server) handleWHEP(w http.ResponseWriter, r *http.Request) {
-	s.handleWHIPRequest(w, r, false)
+	s.handleWHIPRequest(w, r, whepEgress)
 }
 
-func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPublish bool) {
+func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direction whipDirection) {
+	if !s.handshakeAdmission.TryAcquire() {
+		s.Metrics.HandshakeRejectedTotal.Add(1)
+		http.Error(w, "relay handshake capacity exceeded", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.handshakeAdmission.Release()
+
+	policy, err := direction.policy()
+	if err != nil {
+		http.Error(w, "invalid connection direction", http.StatusInternalServerError)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -83,11 +137,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		return
 	}
 
-	wantRole := auth.RoleSubscriber
-	if isPublish {
-		wantRole = auth.RoleSource
-	}
-	if claims.Role != wantRole && !(claims.Role == auth.RoleListener && !isPublish) {
+	if claims.Role != policy.requiredRole && claims.Role != policy.compatibleRole {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -103,11 +153,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		busID = claims.BusID
 	}
 	if busID == "" {
-		if isPublish {
-			busID = "voice"
-		} else {
-			busID = graph.BusMix
-		}
+		busID = policy.defaultBus
 	}
 
 	offerBytes, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
@@ -116,7 +162,11 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		return
 	}
 
-	rm := s.relaySessions.GetOrCreate(sessionID)
+	rm, _, accepted := s.relaySessions.GetOrCreateWithinLimit(sessionID, s.maxRooms)
+	if !accepted {
+		http.Error(w, "relay session limit exceeded", http.StatusTooManyRequests)
+		return
+	}
 
 	pc, lineage, err := s.newWHIPPeerConnection()
 	if err != nil {
@@ -127,7 +177,8 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 
 	connID := newID()
 
-	if isPublish {
+	switch direction {
+	case whipIngress:
 		busCapture := busID
 		pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 			var timeline *clocklineage.Timeline
@@ -135,9 +186,17 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 				timeline = lineage.Remote(uint32(track.SSRC()))
 			}
 			go drainPublisherRTCP(receiver)
-			rm.SetSource(busCapture, busRoleFor(busCapture), &trackSource{track: track, timeline: timeline}, func() { _ = pc.Close() })
+			if sourceErr := rm.SetSource(
+				busCapture,
+				busRoleFor(busCapture),
+				&trackSource{track: track, timeline: timeline},
+				func() { _ = pc.Close() },
+			); sourceErr != nil {
+				slog.Warn("WHIP source attachment rejected", "conn_id", connID, "error", sourceErr)
+				_ = pc.Close()
+			}
 		})
-	} else {
+	case whepEgress:
 		listenerMime := webrtc.MimeTypeOpus
 		if redEnabled() {
 			listenerMime = redMimeType
@@ -162,7 +221,7 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 			switch state {
 			case webrtc.PeerConnectionStateConnected:
-				var sub graph.BusSubscription = audioTrack
+				var sub session.PacketWriter = audioTrack
 				if redEnabled() {
 					sub = newREDListener(audioTrack, opusPayloadType)
 				}
@@ -181,8 +240,8 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 					onNACK = dl.HandleNACK
 				}
 				dl.SetFeedback(downlink.StartFeedbackReader(sender, dl.Stats(), nil, onNACK))
-				if err := rm.AddDownlink(connCapture, busCapture, dl); err != nil {
-					dl.StopPacer()
+				if err := rm.AddBusSubscription(connCapture, busCapture, dl); err != nil {
+					dl.StopForwarding()
 				}
 			case webrtc.PeerConnectionStateFailed,
 				webrtc.PeerConnectionStateClosed,
@@ -191,6 +250,10 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 				s.whipConns.Delete(connCapture)
 			}
 		})
+	default:
+		_ = pc.Close()
+		http.Error(w, "invalid connection direction", http.StatusInternalServerError)
+		return
 	}
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
@@ -258,112 +321,6 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, isPub
 		"conn_id", connID,
 		"session_id", sessionID,
 		"bus_id", busID,
-		"publish", isPublish,
+		"direction", direction,
 	)
-}
-
-// handleWHIPICE processes a trickle-ICE PATCH (RFC 9725 §4.5).
-// PATCH /v1/connections/{connID}
-// Content-Type: application/trickle-ice-sdpfrag
-func (s *Server) handleWHIPICE(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	connID := r.PathValue("connID")
-	v, ok := s.whipConns.Load(connID)
-	if !ok {
-		http.Error(w, "connection not found", http.StatusNotFound)
-		return
-	}
-	conn := v.(*whipConn)
-
-	fragBytes, err := io.ReadAll(io.LimitReader(r.Body, 8*1024))
-	if err != nil {
-		http.Error(w, "failed to read ICE fragment", http.StatusBadRequest)
-		return
-	}
-
-	// Parse SDP fragment: extract a=candidate: lines per RFC 8839 §4.2.3.
-	for _, line := range strings.Split(string(fragBytes), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "a=candidate:"):
-			candidate := strings.TrimPrefix(line, "a=")
-			if iErr := conn.pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: candidate}); iErr != nil {
-				slog.Warn("WHIP trickle: AddICECandidate", "conn_id", connID, "error", iErr)
-			}
-		case line == "a=end-of-candidates":
-			_ = conn.pc.AddICECandidate(webrtc.ICECandidateInit{})
-		}
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleWHIPDelete tears down a WHIP/WHEP connection (RFC 9725 §4.7).
-// DELETE /v1/connections/{connID}
-func (s *Server) handleWHIPDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	connID := r.PathValue("connID")
-	v, loaded := s.whipConns.LoadAndDelete(connID)
-	if !loaded {
-		http.Error(w, "connection not found", http.StatusNotFound)
-		return
-	}
-	conn := v.(*whipConn)
-	_ = conn.pc.Close()
-	if conn.room != nil {
-		conn.room.RemoveSubscription(connID)
-	}
-	slog.Info("WHIP connection deleted", "conn_id", connID)
-	w.WriteHeader(http.StatusOK)
-}
-
-// newWHIPPeerConnection creates a PeerConnection for WHIP/WHEP connections.
-// Unlike WebSocket sessions, WHIP PCs do not wire OnICECandidate to a WebSocket.
-// ICE gathering completes synchronously before the HTTP response is returned.
-func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
-	iceServers := s.iceServers
-	if len(iceServers) == 0 {
-		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
-	}
-	pcCfg := webrtc.Configuration{ICEServers: iceServers}
-
-	m, err := NewMediaEngineWithAudioNACK()
-	if err != nil {
-		return nil, nil, err
-	}
-	ir, lineage, err := newInterceptorRegistryWithClockLineage(m)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if s.iceUDPMux != nil || s.iceTCPMux != nil || len(s.nat1to1IPs) > 0 {
-		se := webrtc.SettingEngine{}
-		if s.iceUDPMux != nil {
-			se.SetICEUDPMux(s.iceUDPMux)
-		}
-		if s.iceTCPMux != nil {
-			se.SetICETCPMux(s.iceTCPMux)
-		}
-		if len(s.nat1to1IPs) > 0 {
-			se.SetNAT1To1IPs(s.nat1to1IPs, webrtc.ICECandidateTypeHost)
-		}
-		api := webrtc.NewAPI(
-			webrtc.WithSettingEngine(se),
-			webrtc.WithMediaEngine(m),
-			webrtc.WithInterceptorRegistry(ir),
-		)
-		pc, pcErr := api.NewPeerConnection(pcCfg)
-		return pc, lineage, pcErr
-	}
-	api := webrtc.NewAPI(
-		webrtc.WithMediaEngine(m),
-		webrtc.WithInterceptorRegistry(ir),
-	)
-	pc, pcErr := api.NewPeerConnection(pcCfg)
-	return pc, lineage, pcErr
 }

@@ -1,125 +1,26 @@
-// Package server contains the relay HTTP + WebSocket server logic.
-// cmd/relay-server/main.go is a thin entrypoint that calls New and Serve.
-// test/integration imports this package to spin up an in-process server.
 package server
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/json"
-	"fmt"
-	"log/slog"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	pionIce "github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/callback"
-	"github.com/pocketstation-io/relay/internal/downlink"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/admission"
 	"github.com/pocketstation-io/relay/internal/metrics"
-	"github.com/pocketstation-io/relay/internal/ratelimit"
-	"github.com/pocketstation-io/relay/internal/signaling"
-	"github.com/pocketstation-io/relay/internal/webhook"
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
+	"github.com/pocketstation-io/relay/internal/notifications/webhook"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
-// shutdownDrainTimeout is the maximum time Serve waits for in-flight HTTP
-// connections to complete after receiving a shutdown signal.
-const shutdownDrainTimeout = 5 * time.Second
-
-// wsKeepAlivePingInterval is how often the relay sends a WebSocket ping to
-// each connected peer. Browsers respond automatically with a pong.
-// This prevents Fly.io's proxy and home NAT devices from silently dropping
-// idle TCP connections after their inactivity timeout (~1 hour).
-const wsKeepAlivePingInterval = 30 * time.Second
-
-// wsKeepAliveTimeout is the maximum time the relay waits for a pong reply
-// before treating the connection as dead and closing it.
-const wsKeepAliveTimeout = 90 * time.Second
-
-// defaultMaxRooms is the default room-count limit when RELAY_MAX_ROOMS is unset.
-const defaultMaxRooms = 100
-
-// defaultMaxListenersPerRoom is the default per-room listener limit when
-// RELAY_MAX_LISTENERS_PER_ROOM is unset.
-const defaultMaxListenersPerRoom = 50
-
-// defaultMaxRoomsPerIPPerMinute is the default per-IP room-creation rate limit
-// when MAX_ROOMS_PER_IP_PER_MINUTE is unset.
-const defaultMaxRoomsPerIPPerMinute = 10
-
 const defaultPublicReceiverURL = "https://pocketstation-receiver.fly.dev"
-const joinCodeTTL = 2 * time.Hour
-
-type joinInvite struct {
-	sessionID string
-	expiresAt time.Time
-}
-
-// Config holds the parameters for creating a Server.
-type Config struct {
-	// JWTSecret is the HMAC-SHA256 signing key used for session tokens.
-	JWTSecret []byte
-	// SettingEngine is an optional Pion SettingEngine for tests (loopback ICE,
-	// aggressive timeouts). When set, the relay always builds its own API with
-	// NewMediaEngineWithAudioNACK so that RED codec registration is preserved.
-	// Preferred over API; if both are set, SettingEngine wins.
-	SettingEngine *webrtc.SettingEngine
-	// API is an optional *webrtc.API used instead of the default global API.
-	// Deprecated for test use: prefer SettingEngine so that codec registration
-	// (including RED) is not bypassed.
-	API *webrtc.API
-	// MaxRooms is the maximum number of concurrently active RelaySessions.
-	// Zero means use defaultMaxRooms.
-	MaxRooms int
-	// MaxSubscribersPerRoom is the maximum number of subscribers in a single
-	// RelaySession. Zero means use defaultMaxListenersPerRoom.
-	MaxSubscribersPerRoom int
-	// MaxRoomsPerIPPerMinute is the maximum number of rooms a single IP may
-	// create per minute. Zero means use defaultMaxRoomsPerIPPerMinute.
-	// Set to -1 to disable per-IP rate limiting (tests, trusted environments).
-	MaxRoomsPerIPPerMinute int
-	// CallbackClient is an optional client for posting source/subscriber events
-	// to api-server. Nil disables all outbound callbacks.
-	CallbackClient *callback.Client
-	// WebhookDispatcher is an optional dispatcher for posting relay lifecycle
-	// events to an external HTTP endpoint. Nil disables all webhook delivery.
-	WebhookDispatcher *webhook.Dispatcher
-	// ICEServers overrides the ICE server list used by the relay's own Pion
-	// PeerConnections. Falls back to stun.l.google.com:19302 when empty.
-	ICEServers []webrtc.ICEServer
-	// ClientICEServers is the ICE server list returned to connecting clients.
-	// Separate from ICEServers to avoid the relay self-STUNing via TURN.
-	ClientICEServers []webrtc.ICEServer
-	// ICETCPMux, when non-nil, enables ICE-TCP candidates.
-	ICETCPMux pionIce.TCPMux
-	// ICEUDPMux, when non-nil, forces all UDP ICE traffic through one socket.
-	ICEUDPMux pionIce.UDPMux
-	// RegistryConfig sets per-room inactivity timeout and source reconnect window.
-	RegistryConfig graph.RegistryConfig
-	// UseTURN, when true, sets use_turn=true in ICE_RESTART messages (RELAY-023).
-	UseTURN bool
-	// NAT1To1IPs is the list of public IP addresses to announce in ICE host
-	// candidates (Fly.io / NAT deployments). Env: RELAY_PUBLIC_IPS.
-	NAT1To1IPs []string
-	// PublicReceiverURL is the browser receiver origin used to construct a
-	// one-click join URL. Empty uses PUBLIC_RECEIVER_URL or the production URL.
-	PublicReceiverURL string
-	// PublicRelayURL is the externally reachable relay HTTP(S) origin returned
-	// by join-code resolution. Empty derives it from the incoming request.
-	PublicRelayURL string
-}
 
 // Server is the top-level relay server.
 type Server struct {
-	relaySessions     *graph.SessionRegistry
+	relaySessions     *session.SessionRegistry
 	jwtSecret         []byte
 	settingEngine     *webrtc.SettingEngine
 	api               *webrtc.API
@@ -134,10 +35,12 @@ type Server struct {
 
 	maxRooms              int // set once at construction
 	maxSubscribersPerRoom int // set once at construction
+	handshakeAdmission    *admission.Gate
+	callbackAdmission     *admission.Gate
 
 	// ipLimiter enforces per-IP room-creation rate limiting.
 	// Nil when per-IP limiting is disabled (MaxRoomsPerIPPerMinute == -1).
-	ipLimiter *ratelimit.IPLimiter
+	ipLimiter *admission.IPLimiter
 
 	// mu guards httpServer and the active signaling-peer map.
 	mu          sync.RWMutex
@@ -173,14 +76,22 @@ func New(cfg Config) *Server {
 	if maxSubs <= 0 {
 		maxSubs = defaultMaxListenersPerRoom
 	}
+	maxHandshakes := cfg.MaxConcurrentHandshakes
+	if maxHandshakes <= 0 {
+		maxHandshakes = defaultMaxConcurrentHandshakes
+	}
+	maxCallbacks := cfg.MaxConcurrentCallbacks
+	if maxCallbacks <= 0 {
+		maxCallbacks = defaultMaxConcurrentCallbacks
+	}
 
-	var ipLim *ratelimit.IPLimiter
+	var ipLim *admission.IPLimiter
 	if cfg.MaxRoomsPerIPPerMinute != -1 {
 		maxPerIP := cfg.MaxRoomsPerIPPerMinute
 		if maxPerIP <= 0 {
 			maxPerIP = defaultMaxRoomsPerIPPerMinute
 		}
-		ipLim = ratelimit.New(int64(maxPerIP), time.Minute)
+		ipLim = admission.New(int64(maxPerIP), time.Minute)
 	}
 
 	// Propagate MaxSubscriptions into the RegistryConfig so each RelaySession
@@ -201,7 +112,7 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
-		relaySessions:         graph.NewRegistryWithConfig(regCfg),
+		relaySessions:         session.NewRegistryWithConfig(regCfg),
 		jwtSecret:             cfg.JWTSecret,
 		settingEngine:         cfg.SettingEngine,
 		api:                   cfg.API,
@@ -215,6 +126,8 @@ func New(cfg Config) *Server {
 		nat1to1IPs:            cfg.NAT1To1IPs,
 		maxRooms:              maxRooms,
 		maxSubscribersPerRoom: maxSubs,
+		handshakeAdmission:    admission.NewGate(maxHandshakes),
+		callbackAdmission:     admission.NewGate(maxCallbacks),
 		ipLimiter:             ipLim,
 		signalPeers:           make(map[string]*signalPeer),
 		useTURN:               cfg.UseTURN,
@@ -222,566 +135,4 @@ func New(cfg Config) *Server {
 		publicRelayURL:        strings.TrimRight(publicRelayURL, "/"),
 		joinInvites:           make(map[string]joinInvite),
 	}
-}
-
-// Handler returns an http.Handler for the relay server routes.
-// This is the testable surface: tests can pass the handler to httptest.NewServer.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.healthz)
-
-	// v3.0 session endpoints (canonical)
-	mux.HandleFunc("POST /v1/sessions", s.createRoom)
-	mux.HandleFunc("GET /v1/join/{code}", s.resolveJoinCode)
-	mux.HandleFunc("GET /v1/sessions/{id}/latency", s.roomLatency)
-	mux.HandleFunc("GET /v1/sessions/{id}/health", s.roomHealth)
-	mux.HandleFunc("GET /v1/sessions/{id}/packet-log", s.packetLogHandler)
-	mux.HandleFunc("GET /v1/sessions/{id}/events", s.sessionSSE)
-	mux.HandleFunc("GET /v1/sessions/{id}/media-debug", s.mediaDebug)
-
-	// WHIP (RFC 9725) — HTTP-based WebRTC ingest/egress, no WebSocket needed.
-	// POST body: application/sdp offer. Response: 201 + application/sdp answer.
-	// ?bus=voice|music|agent_voice|events selects the named AudioBus.
-	mux.HandleFunc("POST /v1/sessions/{id}/whip", s.handleWHIP)
-	mux.HandleFunc("POST /v1/sessions/{id}/whep", s.handleWHEP)
-	mux.HandleFunc("PATCH /v1/connections/{connID}", s.handleWHIPICE)
-	mux.HandleFunc("DELETE /v1/connections/{connID}", s.handleWHIPDelete)
-
-	// v2.3 room endpoints — backward-compat aliases
-	mux.HandleFunc("/v1/rooms", s.createRoom)
-	mux.HandleFunc("GET /v1/rooms/{id}/latency", s.roomLatency)
-
-	mux.HandleFunc("/v1/channels", s.listChannels)
-	mux.HandleFunc("/v1/signal", s.signal)
-	mux.HandleFunc("/v1/echo", s.echo)
-	mux.HandleFunc("/metrics", s.metricsHandler)
-	return mux
-}
-
-// Serve starts the HTTP server on addr and blocks until it stops.
-// The caller is responsible for calling Shutdown to trigger a graceful drain.
-// Returns the first non-nil error from ListenAndServe (http.ErrServerClosed on
-// clean shutdown).
-//
-// ReadHeaderTimeout is set to 5 s to mitigate Slowloris attacks. WriteTimeout
-// is intentionally left unset: WebSocket connections are long-lived and would
-// be terminated mid-stream by a write deadline.
-func (s *Server) Serve(addr string) error {
-	hs := &http.Server{
-		Addr:              addr,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	s.mu.Lock()
-	s.httpServer = hs
-	s.mu.Unlock()
-
-	slog.Info("relay listening", "addr", addr)
-	return hs.ListenAndServe()
-}
-
-// Shutdown drains the server with a 5-second deadline, closes all active
-// WebSocket sessions, and closes all rooms. It is safe to call from a signal
-// handler goroutine.
-//
-// WebSocket connections are hijacked from the HTTP server and therefore not
-// tracked by http.Server.Shutdown. We close them explicitly so peers observe
-// a clean connection close rather than a silent hang.
-//
-// Before closing each connection, Shutdown sends a RELAY_SHUTTING_DOWN error
-// frame so clients can detect the restart and reconnect promptly.
-func (s *Server) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	hs := s.httpServer
-	// Snapshot the live signaling peers to close them without holding the lock.
-	toClose := make([]*signalPeer, 0, len(s.signalPeers))
-	for _, peer := range s.signalPeers {
-		toClose = append(toClose, peer)
-	}
-	s.mu.Unlock()
-
-	// Notify and close active WebSocket sessions so their read loops unblock
-	// and can deregister cleanly.
-	shuttingDown := signaling.ServerMessage{
-		Type:    signaling.TypeError,
-		Code:    "RELAY_SHUTTING_DOWN",
-		Message: "relay restarting, reconnect",
-	}
-	for _, peer := range toClose {
-		_ = peer.send(shuttingDown)
-		peer.closeConn()
-	}
-
-	if hs != nil {
-		drainCtx, cancel := context.WithTimeout(ctx, shutdownDrainTimeout)
-		defer cancel()
-		if err := hs.Shutdown(drainCtx); err != nil {
-			return err
-		}
-	}
-	// Close all active rooms so forwardLoops exit and peer connections are
-	// cleaned up before the process exits.
-	s.relaySessions.CloseAll()
-
-	// Stop the per-IP rate limiter's background goroutine.
-	if s.ipLimiter != nil {
-		s.ipLimiter.Stop()
-	}
-	return nil
-}
-
-func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
-	_, _ = w.Write([]byte("ok"))
-}
-
-// echo implements the /v1/echo WebSocket endpoint (RELAY-020).
-//
-// Clients send JSON messages of the form {"send_timestamp_ns": <int64>}.
-// The relay echoes each message back with the relay's receive timestamp added:
-// {"send_timestamp_ns": <int64>, "recv_timestamp_ns": <int64>}.
-//
-// PocketStation Bench uses this endpoint to measure the relay-visible portion
-// of end-to-end latency without audio pipeline overhead. The endpoint requires
-// no authentication — it is a pure timing mirror.
-func (s *Server) echo(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	for {
-		var msg struct {
-			SendTimestampNs int64 `json:"send_timestamp_ns"`
-		}
-		if err := conn.ReadJSON(&msg); err != nil {
-			return
-		}
-		reply := struct {
-			SendTimestampNs int64 `json:"send_timestamp_ns"`
-			RecvTimestampNs int64 `json:"recv_timestamp_ns"`
-		}{
-			SendTimestampNs: msg.SendTimestampNs,
-			RecvTimestampNs: time.Now().UnixNano(),
-		}
-		if err := conn.WriteJSON(reply); err != nil {
-			return
-		}
-	}
-}
-
-func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
-	fwd, drop := s.relaySessions.PacketStats()
-	s.Metrics.PacketsForwarded.Store(fwd)
-	s.Metrics.PacketsDropped.Store(drop)
-	s.Metrics.RoomsActive.Store(int64(s.relaySessions.RoomCount()))
-	if s.webhookDispatcher != nil {
-		s.Metrics.WebhookErrorsTotal.Store(s.webhookDispatcher.ErrorsTotal())
-	}
-	s.Metrics.WritePrometheus(w)
-}
-
-func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Per-IP rate limit: reject when a single IP creates rooms too rapidly.
-	if s.ipLimiter != nil {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr // fall back to raw address if no port
-		}
-		if !s.ipLimiter.Allow(ip) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
-			return
-		}
-	}
-
-	// Rate limit: reject when the room count has reached the ceiling.
-	if s.relaySessions.RoomCount() >= s.maxRooms {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room_limit_exceeded"})
-		return
-	}
-
-	id := newID()
-	s.relaySessions.GetOrCreate(id)
-	s.Metrics.RoomsActive.Add(1)
-	slog.Info("session created", "session_id", id)
-	sourceToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSource, 2*time.Hour)
-	if err != nil {
-		http.Error(w, "token error", http.StatusInternalServerError)
-		return
-	}
-	subscriberToken, err := auth.Sign(s.jwtSecret, id, auth.RoleSubscriber, 2*time.Hour)
-	if err != nil {
-		http.Error(w, "token error", http.StatusInternalServerError)
-		return
-	}
-	joinCode := newID()
-	s.joinMu.Lock()
-	s.joinInvites[joinCode] = joinInvite{sessionID: id, expiresAt: time.Now().Add(joinCodeTTL)}
-	s.joinMu.Unlock()
-	joinURL := s.publicReceiverURL + "?join=" + joinCode
-	resp := map[string]any{
-		"session_id":       id,
-		"room_id":          id, // v2.3 wire compat
-		"source_token":     sourceToken,
-		"subscriber_token": subscriberToken,
-		"listener_token":   subscriberToken, // v2.3 wire compat
-		"join_code":        joinCode,
-		"join_url":         joinURL,
-		"qr_url":           joinURL,
-		"relay_region":     os.Getenv("FLY_REGION"),
-		"relay_app":        os.Getenv("FLY_APP_NAME"),
-	}
-	// Include ICE server configuration when TURN is enabled (RELAY-023).
-	// Clients pass this list to RTCPeerConnection so they reach the relay's
-	// embedded TURN server without hardcoding any addresses. This list differs
-	// from s.iceServers (used by the relay's own Pion peers) — the relay must
-	// not self-STUN via its own TURN server.
-	if len(s.clientICEServers) > 0 {
-		resp["ice_servers"] = s.clientICEServers
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
-	setJoinCORS(w, r)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-
-	code := r.PathValue("code")
-	now := time.Now()
-	s.joinMu.Lock()
-	invite, found := s.joinInvites[code]
-	if found && now.After(invite.expiresAt) {
-		delete(s.joinInvites, code)
-		found = false
-	}
-	s.joinMu.Unlock()
-	if !found {
-		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
-		return
-	}
-	if _, active := s.relaySessions.Get(invite.sessionID); !active {
-		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
-		return
-	}
-
-	token, err := auth.Sign(s.jwtSecret, invite.sessionID, auth.RoleSubscriber, joinCodeTTL)
-	if err != nil {
-		http.Error(w, `{"error":"token_error"}`, http.StatusInternalServerError)
-		return
-	}
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"session_id":       invite.sessionID,
-		"subscriber_token": token,
-		"signal_url":       s.publicSignalURL(r),
-	})
-}
-
-func (s *Server) publicSignalURL(r *http.Request) string {
-	base := s.publicRelayURL
-	if base == "" {
-		scheme := "http"
-		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-			scheme = "https"
-		}
-		base = scheme + "://" + r.Host
-	}
-	base = strings.TrimRight(base, "/")
-	base = strings.Replace(base, "https://", "wss://", 1)
-	base = strings.Replace(base, "http://", "ws://", 1)
-	return base + "/v1/signal"
-}
-
-func setJoinCORS(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if len(allowedOrigins) == 0 {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		return
-	}
-	for _, allowed := range allowedOrigins {
-		if origin == allowed {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			return
-		}
-	}
-}
-
-// allowedOrigins is read once at startup from ALLOWED_ORIGINS (comma-separated).
-// Empty means dev mode: all origins are accepted.
-var allowedOrigins = parseOrigins(os.Getenv("ALLOWED_ORIGINS"))
-
-// upgrader upgrades HTTP connections to WebSocket.
-// In production (ALLOWED_ORIGINS set), only requests whose Origin header matches
-// one of the listed origins are accepted. In dev mode (ALLOWED_ORIGINS unset),
-// all origins are accepted.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		if len(allowedOrigins) == 0 {
-			return true // dev mode: allow all origins
-		}
-		origin := r.Header.Get("Origin")
-		for _, allowed := range allowedOrigins {
-			if origin == allowed {
-				return true
-			}
-		}
-		return false
-	},
-}
-
-// parseOrigins splits a comma-separated origin list and trims whitespace.
-// Returns nil when s is empty so the upgrader can detect dev mode via len check.
-func parseOrigins(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	peer := &signalPeer{
-		id:   newID(),
-		srv:  s,
-		conn: conn,
-		done: make(chan struct{}),
-	}
-	// Register the signaling peer so Shutdown can close it.
-	s.mu.Lock()
-	s.signalPeers[peer.id] = peer
-	s.mu.Unlock()
-
-	s.Metrics.SessionsTotal.Add(1)
-	defer func() {
-		s.mu.Lock()
-		delete(s.signalPeers, peer.id)
-		s.mu.Unlock()
-		peer.cleanup()
-	}()
-	peer.run()
-}
-
-func (s *Server) broadcastSessionState(rm *graph.RelaySession) {
-	if rm == nil {
-		return
-	}
-	msg := signaling.ServerMessage{
-		Type:              signaling.TypeSessionState,
-		SourceActive:      rm.SourceActive(),
-		SubscriptionCount: rm.SubscriptionCount(),
-		Codec:             "opus",
-		SessionID:         rm.ID,
-	}
-
-	s.mu.RLock()
-	targets := make([]*signalPeer, 0, len(s.signalPeers))
-	for _, peer := range s.signalPeers {
-		if peer.room == rm {
-			targets = append(targets, peer)
-		}
-	}
-	s.mu.RUnlock()
-
-	for _, peer := range targets {
-		_ = peer.send(msg)
-	}
-}
-
-// listChannels handles GET /v1/channels (spec §3.1, Phase 6).
-// Returns a JSON array of public RelaySessions. Returns [] when none exist.
-func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	channels := s.relaySessions.ListPublic()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(channels)
-}
-
-// roomLatency handles GET /v1/rooms/{id}/latency.
-// Returns the rolling P50 latency statistics for the RelaySession as JSON.
-// Returns 404 when the session does not exist.
-func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	rm, ok := s.relaySessions.Get(sessionID)
-	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	stats := rm.GetLatencyStats()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(stats)
-}
-
-// roomHealth returns the media-plane health of every bus in the session: which
-// buses have a live source, which have gone silent (stalled), and how long
-// since each last forwarded RTP (Corrected Audit §6 — media liveness, distinct
-// from WebSocket liveness).
-func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	rm, ok := s.relaySessions.Get(sessionID)
-	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	threshold := time.Duration(graph.DefaultMediaStallThresholdMs) * time.Millisecond
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(rm.BusHealthList(threshold))
-}
-
-// mediaDebug handles GET /v1/sessions/{id}/media-debug.
-// Returns per-subscriber downlink telemetry: write-duration P95, RTCP stats,
-// packet/byte counts, and NACK counts. Used for latency diagnosis.
-func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	rm, ok := s.relaySessions.Get(sessionID)
-	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	snap := struct {
-		SessionID    string                      `json:"session_id"`
-		SourceClocks []graph.SourceClockSnapshot `json:"source_clocks"`
-		Downlinks    []downlink.DownlinkSnapshot `json:"downlinks"`
-	}{
-		SessionID:    sessionID,
-		SourceClocks: rm.SourceClockSnapshots(),
-		Downlinks:    rm.DownlinkSnapshots(),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(snap)
-}
-
-// packetLogMaxLimit caps the number of entries returned by packetLogHandler.
-const packetLogMaxLimit = 1000
-
-// packetLogHandler handles GET /v1/sessions/{id}/packet-log.
-// Returns the most recent per-packet relay timestamps for the named bus.
-//
-// Query parameters:
-//   - bus  (required): AudioBus ID, e.g. "voice" or "music".
-//   - limit (optional): number of entries to return, 1–1000, default 100.
-//
-// Each entry includes RTP sequence/timestamp identity plus rx_ts_ns and tx_ts_ns.
-// tx_ts_ns is the fanout-enqueue timestamp retained for artifact compatibility;
-// actual serialized write timing is exposed by the media-debug downlink fields.
-// rx_ts_ns - publisher send_ns = A3 (WebRTC → relay) leg latency.
-func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	rm, ok := s.relaySessions.Get(sessionID)
-	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	busID := r.URL.Query().Get("bus")
-	if busID == "" {
-		http.Error(w, "bus query parameter required", http.StatusBadRequest)
-		return
-	}
-	limit := 100
-	if lstr := r.URL.Query().Get("limit"); lstr != "" {
-		n, err := strconv.Atoi(lstr)
-		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
-			return
-		}
-		if n > packetLogMaxLimit {
-			n = packetLogMaxLimit
-		}
-		limit = n
-	}
-	entries := rm.BusPacketLog(busID, limit)
-	if entries == nil {
-		http.Error(w, "bus not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(entries)
-}
-
-// sseKeepaliveInterval is how often the relay sends SSE keepalive comments.
-// 20 seconds prevents proxy and load-balancer idle-connection timeouts.
-const sseKeepaliveInterval = 20 * time.Second
-
-// sessionSSE streams RelaySession presence events as Server-Sent Events.
-// GET /v1/sessions/{id}/events
-//
-// Wire format: `data: {"source_active":bool,"subscription_count":N,"bus_id":"voice"}\n\n`
-// Keepalive: `: keepalive\n\n` every sseKeepaliveInterval.
-//
-// The initial event carries the current room state so the client is never
-// blind after connect. Subsequent events fire on source or subscriber changes
-// (push model: the relay's future Phase 2 callback path triggers these).
-//
-// For Phase 1 the SSE stream is polling-free: the initial state is sent once
-// and keepalives keep the connection alive. Phase 2 wires room-state deltas.
-func (s *Server) sessionSSE(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	rm, ok := s.relaySessions.Get(sessionID)
-	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	pkts, _, _ := rm.PacketStats()
-	fmt.Fprintf(w, "data: {\"session_id\":%q,\"source_active\":%v,\"subscription_count\":%d,\"packets_forwarded\":%d}\n\n",
-		sessionID, rm.SourceActive(), rm.SubscriptionCount(), pkts)
-	flusher.Flush()
-
-	ticker := time.NewTicker(sseKeepaliveInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
-		}
-	}
-}
-
-// newID returns a random UUID v4-formatted identifier.
-// Uses crypto/rand; panics if the OS PRNG is unavailable (should never happen).
-func newID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant bits RFC 4122
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

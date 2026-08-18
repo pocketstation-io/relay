@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestSign_ThenVerify_MatchesClaims(t *testing.T) {
+func TestGivenClaimsWhenTokenIsSignedAndVerifiedThenClaimsMatch(t *testing.T) {
 	// Given
 	secret := []byte("test-secret")
 	roomID := "room-abc"
@@ -28,7 +28,7 @@ func TestSign_ThenVerify_MatchesClaims(t *testing.T) {
 	}
 }
 
-func TestVerify_WrongSecret_ReturnsError(t *testing.T) {
+func TestGivenTokenWhenVerifiedWithWrongSecretThenErrorIsReturned(t *testing.T) {
 	// Given
 	token, _ := Sign([]byte("secret-a"), "room-1", RoleSource, time.Minute)
 	// When
@@ -39,7 +39,7 @@ func TestVerify_WrongSecret_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestVerify_ExpiredToken_ReturnsError(t *testing.T) {
+func TestGivenExpiredTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
 	// Given — sign with a negative TTL so the token is already expired
 	secret := []byte("test-secret")
 	token, _ := Sign(secret, "room-1", RoleSource, -time.Second)
@@ -51,7 +51,7 @@ func TestVerify_ExpiredToken_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestSign_ListenerRole_RoundTrips(t *testing.T) {
+func TestGivenListenerRoleWhenTokenRoundTripsThenRoleIsPreserved(t *testing.T) {
 	// Given
 	secret := []byte("test-secret")
 	// When
@@ -69,7 +69,7 @@ func TestSign_ListenerRole_RoundTrips(t *testing.T) {
 	}
 }
 
-func TestVerify_MalformedToken_ReturnsError(t *testing.T) {
+func TestGivenMalformedTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
 	// Given
 	secret := []byte("test-secret")
 	// When
@@ -80,7 +80,7 @@ func TestVerify_MalformedToken_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestVerify_EmptyToken_ReturnsError(t *testing.T) {
+func TestGivenEmptyTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
 	// Given
 	secret := []byte("test-secret")
 	// When

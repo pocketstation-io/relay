@@ -2,8 +2,8 @@
 //
 // Script A — WebSocket keepalive soak:
 //
-//	RELAY_SOAK_FULL=1 go test -race -timeout 130m -run TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained ./test/soak/
-//	go test -race -timeout 5m  -run TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained ./test/soak/
+//	RELAY_SOAK_FULL=1 go test -race -timeout 130m -run TestGivenWebSocketSoakWhen2HoursThenPingPongMaintained ./test/soak/
+//	go test -race -timeout 5m  -run TestGivenWebSocketSoakWhen2HoursThenPingPongMaintained ./test/soak/
 //
 // Duration:
 //
@@ -74,16 +74,14 @@ func soakDurationForWS() time.Duration {
 	return 2 * time.Minute
 }
 
-// TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained starts an
+// TestGivenWebSocketSoakWhen2HoursThenPingPongMaintained starts an
 // in-process relay, opens a publisher WebSocket session with an active RTP
 // stream, and counts WebSocket-level ping/pong frames over the full soak
 // duration. The test asserts that every ping sent by the relay received a
 // corresponding pong (zero missing pongs) and that the WebSocket connection
 // was never closed by the relay.
-func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
-	if testing.Short() {
-		t.Skip("soak test skipped in -short mode")
-	}
+func TestGivenWebSocketWhenSoakRunsThenPingPongIsMaintained(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_WEBSOCKET")
 
 	var childWg sync.WaitGroup
 	defer childWg.Wait()
@@ -92,7 +90,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	t.Logf("soak[ws-keepalive]: duration=%s (RELAY_SOAK_FULL=%s)",
 		duration, os.Getenv("RELAY_SOAK_FULL"))
 
-	// --- Server ---
+	// Server.
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
 		JWTSecret:              []byte("ws-soak-secret"),
@@ -102,7 +100,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
-	// --- Room ---
+	// Room.
 	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
 	if err != nil {
 		t.Fatalf("create room: %v", err)
@@ -116,7 +114,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		t.Fatalf("decode room: %v", err)
 	}
 
-	// --- Publisher WebSocket ---
+	// Publisher WebSocket.
 	pubConn := dialWS(t, ts)
 	defer pubConn.Close()
 
@@ -146,7 +144,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 
 	pubMsgs := drainMessages(pubConn, &childWg)
 
-	// --- Publisher PeerConnection + RTP track ---
+	// Publisher PeerConnection + RTP track.
 	pubPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("pub PC: %v", err)
@@ -170,7 +168,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second, &childWg)
 	waitICE(iceCtx, t, pubPC)
 
-	// --- RTP send loop ---
+	// RTP send loop.
 	soakStop := make(chan struct{})
 	payload := bytes.Repeat([]byte{0xAB}, wsSoakRTPPayloadSize)
 	go func() {
@@ -199,7 +197,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	}()
 	defer close(soakStop)
 
-	// --- Progress logging goroutine ---
+	// Progress logging goroutine.
 	// Logs ping count and elapsed time every soakProgressLogInterval.
 	soakStart := time.Now()
 
@@ -222,13 +220,13 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		}
 	}()
 
-	// --- Ping counting ---
+	// Ping counting.
 	// The relay sends WebSocket PingMessages; the Gorilla library automatically
 	// replies with PongMessages. We count pings by intercepting the ping handler
 	// and pongs by the PongHandler registered above.
 	// The handler is installed before drainMessages starts reading.
 
-	// --- Soak wait ---
+	// Soak wait.
 	select {
 	case <-time.After(duration):
 		// Normal completion.
@@ -237,7 +235,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 	// Graceful disconnect.
 	_ = pubConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 
-	// --- Assertions ---
+	// Assertions.
 	elapsed := time.Since(soakStart).Truncate(time.Second)
 	finalPings := pingCount.Load()
 
@@ -285,8 +283,7 @@ func TestGiven_WebSocketSoak_When_2Hours_Then_PingPongMaintained(t *testing.T) {
 		wsClosedUnexpectedly.Load(),
 		soakVerdict(pass),
 	)
-	_ = os.MkdirAll("../../soak/results", 0755)
-	_ = os.WriteFile("../../soak/results/ws-keepalive-soak.txt", []byte(results), 0644)
+	writeSoakArtifact(t, "ws-keepalive-soak.txt", []byte(results))
 	t.Logf("soak results:\n%s", results)
 }
 

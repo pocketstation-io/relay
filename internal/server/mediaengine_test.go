@@ -7,13 +7,13 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus is the
+// TestGivenRelayMediaEngineWhenOfferCreatedThenAdvertisesStereoOpus is the
 // relay-side Stage-B gate for the stereo music pipeline. Per RFC 7587, the relay
 // (an Opus-only SFU that forwards stereo without transcoding) must advertise
 // stereo in its SDP on both legs or libwebrtc downmixes music to mono. This
 // verifies the registered Opus codec surfaces stereo=1 and sprop-stereo=1 in a
 // generated offer, at 48 kHz / 2 channels.
-func TestGiven_RelayMediaEngine_When_OfferCreated_Then_AdvertisesStereoOpus(t *testing.T) {
+func TestGivenRelayMediaEngineWhenOfferCreatedThenAdvertisesStereoOpus(t *testing.T) {
 	m, err := NewMediaEngineWithAudioNACK()
 	if err != nil {
 		t.Fatalf("NewMediaEngineWithAudioNACK: %v", err)

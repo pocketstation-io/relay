@@ -338,11 +338,10 @@ func waitICEConnected(ctx context.Context, t *testing.T, pc *webrtc.PeerConnecti
 	}
 }
 
-// --- Tests ---
-
-// TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted verifies that a
+// Tests.
+// TestGivenRelayRoomWhenTokenUsedForSignalThenAccepted verifies that a
 // valid source token results in an SDP_ANSWER being returned without ERROR.
-func TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted(t *testing.T) {
+func TestGivenRelayRoomWhenTokenUsedForSignalThenAccepted(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -379,7 +378,7 @@ func TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted(t *testing.T) {
 	// If we reach here, SDP_ANSWER was received with no ERROR.
 }
 
-// TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded
+// TestGivenSourcePublishingWhenListenerSubscribesThenRTPForwarded
 // verifies that RTP packets sent by the publisher are forwarded to the
 // subscriber with correct count and payload integrity.
 //
@@ -389,7 +388,7 @@ func TestGiven_RelayRoom_When_TokenUsedForSignal_Then_Accepted(t *testing.T) {
 // the publisher has actually sent at least one packet. This test therefore
 // starts the publisher send loop immediately after ICE connects, then
 // connects the subscriber while packets are already flowing.
-func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *testing.T) {
+func TestGivenSourcePublishingWhenListenerSubscribesThenRTPForwarded(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -404,7 +403,7 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 	sourceToken := roomPayload["source_token"]
 	listenerToken := roomPayload["listener_token"]
 
-	// --- Publisher setup ---
+	// Publisher setup.
 	pubConn := dialSignal(t, ts)
 	pubMsgs := readServerMessages(pubConn)
 
@@ -458,7 +457,7 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 	}()
 	defer close(sendStop)
 
-	// --- Subscriber setup ---
+	// Subscriber setup.
 	subConn := dialSignal(t, ts)
 	subMsgs := readServerMessages(subConn)
 
@@ -548,7 +547,7 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 	_ = subConn.WriteJSON(signaling.ClientMessage{Type: signaling.TypeLeave})
 }
 
-// TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms
+// TestGivenSourcePublishingWhenPacketForwardedThenOneWayLatencyUnder1ms
 // verifies the relay's per-packet forwarding latency by embedding a send
 // timestamp in the first 8 bytes of each RTP payload and measuring the delta
 // when the packet arrives at the subscriber. P99 must be under 1 ms for
@@ -556,7 +555,7 @@ func TestGiven_SourcePublishing_When_ListenerSubscribes_Then_RTPForwarded(t *tes
 //
 // Warmup packets use a zero timestamp and are skipped by the receiver goroutine,
 // so a single ReadRTP loop is used throughout — no drain race.
-func TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms(t *testing.T) {
+func TestGivenSourcePublishingWhenPacketForwardedThenOneWayLatencyUnder1ms(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -580,7 +579,7 @@ func TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms(
 	sourceToken := roomPayload["source_token"]
 	listenerToken := roomPayload["listener_token"]
 
-	// --- Publisher ---
+	// Publisher.
 	pubConn := dialSignal(t, ts)
 	pubMsgs := readServerMessages(pubConn)
 	pubPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})
@@ -603,7 +602,7 @@ func TestGiven_SourcePublishing_When_PacketForwarded_Then_OneWayLatencyUnder1ms(
 	doPublishHandshake(t, pubConn, pubPC, sourceToken, pubMsgs, 10*time.Second)
 	waitICEConnected(ctx, t, pubPC)
 
-	// --- Subscriber ---
+	// Subscriber.
 	subConn := dialSignal(t, ts)
 	subMsgs := readServerMessages(subConn)
 	subPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})

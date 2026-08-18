@@ -23,7 +23,7 @@ import (
 // This isolates source-vs-browser: if a tolerant Pion listener ALSO loses ~half
 // the packets from the real source, the defect is in the source's RTP output.
 // If it receives essentially all of them, the loss is browser-specific.
-func TestLive_RealSourceLoss(t *testing.T) {
+func TestGivenLiveSourceWhenConnectionIsLostThenSessionRecovers(t *testing.T) {
 	wsURL := os.Getenv("LIVE_RELAY_WS")
 	token := os.Getenv("LIVE_LISTENER_TOKEN")
 	if wsURL == "" || token == "" {

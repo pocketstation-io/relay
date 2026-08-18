@@ -11,15 +11,15 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/session"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
 // Pure-function unit tests for the D13 codec-hint logic (RELAY-021).
 // End-to-end WebSocket delivery is covered by
-// TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource.
+// TestGivenHighLossRTCPRRWhenMaybeEmitCodecHintThenCodecHintSentToSource.
 
-func TestGiven_ZeroLoss_When_BitrateForLoss_Then_HighTier(t *testing.T) {
+func TestGivenZeroLossWhenBitrateForLossThenHighTier(t *testing.T) {
 	hint := bitrateForLoss(0.0)
 	if hint.BitRateKbps != bitrateHighKbps {
 		t.Fatalf("want %d kbps, got %d", bitrateHighKbps, hint.BitRateKbps)
@@ -29,7 +29,7 @@ func TestGiven_ZeroLoss_When_BitrateForLoss_Then_HighTier(t *testing.T) {
 	}
 }
 
-func TestGiven_MediumLoss_When_BitrateForLoss_Then_MediumTierWithFEC(t *testing.T) {
+func TestGivenMediumLossWhenBitrateForLossThenMediumTierWithFEC(t *testing.T) {
 	hint := bitrateForLoss(0.03) // 3% — between 2% and 5%
 	if hint.BitRateKbps != bitrateMediumKbps {
 		t.Fatalf("want %d kbps, got %d", bitrateMediumKbps, hint.BitRateKbps)
@@ -42,7 +42,7 @@ func TestGiven_MediumLoss_When_BitrateForLoss_Then_MediumTierWithFEC(t *testing.
 	}
 }
 
-func TestGiven_HighLoss_When_BitrateForLoss_Then_LowTierWithFECAndDTX(t *testing.T) {
+func TestGivenHighLossWhenBitrateForLossThenLowTierWithFECAndDTX(t *testing.T) {
 	hint := bitrateForLoss(0.10) // 10% — above 5%
 	if hint.BitRateKbps != bitrateLowKbps {
 		t.Fatalf("want %d kbps, got %d", bitrateLowKbps, hint.BitRateKbps)
@@ -55,7 +55,7 @@ func TestGiven_HighLoss_When_BitrateForLoss_Then_LowTierWithFECAndDTX(t *testing
 	}
 }
 
-func TestGiven_LossAtMediumBoundary_When_BitrateForLoss_Then_HighTier(t *testing.T) {
+func TestGivenLossAtMediumBoundaryWhenBitrateForLossThenHighTier(t *testing.T) {
 	// Exactly 2% is NOT > threshold → still high tier.
 	hint := bitrateForLoss(lossMediumThreshold)
 	if hint.BitRateKbps != bitrateHighKbps {
@@ -63,14 +63,14 @@ func TestGiven_LossAtMediumBoundary_When_BitrateForLoss_Then_HighTier(t *testing
 	}
 }
 
-func TestGiven_LossJustAboveHighBoundary_When_BitrateForLoss_Then_LowTier(t *testing.T) {
+func TestGivenLossJustAboveHighBoundaryWhenBitrateForLossThenLowTier(t *testing.T) {
 	hint := bitrateForLoss(lossHighThreshold + 0.001)
 	if hint.BitRateKbps != bitrateLowKbps {
 		t.Fatalf("want %d kbps just above high threshold, got %d", bitrateLowKbps, hint.BitRateKbps)
 	}
 }
 
-func TestGiven_FractionLostFromRTCP_When_Converted_Then_MapsCorrectly(t *testing.T) {
+func TestGivenFractionLostFromRTCPWhenConvertedThenMapsCorrectly(t *testing.T) {
 	// RTCP FractionLost field is uint8 on scale 0–255 (255 = 100% loss).
 	cases := []struct {
 		rtcpValue uint8
@@ -92,7 +92,7 @@ func TestGiven_FractionLostFromRTCP_When_Converted_Then_MapsCorrectly(t *testing
 	}
 }
 
-func TestGiven_NoSourceInRoom_When_MaybeEmitCodecHint_Then_NoPanic(t *testing.T) {
+func TestGivenNoSourceInRoomWhenMaybeEmitCodecHintThenNoPanic(t *testing.T) {
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	state := &codecHintState{}
 	hint := bitrateForLoss(0.10)
@@ -100,7 +100,7 @@ func TestGiven_NoSourceInRoom_When_MaybeEmitCodecHint_Then_NoPanic(t *testing.T)
 	srv.maybeEmitCodecHint("nonexistent-room", hint, state)
 }
 
-func TestGiven_DebouncePeriodNotElapsed_When_MaybeEmitCodecHint_Then_StateUnchanged(t *testing.T) {
+func TestGivenDebouncePeriodNotElapsedWhenMaybeEmitCodecHintThenStateUnchanged(t *testing.T) {
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
 	before := time.Now().Add(-1 * time.Millisecond) // lastSent is effectively "just now"
 	state := &codecHintState{lastSent: before}
@@ -114,7 +114,7 @@ func TestGiven_DebouncePeriodNotElapsed_When_MaybeEmitCodecHint_Then_StateUnchan
 	}
 }
 
-func TestGiven_RoomCodecHintState_When_CalledTwice_Then_SamePointer(t *testing.T) {
+func TestGivenRoomCodecHintStateWhenCalledTwiceThenSamePointer(t *testing.T) {
 	srv := &Server{}
 	s1 := srv.roomCodecHintState("room-x")
 	s2 := srv.roomCodecHintState("room-x")
@@ -123,7 +123,7 @@ func TestGiven_RoomCodecHintState_When_CalledTwice_Then_SamePointer(t *testing.T
 	}
 }
 
-func TestGiven_TwoRooms_When_RoomCodecHintState_Then_DifferentPointers(t *testing.T) {
+func TestGivenTwoRoomsWhenRoomCodecHintStateThenDifferentPointers(t *testing.T) {
 	srv := &Server{}
 	s1 := srv.roomCodecHintState("room-a")
 	s2 := srv.roomCodecHintState("room-b")
@@ -132,7 +132,7 @@ func TestGiven_TwoRooms_When_RoomCodecHintState_Then_DifferentPointers(t *testin
 	}
 }
 
-// TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
+// TestGivenHighLossRTCPRRWhenMaybeEmitCodecHintThenCodecHintSentToSource
 // verifies the end-to-end path from RTCP RR high-loss detection through
 // maybeEmitCodecHint to actual CODEC_HINT delivery on the source WebSocket.
 //
@@ -144,10 +144,10 @@ func TestGiven_TwoRooms_When_RoomCodecHintState_Then_DifferentPointers(t *testin
 // startRTCPReader. Here we call maybeEmitCodecHint directly with the computed
 // CodecHintPayload for >5% loss, which is the value startRTCPReader would pass
 // after parsing a ReceiverReport with FractionLost > 13 (13/256 ≈ 5.1%).
-func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource(t *testing.T) {
+func TestGivenHighLossRTCPRRWhenMaybeEmitCodecHintThenCodecHintSentToSource(t *testing.T) {
 	const roomID = "room-codec-hint-e2e"
 
-	// --- Given: a WebSocket pair representing the source connection. ---
+	// Given: a WebSocket pair representing the source connection..
 	//
 	// We spin up a minimal HTTP server that upgrades the connection, capture
 	// the server-side *websocket.Conn, and inject it as the source session.
@@ -184,7 +184,7 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 	// Build a relay Server whose signaling-peer map contains one source peer
 	// backed by the server-side WebSocket connection.
 	srv := &Server{signalPeers: make(map[string]*signalPeer)}
-	rm := graph.New(roomID)
+	rm := session.New(roomID)
 	defer rm.Close()
 
 	sourcePeer := &signalPeer{
@@ -212,7 +212,7 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 		}
 	}()
 
-	// --- When: maybeEmitCodecHint is called with a high-loss CodecHintPayload
+	// maybeEmitCodecHint receives a high-loss CodecHintPayload
 	// and a cleared debounce state (simulating what startRTCPReader does after
 	// parsing a ReceiverReport where FractionLost/256 > lossHighThreshold). ---
 	//
@@ -224,7 +224,7 @@ func TestGiven_HighLossRTCPRR_When_MaybeEmitCodecHint_Then_CodecHintSentToSource
 	state := &codecHintState{} // lastSent is zero → debounce not active
 	srv.maybeEmitCodecHint(roomID, hint, state)
 
-	// --- Then: the source WebSocket receives a CODEC_HINT with the low tier. ---
+	// Then: the source WebSocket receives a CODEC_HINT with the low tier..
 	select {
 	case msg, ok := <-received:
 		if !ok {

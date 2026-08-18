@@ -1,8 +1,9 @@
 # PocketStation Relay
 
-`pocketstation-io/relay` is the Go/Pion media plane for PocketStation. It
-accepts source audio over WebRTC or WHIP, preserves named source/bus identity,
-and forwards bounded RTP subscriptions to browser or remote receivers.
+`pocketstation-io/relay` is PocketStation's bounded, source-aware WebRTC audio
+plane. It keeps application, microphone, and generated-audio buses independently
+addressable while preserving source attachment, reconnect generation, SSRC,
+and capture-clock continuity for native and browser receivers.
 
 It does not capture audio, compile the PocketStation pipeline, run connectors,
 record stems, or own durable product Session state.
@@ -38,17 +39,25 @@ that control-plane callback base URL.
 The media path is:
 
 ```text
-source
+authenticated source attachment
   → RelaySession
       → named AudioBus
+          → source generation / SSRC / capture clock
           → bounded BusSubscription
               → pacing / continuity / repair
-                  → subscriber
+                  → native or browser receiver
 ```
 
 The relay owns WebRTC signaling adaptation, SDP/ICE, WHIP/WHEP, RTP/RTCP,
 Opus/RED negotiation, pacing, continuity, repair, embedded TURN/ICE-TCP, and
 transport telemetry.
+
+The individual WebRTC, WHIP/WHEP, RTP, bounded-queue, and clock-mapping
+mechanisms are established systems techniques. Relay's product boundary is
+their source-aware composition: stable semantic buses survive transient
+transport identities and remain distinct for AI consumption, browser playout,
+and downstream recording. Complete PocketStation `FrameLineage` delivery to
+every remote receiver is not claimed until that separate protocol proof exists.
 
 `pocketstation-io/protocol` owns cross-language wire schemas.
 `internal/signaling` is the relay's package-private Go adapter.
@@ -79,6 +88,9 @@ primary API.
 | `RELAY_API_SERVER_URL` | Optional control-plane callback base URL | disabled |
 | `RELAY_MAX_ROOMS` | Maximum active RelaySessions | package default |
 | `RELAY_MAX_LISTENERS_PER_ROOM` | Maximum subscribers per RelaySession; legacy variable spelling | package default |
+| `RELAY_MAX_BUSES_PER_SESSION` | Maximum retained named AudioBuses per RelaySession | `16` |
+| `RELAY_MAX_CONCURRENT_HANDSHAKES` | Maximum WebSocket and WHIP/WHEP handshakes awaiting media allocation | `128` |
+| `RELAY_MAX_CONCURRENT_CALLBACKS` | Maximum concurrent control-plane callback deliveries | `32` |
 | `ROOM_EXPIRY_MINUTES` | Inactive RelaySession expiry; legacy variable spelling | `30` |
 | `SOURCE_RECONNECT_WINDOW_SEC` | Source reconnection window | `60` |
 | `ICE_UDP_PORT` | Shared Pion UDP mux port; zero selects an ephemeral local port | `0` |
@@ -113,5 +125,7 @@ candidate after preflights pass.
 - The Fly deployment is cross-network calibration evidence, not proof of
   production readiness or multi-region session migration.
 - Competitive latency and quality claims require PocketStation Bench artifacts.
+- Relay does not claim general performance superiority over LiveKit or another
+  SFU; comparisons must use equivalent codec, impairment, and receiver planes.
 - End-to-end product claims require immutable PocketStation Lab artifacts with
   exact repository commits, devices, and network conditions.

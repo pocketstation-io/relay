@@ -9,7 +9,7 @@
 //
 // Run the full suite (includes real Pion ICE):
 //
-//	go test -race -run TestGiven_ApiServer ./test/integration/
+//	go test -race -run TestGivenApiServer ./test/integration/
 //
 // Skip the ICE-dependent tests:
 //
@@ -33,10 +33,10 @@ import (
 // would be set to in a real deployment.
 const testCrossServiceSecret = "cross-service-test-secret"
 
-// TestGiven_ApiServerToken_When_UsedForRelaySignal_Then_Accepted verifies
+// TestGivenApiServerTokenWhenUsedForRelaySignalThenAccepted verifies
 // that a token minted with the same HS256 secret and Claims struct as
 // api-server is accepted by relay /v1/signal and results in an SDP_ANSWER.
-func TestGiven_ApiServerToken_When_UsedForRelaySignal_Then_Accepted(t *testing.T) {
+func TestGivenApiServerTokenWhenUsedForRelaySignalThenAccepted(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -140,10 +140,10 @@ func TestGiven_ApiServerToken_When_UsedForRelaySignal_Then_Accepted(t *testing.T
 	}
 }
 
-// TestGiven_ApiServerToken_When_SecretMismatch_Then_BadToken verifies that a
+// TestGivenApiServerTokenWhenSecretMismatchThenBadToken verifies that a
 // token signed with the wrong secret is rejected with code "bad_token" before
 // any SDP processing occurs.
-func TestGiven_ApiServerToken_When_SecretMismatch_Then_BadToken(t *testing.T) {
+func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}

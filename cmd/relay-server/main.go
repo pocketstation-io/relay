@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,11 +14,10 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/callback"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
+	"github.com/pocketstation-io/relay/internal/notifications/webhook"
 	"github.com/pocketstation-io/relay/internal/server"
-	relayTurn "github.com/pocketstation-io/relay/internal/turn"
-	"github.com/pocketstation-io/relay/internal/webhook"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
 func main() {
@@ -57,17 +54,20 @@ func main() {
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
 
 	cfg := server.Config{
-		JWTSecret:              jwtSecret,
-		MaxRooms:               getenvInt("RELAY_MAX_ROOMS", 0),
-		MaxSubscribersPerRoom:  getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
-		MaxRoomsPerIPPerMinute: getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
-		CallbackClient:         cbClient,
-		WebhookDispatcher:      whDispatcher,
-		ClientICEServers:       clientICEServers,
-		UseTURN:                useTURN,
-		RegistryConfig: graph.RegistryConfig{
+		JWTSecret:               jwtSecret,
+		MaxRooms:                getenvInt("RELAY_MAX_ROOMS", 0),
+		MaxSubscribersPerRoom:   getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
+		MaxRoomsPerIPPerMinute:  getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
+		MaxConcurrentHandshakes: getenvInt("RELAY_MAX_CONCURRENT_HANDSHAKES", 0),
+		MaxConcurrentCallbacks:  getenvInt("RELAY_MAX_CONCURRENT_CALLBACKS", 0),
+		CallbackClient:          cbClient,
+		WebhookDispatcher:       whDispatcher,
+		ClientICEServers:        clientICEServers,
+		UseTURN:                 useTURN,
+		RegistryConfig: session.RegistryConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
+			MaxBuses:          getenvInt("RELAY_MAX_BUSES_PER_SESSION", 0),
 		},
 	}
 
@@ -183,190 +183,4 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("relay stopped")
-}
-
-func iceUDPListenAddress(onFlyIO bool, bindIP net.IP, port int) (network, address string) {
-	if onFlyIO {
-		return "udp", net.JoinHostPort("fly-global-services", strconv.Itoa(port))
-	}
-	return "udp4", net.JoinHostPort(bindIP.String(), strconv.Itoa(port))
-}
-
-// setupTURN starts the embedded TURN server when TURN_PUBLIC_IP is configured.
-//
-// Returns the ICE server list to include in createRoom responses and a
-// *relayTurn.Server handle for shutdown. If TURN is not configured the ICE
-// list is nil (server falls back to stun.l.google.com) and the returned
-// server is a no-op.
-//
-// Environment variables:
-//
-//	TURN_PUBLIC_IP   — server's public IP (required to enable TURN)
-//	TURN_UDP_PORT    — UDP TURN port (default 3478)
-//	TURN_TCP_PORT    — plain TCP TURN port (default 3478; enables ?transport=tcp)
-//	TURN_TLS_PORT    — TURNS/TLS port (default 0 = disabled; set to 443 or 5349)
-//	TURN_REALM       — STUN realm (default "pocketstation.io")
-func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, srv *relayTurn.Server) {
-	publicIPStr := os.Getenv("TURN_PUBLIC_IP")
-	if publicIPStr == "" {
-		slog.Info("TURN_PUBLIC_IP not set; relay running in STUN-only mode")
-		return nil, new(relayTurn.Server) // no-op Stop()
-	}
-
-	// "auto": resolve the public IP at startup (fly.io zero-config).
-	if strings.EqualFold(publicIPStr, "auto") {
-		ip, err := resolvePublicIP()
-		if err != nil {
-			slog.Error("TURN_PUBLIC_IP=auto but detection failed", "error", err)
-			os.Exit(1)
-		}
-		publicIPStr = ip.String()
-		slog.Info("TURN public IP auto-detected", "ip", publicIPStr)
-	}
-
-	publicIP := net.ParseIP(publicIPStr)
-	if publicIP == nil {
-		slog.Error("TURN_PUBLIC_IP is not a valid IP address", "value", publicIPStr)
-		os.Exit(1)
-	}
-
-	udpPort := getenvInt("TURN_UDP_PORT", 3478)
-	tcpPort := getenvInt("TURN_TCP_PORT", 3478)
-	tlsPort := getenvInt("TURN_TLS_PORT", 0)
-	realm := getenv("TURN_REALM", "pocketstation.io")
-
-	srvCfg := relayTurn.ServerConfig{
-		PublicIP: publicIP,
-		Secret:   jwtSecret,
-		UDPPort:  udpPort,
-		TCPPort:  tcpPort,
-		TLSPort:  tlsPort,
-		Realm:    realm,
-	}
-
-	var err error
-	srv, err = relayTurn.Start(srvCfg)
-	if err != nil {
-		slog.Error("failed to start embedded TURN server", "error", err)
-		os.Exit(1)
-	}
-
-	// Build TURN credential TTL: use relay's max token TTL (2h = listener token TTL).
-	const credTTL = 2 * time.Hour
-	turnHost := publicIPStr
-	turnUser, turnPass := relayTurn.Credentials(jwtSecret, "relay", credTTL)
-
-	iceServers = []webrtc.ICEServer{
-		{URLs: []string{"stun:" + net.JoinHostPort(turnHost, strconv.Itoa(udpPort))}},
-		{
-			URLs:           turnURLs(turnHost, udpPort, tcpPort, tlsPort),
-			Username:       turnUser,
-			Credential:     turnPass,
-			CredentialType: webrtc.ICECredentialTypePassword,
-		},
-	}
-
-	slog.Info("embedded TURN started",
-		"public_ip", publicIPStr,
-		"udp_port", udpPort,
-		"tcp_port", tcpPort,
-		"tls_port", tlsPort,
-	)
-	return iceServers, srv
-}
-
-// turnURLs builds the TURN URL list from configured ports.
-// Includes TURN/TCP (?transport=tcp) only when tcpPort > 0 (a TCP listener is running).
-// Includes TURNS (TLS) URL only when tlsPort > 0.
-func turnURLs(host string, udpPort, tcpPort, tlsPort int) []string {
-	urls := []string{
-		"turn:" + net.JoinHostPort(host, strconv.Itoa(udpPort)),
-	}
-	if tcpPort > 0 {
-		urls = append(urls, "turn:"+net.JoinHostPort(host, strconv.Itoa(tcpPort))+"?transport=tcp")
-		slog.Info("TURN transport active", "transport", "tcp", "port", tcpPort)
-	}
-	if tlsPort > 0 {
-		urls = append(urls, "turns:"+net.JoinHostPort(host, strconv.Itoa(tlsPort)))
-		slog.Info("TURN transport active", "transport", "tls", "port", tlsPort)
-	}
-	slog.Info("TURN transport active", "transport", "udp", "port", udpPort)
-	return urls
-}
-
-// resolvePublicIP discovers the relay's public IPv4 address. Tried in order:
-//  1. FLY_PUBLIC_IP env var (set by fly.io for dedicated IPs)
-//  2. DNS lookup of FLY_APP_NAME.fly.dev (shared anycast on fly.io)
-//  3. External IP service (https://api.ipify.org) as last resort
-func resolvePublicIP() (net.IP, error) {
-	// 1. Fly.io dedicated IP.
-	if raw := os.Getenv("FLY_PUBLIC_IP"); raw != "" {
-		if ip := net.ParseIP(raw); ip != nil && ip.To4() != nil {
-			return ip.To4(), nil
-		}
-	}
-
-	// 2. Resolve fly.io app hostname.
-	if appName := os.Getenv("FLY_APP_NAME"); appName != "" {
-		hostname := appName + ".fly.dev"
-		addrs, err := net.LookupIP(hostname)
-		if err == nil {
-			for _, addr := range addrs {
-				if v4 := addr.To4(); v4 != nil {
-					return v4, nil
-				}
-			}
-		}
-		slog.Warn("DNS lookup failed for fly.io hostname", "hostname", hostname, "error", err)
-	}
-
-	// 3. External IP service.
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://api.ipify.org")
-	if err != nil {
-		return nil, fmt.Errorf("ipify request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ipify read failed: %w", err)
-	}
-	if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil && ip.To4() != nil {
-		return ip.To4(), nil
-	}
-	return nil, fmt.Errorf("could not detect public IP (tried FLY_PUBLIC_IP, DNS, ipify)")
-}
-
-func getenv(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
-}
-
-// getenvInt returns the integer value of env var k, or d if unset or unparseable.
-// A value of 0 for d means "use the server default".
-func getenvInt(k string, d int) int {
-	v := os.Getenv(k)
-	if v == "" {
-		return d
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		slog.Warn("invalid env var value, using default", "key", k, "value", v)
-		return d
-	}
-	return n
-}
-
-// splitComma splits a comma-separated string, trimming whitespace, dropping empties.
-func splitComma(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
 }

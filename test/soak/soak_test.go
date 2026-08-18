@@ -261,12 +261,10 @@ func takeSample(t *testing.T, label string) soakSample {
 	return s
 }
 
-// TestSoak runs the Phase 1 soak: 1 publisher + 1 in-process subscriber, 5 minutes,
+// TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded runs the Phase 1 soak: 1 publisher + 1 in-process subscriber, 5 minutes,
 // race detector active. Asserts no goroutine leak and no unbounded RSS growth.
-func TestSoak(t *testing.T) {
-	if testing.Short() {
-		t.Skip("soak test skipped in -short mode")
-	}
+func TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_PHASE1")
 
 	// childWg tracks all goroutines spawned by drainMessages, publishHandshake,
 	// subscribeHandshake, and the RTP drain goroutine. defer childWg.Wait() is
@@ -464,6 +462,6 @@ func TestSoak(t *testing.T) {
 		srv.Metrics.ListenerCount.Load(),
 		s5.goroutines-s1.goroutines, goroutineSlop,
 	)
-	_ = os.WriteFile("../../soak/results/phase1-baseline.txt", []byte(results), 0644)
+	writeSoakArtifact(t, "phase1-baseline.txt", []byte(results))
 	t.Logf("soak results:\n%s", results)
 }

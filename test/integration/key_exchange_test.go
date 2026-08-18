@@ -1,6 +1,6 @@
 // Package integration_test — KEY_EXCHANGE fan-out and late-join tests.
 //
-// TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey
+// TestGivenSourceInRoomWhenKeyExchangeSentThenAllListenersReceiveKey
 // verifies that a KEY_EXCHANGE message sent by the source is:
 //   - forwarded to all current listeners in the room
 //   - NOT echoed back to the source
@@ -8,7 +8,7 @@
 //
 // Run with:
 //
-//	go test -race -run TestGiven_SourceInRoom ./test/integration/
+//	go test -race -run TestGivenSourceInRoom ./test/integration/
 package integration_test
 
 import (
@@ -57,7 +57,7 @@ func fanOutMessages(
 	}()
 }
 
-// TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey
+// TestGivenSourceInRoomWhenKeyExchangeSentThenAllListenersReceiveKey
 // connects 1 source and 3 listeners to a room, has the source send a
 // KEY_EXCHANGE message, then asserts:
 //
@@ -65,7 +65,7 @@ func fanOutMessages(
 //  2. The source does NOT receive the KEY_EXCHANGE back.
 //  3. A 4th listener joining after the KEY_EXCHANGE immediately receives the
 //     stored key via the late-join path (RELAY-014).
-func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *testing.T) {
+func TestGivenSourceInRoomWhenKeyExchangeSentThenAllListenersReceiveKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -84,7 +84,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 	sourceToken := roomPayload["source_token"]
 	listenerToken := roomPayload["listener_token"]
 
-	// --- Source setup ---
+	// Source setup.
 	sourceConn := dialSignal(t, ts)
 	sourceMsgs := readServerMessages(sourceConn)
 
@@ -108,7 +108,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 	doPublishHandshake(t, sourceConn, sourcePC, sourceToken, sourceMsgs, handshakeTimeout)
 	waitICEConnected(ctx, t, sourcePC)
 
-	// --- 3 listeners setup ---
+	// 3 listeners setup.
 	// For each listener: create two channels — one for handshake messages
 	// (SDP_ANSWER, ICE, SESSION_STATE) and one for KEY_EXCHANGE messages.
 	// fanOutMessages routes the raw WebSocket stream to both channels.
@@ -134,7 +134,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 		waitICEConnected(ctx, t, listenerPCs[i])
 	}
 
-	// --- Source sends KEY_EXCHANGE ---
+	// Source sends KEY_EXCHANGE.
 	if err := sourceConn.WriteJSON(signaling.ClientMessage{
 		Type:      signaling.TypeKeyExchange,
 		SFrameKey: testKey,
@@ -142,7 +142,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 		t.Fatalf("send KEY_EXCHANGE: %v", err)
 	}
 
-	// --- Assertion 1: all 3 listeners receive the key ---
+	// Assertion 1: all 3 listeners receive the key.
 	var wg sync.WaitGroup
 	for i := 0; i < listenerCount; i++ {
 		wg.Add(1)
@@ -164,7 +164,7 @@ func TestGiven_SourceInRoom_When_KeyExchangeSent_Then_AllListenersReceiveKey(t *
 	}
 	wg.Wait()
 
-	// --- Assertion 2: source does NOT receive KEY_EXCHANGE back ---
+	// Assertion 2: source does NOT receive KEY_EXCHANGE back.
 	// sourceMsgs is the channel from doPublishHandshake's background goroutine.
 	// Drain briefly and fail if any KEY_EXCHANGE arrives.
 	timeout := time.After(200 * time.Millisecond)
@@ -183,7 +183,7 @@ drain:
 		}
 	}
 
-	// --- Assertion 3: late-joining listener receives the stored key immediately ---
+	// Assertion 3: late-joining listener receives the stored key immediately.
 	lateConn := dialSignal(t, ts)
 	defer lateConn.Close()
 	lateRaw := readServerMessages(lateConn)

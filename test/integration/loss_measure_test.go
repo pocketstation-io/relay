@@ -12,7 +12,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-// TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow
+// TestGivenSourceSendsKnownCountWhenForwardedThenListenerLossIsLow
 // measures the actual end-to-end RTP loss rate through the relay. The source
 // sends a known number of packets at the real 50 pkt/s production rate with
 // monotonic sequence numbers, then stops; the listener identifies measured
@@ -25,7 +25,7 @@ import (
 // loss seen in Chrome is reproducible relay-side. If the listener receives
 // essentially all of them, the loss is specific to the browser/cross-process
 // path and not the relay's forwarding.
-func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *testing.T) {
+func TestGivenSourceSendsKnownCountWhenForwardedThenListenerLossIsLow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")
 	}
@@ -44,7 +44,7 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 	sourceToken := roomPayload["source_token"]
 	listenerToken := roomPayload["listener_token"]
 
-	// --- Publisher ---
+	// Publisher.
 	pubConn := dialSignal(t, ts)
 	pubMsgs := readServerMessages(pubConn)
 	pubPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})
@@ -64,7 +64,7 @@ func TestGiven_SourceSendsKnownCount_When_Forwarded_Then_ListenerLossIsLow(t *te
 	doPublishHandshake(t, pubConn, pubPC, sourceToken, pubMsgs, 10*time.Second)
 	waitICEConnected(ctx, t, pubPC)
 
-	// --- Subscriber ---
+	// Subscriber.
 	subConn := dialSignal(t, ts)
 	subMsgs := readServerMessages(subConn)
 	subPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})

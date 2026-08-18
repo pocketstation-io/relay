@@ -12,10 +12,10 @@ import (
 	"github.com/pocketstation-io/relay/internal/server"
 )
 
-// TestGiven_EchoEndpoint_When_SendTimestamp_Then_Reflected verifies the /v1/echo
+// TestGivenEchoEndpointWhenSendTimestampThenReflected verifies the /v1/echo
 // endpoint (RELAY-020): sends a send_timestamp_ns and asserts the relay reflects
 // it back alongside a recv_timestamp_ns that is >= send_timestamp_ns.
-func TestGiven_EchoEndpoint_When_SendTimestamp_Then_Reflected(t *testing.T) {
+func TestGivenEchoEndpointWhenSendTimestampThenReflected(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
 	ts := newIPv4Server(srv.Handler())
@@ -53,9 +53,9 @@ func TestGiven_EchoEndpoint_When_SendTimestamp_Then_Reflected(t *testing.T) {
 	}
 }
 
-// TestGiven_EchoEndpoint_When_MultipleMessages_Then_AllReflected verifies that
+// TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected verifies that
 // the echo endpoint handles multiple round-trips in sequence without error.
-func TestGiven_EchoEndpoint_When_MultipleMessages_Then_AllReflected(t *testing.T) {
+func TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
 	ts := newIPv4Server(srv.Handler())
@@ -83,9 +83,9 @@ func TestGiven_EchoEndpoint_When_MultipleMessages_Then_AllReflected(t *testing.T
 	}
 }
 
-// TestGiven_EchoEndpoint_When_HTTPNotWebSocket_Then_BadRequest verifies the
+// TestGivenEchoEndpointWhenHTTPNotWebSocketThenBadRequest verifies the
 // echo endpoint rejects plain HTTP requests (not WebSocket upgrades).
-func TestGiven_EchoEndpoint_When_HTTPNotWebSocket_Then_BadRequest(t *testing.T) {
+func TestGivenEchoEndpointWhenHTTPNotWebSocketThenBadRequest(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
 
@@ -100,9 +100,9 @@ func TestGiven_EchoEndpoint_When_HTTPNotWebSocket_Then_BadRequest(t *testing.T) 
 	}
 }
 
-// TestGiven_KeyExchange_MessageType_When_Parsed_Then_Correct verifies the
+// TestGivenKeyExchangeMessageTypeWhenParsedThenCorrect verifies the
 // KEY_EXCHANGE and CODEC_HINT message types are correctly defined in signaling.
-func TestGiven_SignalingTypes_When_Checked_Then_AllDefined(t *testing.T) {
+func TestGivenSignalingTypesWhenCheckedThenAllDefined(t *testing.T) {
 	// Verify the JSON round-trip of a CODEC_HINT message.
 	hint := map[string]interface{}{
 		"type": "CODEC_HINT",

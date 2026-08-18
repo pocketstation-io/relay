@@ -68,7 +68,7 @@ func dialShutdownSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	return conn
 }
 
-// TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave
+// TestGivenRelayShutdownWhenActiveConnectionThenPeerReceivesLeave
 // verifies that calling Server.Shutdown closes active WebSocket connections
 // (peers observe a close or read error) and all rooms are closed cleanly.
 //
@@ -77,7 +77,7 @@ func dialShutdownSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 // signal that the session was terminated. A protocol-level LEAVE message would
 // require the server to iterate sessions; the Phase 2 design uses room.Close
 // which tears down the underlying connection.
-func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *testing.T) {
+func TestGivenRelayShutdownWhenActiveConnectionThenPeerReceivesLeave(t *testing.T) {
 	if testing.Short() {
 		t.Skip("shutdown test relies on goroutine scheduling timing — skipped in -short mode")
 	}
@@ -151,7 +151,7 @@ func TestGiven_RelayShutdown_When_ActiveConnection_Then_PeerReceivesLeave(t *tes
 // shutdown grace period elapses causes Shutdown to return promptly (within
 // the deadline). This is a unit-level check that the shutdown path respects
 // context cancellation and does not block indefinitely.
-func TestGracefulShutdownSignal(t *testing.T) {
+func TestGivenActivePeerWhenRelayShutsDownThenPeerReceivesShutdownSignal(t *testing.T) {
 	// Given — a server with no active connections.
 	ts, srv, _ := newShutdownTestServer(t)
 	defer ts.Close()

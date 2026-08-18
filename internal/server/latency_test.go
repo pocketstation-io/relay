@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
 func TestGivenLatencySampleWhenCanonicalEndpointQueriedThenP50StatsReturned(t *testing.T) {
@@ -75,11 +75,11 @@ func TestGivenLatencySampleWhenCanonicalEndpointQueriedThenP50StatsReturned(t *t
 		t.Fatalf("latency endpoint content type = %q, want application/json", got)
 	}
 
-	var stats graph.LatencyStats
+	var stats session.LatencyStats
 	if err := json.Unmarshal(latencyRecorder.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("decode latency response: %v", err)
 	}
-	want := graph.LatencyStats{
+	want := session.LatencyStats{
 		CaptureP50Ms:      14,
 		EncodeP50Ms:       5,
 		RelayRttP50Ms:     28,

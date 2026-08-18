@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/graph"
+	"github.com/pocketstation-io/relay/internal/session"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
@@ -27,8 +27,8 @@ var (
 
 type publishBusPlan struct {
 	mu          sync.Mutex
-	legacyBusID graph.BusID
-	byStreamID  map[string]graph.BusID
+	legacyBusID session.BusID
+	byStreamID  map[string]session.BusID
 	claimed     map[string]struct{}
 }
 
@@ -56,8 +56,8 @@ func newPublishBusPlan(
 		return nil, errPublishBusCount
 	}
 
-	byStreamID := make(map[string]graph.BusID, len(message.PublishBuses))
-	busIDs := make(map[graph.BusID]struct{}, len(message.PublishBuses))
+	byStreamID := make(map[string]session.BusID, len(message.PublishBuses))
+	busIDs := make(map[session.BusID]struct{}, len(message.PublishBuses))
 	for _, binding := range message.PublishBuses {
 		if !validPublishIdentifier(binding.StreamID) || !validPublishIdentifier(binding.BusID) {
 			return nil, errPublishBusIdentity
@@ -81,14 +81,14 @@ func newPublishBusPlan(
 	}, nil
 }
 
-func (plan *publishBusPlan) primaryBusID() graph.BusID {
+func (plan *publishBusPlan) primaryBusID() session.BusID {
 	if plan.legacyBusID != "" {
 		return plan.legacyBusID
 	}
 	return ""
 }
 
-func (plan *publishBusPlan) claim(streamID string) (graph.BusID, error) {
+func (plan *publishBusPlan) claim(streamID string) (session.BusID, error) {
 	plan.mu.Lock()
 	defer plan.mu.Unlock()
 

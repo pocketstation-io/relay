@@ -11,10 +11,10 @@ import (
 	"github.com/pocketstation-io/relay/internal/server"
 )
 
-// TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned verifies
+// TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned verifies
 // that POST /v1/rooms includes the ice_servers field when the server is
 // configured with client ICE servers (RELAY-023).
-func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing.T) {
+func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 	// Given — server with TURN client ICE servers configured.
 	// ClientICEServers are returned to connecting clients; ICEServers is left
 	// nil so the relay's own Pion does not self-STUN via the embedded TURN.
@@ -71,10 +71,10 @@ func TestGiven_TURNConfigured_When_CreateRoom_Then_IceServersReturned(t *testing
 	}
 }
 
-// TestGiven_NoTURNConfig_When_CreateRoom_Then_NoIceServersField verifies that
+// TestGivenNoTURNConfigWhenCreateRoomThenNoIceServersField verifies that
 // the ice_servers field is absent when no ICE servers are configured, keeping
 // the API backward-compatible with clients that do not read ice_servers.
-func TestGiven_NoTURNConfig_When_CreateRoom_Then_NoIceServersField(t *testing.T) {
+func TestGivenNoTURNConfigWhenCreateRoomThenNoIceServersField(t *testing.T) {
 	// Given — server with default STUN-only config (no ICEServers set)
 	srv := server.New(server.Config{
 		JWTSecret: []byte("test-secret"),

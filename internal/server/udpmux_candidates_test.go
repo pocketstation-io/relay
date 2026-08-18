@@ -41,12 +41,12 @@ func gatherUDPHostCandidates(t *testing.T, se webrtc.SettingEngine) []string {
 	return re.FindAllString(pc.LocalDescription().SDP, -1)
 }
 
-// TestGiven_NoUDPMux_When_GatheringOnMultiHomedHost_Then_MayGatherMultipleUDPCandidates
+// TestGivenNoUDPMuxWhenGatheringOnMultiHomedHostThenMayGatherMultipleUDPCandidates
 // documents the failure mode: with the default UDP gathering pion binds one
 // socket per local interface, so a multi-homed host produces several UDP host
 // candidates. This is the root cause of the ~50% RTP loss — the remote peer
 // consents to one and drops media arriving from the others.
-func TestGiven_NoUDPMux_When_GatheringOnMultiHomedHost_Then_MayGatherMultipleUDPCandidates(t *testing.T) {
+func TestGivenNoUDPMuxWhenGatheringOnMultiHomedHostThenMayGatherMultipleUDPCandidates(t *testing.T) {
 	se := webrtc.SettingEngine{}
 	cands := gatherUDPHostCandidates(t, se)
 	t.Logf("default gathering produced %d UDP host candidate(s):", len(cands))
@@ -58,7 +58,7 @@ func TestGiven_NoUDPMux_When_GatheringOnMultiHomedHost_Then_MayGatherMultipleUDP
 	}
 }
 
-// TestGiven_ProductionICEConfig_When_Gathering_Then_OneUDPAddressPort is the
+// TestGivenProductionICEConfigWhenGatheringThenOneUDPAddressPort is the
 // real proof of the fix under the EXACT production SettingEngine: a single
 // ICE-UDP mux plus NAT1To1IPs (RELAY_PUBLIC_IPS). The mux forces one socket
 // (one port); NAT1To1 rewrites every interface IP to the single public IP. The
@@ -66,7 +66,7 @@ func TestGiven_NoUDPMux_When_GatheringOnMultiHomedHost_Then_MayGatherMultipleUDP
 // candidate, so the remote peer can only ever send to — and receive from — that
 // one socket. Multiple distinct ip:port host candidates is the split that
 // dropped ~half the RTP.
-func TestGiven_ProductionICEConfig_When_Gathering_Then_OneUDPAddressPort(t *testing.T) {
+func TestGivenProductionICEConfigWhenGatheringThenOneUDPAddressPort(t *testing.T) {
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		t.Fatalf("ListenUDP: %v", err)
