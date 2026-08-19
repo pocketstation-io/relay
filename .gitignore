@@ -19,3 +19,20 @@ soak/results/
 benches/results/
 artifacts/
 tmp/
+
+# Private engineering records. Keep these local; never publish them.
+/AGENTS.md
+/PHASE*_PROGRESS.md
+/PHASE*_QUEUE.md
+/.github/PULL_REQUEST_TEMPLATE.md
+/docs/REPO_CONTRACT.md
+/docs/adr/
+/docs/architecture/
+/docs/development/
+/docs/evidence/
+/docs/execution/
+/docs/reports/
+/docs/roadmap/
+/docs/standards/
+/internal/**/PHASE*_*.md
+/soak/results/

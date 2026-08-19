@@ -64,8 +64,8 @@ every remote receiver is not claimed until that separate protocol proof exists.
 `pocketstation-bench` owns neutral transport measurement tools, and
 `pocketstation-lab` owns cross-repository product-proof orchestration.
 
-See [the repository contract](docs/REPO_CONTRACT.md) and
-[the architecture authority note](docs/architecture/pocketstation-v3.0.md).
+The public wire contract is documented in
+[SIGNALING_PROTOCOL.md](docs/contracts/SIGNALING_PROTOCOL.md).
 
 ## Compatibility
 
