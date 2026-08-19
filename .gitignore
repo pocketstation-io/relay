@@ -12,8 +12,8 @@ coverage/
 .vscode/
 .idea/
 # Compiled Go binaries (never commit these — platform-specific)
-fake-source
-relay-server
+/fake-source
+/relay-server
 .claude/
 soak/results/
 benches/results/
