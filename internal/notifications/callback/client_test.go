@@ -1,10 +1,13 @@
 package callback_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pocketstation-io/relay/internal/notifications/callback"
@@ -150,5 +153,23 @@ func TestGivenCallbackClientWhenPushSubscriberLeaveThenPostSent(t *testing.T) {
 	wantPath := "/v1/internal/sessions/" + roomID + "/subscriber-leave"
 	if capturedPath != wantPath {
 		t.Errorf("want path %q, got %q", wantPath, capturedPath)
+	}
+}
+
+func TestGivenDeletedSessionWhenPushSubscriberLeaveThenCleanupIsIdempotent(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "session not found", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	callback.NewClient(srv.URL).PushSubscriberLeave("already-deleted")
+
+	if strings.Contains(logs.String(), "unexpected status") {
+		t.Fatalf("idempotent subscriber cleanup logged a warning: %s", logs.String())
 	}
 }

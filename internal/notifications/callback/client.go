@@ -113,7 +113,8 @@ func (c *Client) pushSubscriberLifecycle(sessionID string, event string) {
 		return
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK &&
+		!(event == "subscriber-leave" && resp.StatusCode == http.StatusNotFound) {
 		slog.Warn("callback: unexpected status", "event", event, "session_id", sessionID, "status", resp.StatusCode)
 	}
 }
