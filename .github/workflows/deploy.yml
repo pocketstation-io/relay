@@ -26,6 +26,22 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Verify required production secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_names="$(flyctl secrets list --app pocketstation-relay --json | jq -r '.[].Name')"
+          missing=0
+          for name in POCKETSTATION_JWT_SECRET POCKETSTATION_INTERNAL_SECRET TURN_SHARED_SECRET; do
+            if ! grep -qx "$name" <<<"$secret_names"; then
+              echo "::error::Fly app pocketstation-relay is missing required secret $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Deploy relay to Fly.io
         run: >-
           flyctl deploy --remote-only
