@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          secret_names="$(flyctl secrets list --app pocketstation-relay --json | jq -r '.[].Name')"
+          secret_names="$(flyctl secrets list --app pocketstation-relay --json | jq -r '.[] | .name // .Name')"
           missing=0
           for name in POCKETSTATION_JWT_SECRET POCKETSTATION_INTERNAL_SECRET TURN_SHARED_SECRET; do
             if ! grep -qx "$name" <<<"$secret_names"; then
