@@ -1,0 +1,163 @@
+name: production-rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type ROTATE_AND_DEPLOY to rotate shared secrets and deploy both services
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocketstation-production
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: inputs.confirmation == 'ROTATE_AND_DEPLOY'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Relay
+        uses: actions/checkout@v4
+        with:
+          path: relay
+
+      - name: Check out Control Plane
+        uses: actions/checkout@v4
+        with:
+          repository: pocketstation-io/control-plane
+          ref: main
+          path: control-plane
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Verify deployment authority
+        run: |
+          set -euo pipefail
+          flyctl status --app pocketstation-api --json >/dev/null
+          flyctl status --app pocketstation-relay --json >/dev/null
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Stage coordinated production secrets
+        run: |
+          set -euo pipefail
+          capability_secret="$(openssl rand -hex 32)"
+          internal_secret="$(openssl rand -hex 32)"
+          turn_secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$capability_secret"
+          echo "::add-mask::$internal_secret"
+          echo "::add-mask::$turn_secret"
+          flyctl secrets set --stage --app pocketstation-api \
+            "POCKETSTATION_JWT_SECRET=$capability_secret" \
+            "POCKETSTATION_INTERNAL_SECRET=$internal_secret"
+          flyctl secrets set --stage --app pocketstation-relay \
+            "POCKETSTATION_JWT_SECRET=$capability_secret" \
+            "POCKETSTATION_INTERNAL_SECRET=$internal_secret" \
+            "TURN_SHARED_SECRET=$turn_secret"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Deploy Control Plane
+        working-directory: control-plane
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          flyctl deploy --remote-only --build-arg "GIT_SHA=$revision"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Deploy Relay
+        working-directory: relay
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          flyctl deploy --remote-only --build-arg "GIT_SHA=$revision"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Verify live services
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 12 --retry-all-errors \
+            --retry-delay 2 https://pocketstation-api.fly.dev/healthz
+          curl --fail --silent --show-error --retry 12 --retry-all-errors \
+            --retry-delay 2 https://pocketstation-relay.fly.dev/healthz
+
+      - name: Prove two-bus remote delivery
+        working-directory: relay
+        run: |
+          set -euo pipefail
+          artifacts="$(mktemp -d)"
+          session_id=
+          source_token=
+          source_pids=()
+          cleanup() {
+            status=$?
+            for pid in "${source_pids[@]:-}"; do
+              kill "$pid" 2>/dev/null || true
+            done
+            if [[ -n "$session_id" && -n "$source_token" ]]; then
+              curl --fail --silent --show-error -X DELETE \
+                "https://pocketstation-api.fly.dev/v1/sessions/$session_id" \
+                -H "Authorization: Bearer $source_token" >/dev/null 2>&1 || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT INT TERM
+
+          go build -o "$artifacts/relay-test-source" ./cmd/relay-test-source
+          go build -o "$artifacts/relay-test-receiver" ./cmd/relay-test-receiver
+          created="$(curl --fail --silent --show-error -X POST \
+            https://pocketstation-api.fly.dev/v1/sessions \
+            -H 'Content-Type: application/json' \
+            --data '{"required_buses":["application","microphone"]}')"
+          session_id="$(jq -r .session_id <<<"$created")"
+          source_token="$(jq -r .source_token <<<"$created")"
+          echo "::add-mask::$source_token"
+
+          for bus in application microphone; do
+            "$artifacts/relay-test-source" \
+              --relay https://pocketstation-relay.fly.dev \
+              --session "$session_id" \
+              --bus "$bus" \
+              --token "$source_token" \
+              --duration 20s >"$artifacts/source-$bus.log" 2>&1 &
+            source_pids+=("$!")
+          done
+
+          state=
+          for _ in $(seq 1 40); do
+            state="$(curl --fail --silent --show-error \
+              "https://pocketstation-api.fly.dev/v1/sessions/$session_id" \
+              -H "Authorization: Bearer $source_token")"
+            if [[ "$(jq -r .ready <<<"$state")" == true ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$(jq -r .ready <<<"$state")" == true ]]
+
+          invitation="$(curl --fail --silent --show-error -X POST \
+            "https://pocketstation-api.fly.dev/v1/sessions/$session_id/invitations" \
+            -H "Authorization: Bearer $source_token" \
+            -H 'Content-Type: application/json' \
+            --data '{"bus_id":"application"}')"
+          join_code="$(jq -r .join_code <<<"$invitation")"
+          resolved="$(curl --fail --silent --show-error \
+            "https://pocketstation-api.fly.dev/v1/invitations/$join_code")"
+          subscriber_token="$(jq -r .subscriber_token <<<"$resolved")"
+          echo "::add-mask::$subscriber_token"
+
+          "$artifacts/relay-test-receiver" \
+            --relay https://pocketstation-relay.fly.dev \
+            --session "$session_id" \
+            --bus application \
+            --token "$subscriber_token" \
+            --timeout 15s
