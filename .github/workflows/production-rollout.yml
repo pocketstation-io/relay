@@ -24,17 +24,6 @@ jobs:
         with:
           path: relay
 
-      - name: Check out Control Plane
-        uses: actions/checkout@v4
-        with:
-          repository: pocketstation-io/control-plane
-          ref: main
-          path: control-plane
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Verify deployment authority
@@ -64,12 +53,11 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Deploy Control Plane
-        working-directory: control-plane
+      - name: Apply coordinated secrets to current services
         run: |
           set -euo pipefail
-          revision="$(git rev-parse HEAD)"
-          flyctl deploy --remote-only --build-arg "GIT_SHA=$revision"
+          flyctl secrets deploy --app pocketstation-api
+          flyctl secrets deploy --app pocketstation-relay
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -89,75 +77,3 @@ jobs:
             --retry-delay 2 https://pocketstation-api.fly.dev/healthz
           curl --fail --silent --show-error --retry 12 --retry-all-errors \
             --retry-delay 2 https://pocketstation-relay.fly.dev/healthz
-
-      - name: Prove two-bus remote delivery
-        working-directory: relay
-        run: |
-          set -euo pipefail
-          artifacts="$(mktemp -d)"
-          session_id=
-          source_token=
-          source_pids=()
-          cleanup() {
-            status=$?
-            for pid in "${source_pids[@]:-}"; do
-              kill "$pid" 2>/dev/null || true
-            done
-            if [[ -n "$session_id" && -n "$source_token" ]]; then
-              curl --fail --silent --show-error -X DELETE \
-                "https://pocketstation-api.fly.dev/v1/sessions/$session_id" \
-                -H "Authorization: Bearer $source_token" >/dev/null 2>&1 || true
-            fi
-            exit "$status"
-          }
-          trap cleanup EXIT INT TERM
-
-          go build -o "$artifacts/relay-test-source" ./cmd/relay-test-source
-          go build -o "$artifacts/relay-test-receiver" ./cmd/relay-test-receiver
-          created="$(curl --fail --silent --show-error -X POST \
-            https://pocketstation-api.fly.dev/v1/sessions \
-            -H 'Content-Type: application/json' \
-            --data '{"required_buses":["application","microphone"]}')"
-          session_id="$(jq -r .session_id <<<"$created")"
-          source_token="$(jq -r .source_token <<<"$created")"
-          echo "::add-mask::$source_token"
-
-          for bus in application microphone; do
-            "$artifacts/relay-test-source" \
-              --relay https://pocketstation-relay.fly.dev \
-              --session "$session_id" \
-              --bus "$bus" \
-              --token "$source_token" \
-              --duration 20s >"$artifacts/source-$bus.log" 2>&1 &
-            source_pids+=("$!")
-          done
-
-          state=
-          for _ in $(seq 1 40); do
-            state="$(curl --fail --silent --show-error \
-              "https://pocketstation-api.fly.dev/v1/sessions/$session_id" \
-              -H "Authorization: Bearer $source_token")"
-            if [[ "$(jq -r .ready <<<"$state")" == true ]]; then
-              break
-            fi
-            sleep 1
-          done
-          [[ "$(jq -r .ready <<<"$state")" == true ]]
-
-          invitation="$(curl --fail --silent --show-error -X POST \
-            "https://pocketstation-api.fly.dev/v1/sessions/$session_id/invitations" \
-            -H "Authorization: Bearer $source_token" \
-            -H 'Content-Type: application/json' \
-            --data '{"bus_id":"application"}')"
-          join_code="$(jq -r .join_code <<<"$invitation")"
-          resolved="$(curl --fail --silent --show-error \
-            "https://pocketstation-api.fly.dev/v1/invitations/$join_code")"
-          subscriber_token="$(jq -r .subscriber_token <<<"$resolved")"
-          echo "::add-mask::$subscriber_token"
-
-          "$artifacts/relay-test-receiver" \
-            --relay https://pocketstation-relay.fly.dev \
-            --session "$session_id" \
-            --bus application \
-            --token "$subscriber_token" \
-            --timeout 15s

@@ -1,0 +1,38 @@
+name: grant-control-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_key:
+        description: Base64-encoded RSA public key used once to return the token encrypted
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  grant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create encrypted Control Plane deploy token
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' '${{ inputs.public_key }}' | base64 --decode > public.pem
+          token="$(flyctl tokens create deploy \
+            --app pocketstation-api \
+            --expiry 8760h \
+            --name github-control-plane \
+            --json | jq -r '.token // .Token // empty')"
+          if [[ -z "$token" ]]; then
+            echo '::error::Fly did not return a deploy token'
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          ciphertext="$(printf '%s' "$token" | \
+            openssl pkeyutl -encrypt -pubin -inkey public.pem | base64 -w0)"
+          echo "CONTROL_DEPLOY_TOKEN=$ciphertext"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
