@@ -23,7 +23,7 @@ bus or the declared `mix` output.
 
 ## Authority modes
 
-Production uses control-plane authority:
+A self-hosted deployment normally uses control-plane authority:
 
 ```text
 control plane creates the Session and capabilities
@@ -35,10 +35,16 @@ Set:
 
 ```text
 RELAY_AUTHORITY_MODE=control-plane
-RELAY_API_SERVER_URL=https://pocketstation-api.fly.dev
+RELAY_API_SERVER_URL=https://control.example.com
 POCKETSTATION_JWT_SECRET=<shared capability verification secret>
 POCKETSTATION_INTERNAL_SECRET=<shared state-synchronization secret>
 ```
+
+Deploy the control plane and Relay under endpoints you own. PocketStation's
+Fly endpoints are a small, rate-limited demonstration environment used by the
+installed Python example. They are not a hosted-service contract, an SLA, or a
+default for Relay itself, and may return `429 Too Many Requests` when the demo
+capacity is in use.
 
 In this mode Relay rejects its local Session and invitation mutation routes.
 Subscriber capabilities are signed by the control plane and validated by Relay
@@ -162,7 +168,19 @@ Relay bounds:
 - packet queues, repair caches, and packet age.
 
 When capacity is unavailable, Relay rejects new work before allocating a media
-path. It does not grow an unbounded retry or callback queue.
+path. It returns an explicit capacity response and does not grow an unbounded
+retry or callback queue. Operators should set limits for their own budget and
+expected audience; the repository's `fly.toml` intentionally describes only a
+small demonstration deployment.
+
+The checked-in Fly configuration keeps one 512 MB Relay machine running and
+lets the 256 MB Control Plane stop when idle. At current `iad` shared-CPU
+pricing, keeping both machines running for an entire month would exceed USD 5
+before network costs. The low-traffic demonstration can remain below that
+target only when the Control Plane is stopped for enough idle time. Network
+transfer, public IPs, the browser receiver, taxes, and future provider pricing
+are separate. Fly does not currently provide a built-in billing alert, so this
+configuration is not a hard billing ceiling.
 
 ## Verify a change
 

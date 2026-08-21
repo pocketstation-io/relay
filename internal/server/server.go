@@ -18,8 +18,6 @@ import (
 	"github.com/pocketstation-io/relay/internal/session"
 )
 
-const defaultPublicReceiverURL = "https://pocketstation-receiver.fly.dev"
-
 // Server is the top-level relay server.
 type Server struct {
 	relaySessions            *session.SessionRegistry
@@ -134,9 +132,6 @@ func New(cfg Config) *Server {
 	publicReceiverURL := strings.TrimSpace(cfg.PublicReceiverURL)
 	if publicReceiverURL == "" {
 		publicReceiverURL = strings.TrimSpace(os.Getenv("PUBLIC_RECEIVER_URL"))
-	}
-	if publicReceiverURL == "" {
-		publicReceiverURL = defaultPublicReceiverURL
 	}
 	publicRelayURL := strings.TrimSpace(cfg.PublicRelayURL)
 	if publicRelayURL == "" {

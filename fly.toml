@@ -20,12 +20,23 @@ dockerfile = "Dockerfile"
   PUBLIC_RELAY_URL = "https://pocketstation-relay.fly.dev"
   PUBLIC_RECEIVER_URL = "https://pocketstation-receiver.fly.dev"
   CONTROL_RECONCILE_INTERVAL_SEC = "5"
+  RELAY_MAX_ROOMS = "3"
+  RELAY_MAX_SUBSCRIBERS_PER_SESSION = "2"
+  RELAY_MAX_BUSES_PER_SESSION = "4"
+  RELAY_MAX_CONCURRENT_HANDSHAKES = "8"
+  RELAY_MAX_INVITATIONS = "12"
+  MAX_ROOMS_PER_IP_PER_MINUTE = "2"
+  ROOM_EXPIRY_MINUTES = "15"
+  SOURCE_RECONNECT_WINDOW_SEC = "30"
+  ALLOWED_ORIGINS = "https://pocketstation-receiver.fly.dev"
 
 # Signaling + control plane (WebSocket + HTTP)
 [http_service]
 internal_port = 8080
 force_https = true
 min_machines_running = 1
+auto_start_machines = true
+auto_stop_machines = "off"
 
 [http_service.concurrency]
 type = "connections"

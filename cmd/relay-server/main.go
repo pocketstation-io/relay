@@ -92,6 +92,7 @@ func main() {
 		MaxSubscribersPerRoom:    getenvInt("RELAY_MAX_SUBSCRIBERS_PER_SESSION", 0),
 		MaxRoomsPerIPPerMinute:   getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
 		MaxConcurrentHandshakes:  getenvInt("RELAY_MAX_CONCURRENT_HANDSHAKES", 0),
+		MaxInvitations:           getenvInt("RELAY_MAX_INVITATIONS", 0),
 		CallbackClient:           cbClient,
 		WebhookDispatcher:        whDispatcher,
 		ClientICEServers:         clientICEServers,

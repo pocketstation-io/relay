@@ -18,6 +18,11 @@ var upgrader = websocket.Upgrader{
 			return true
 		}
 		origin := r.Header.Get("Origin")
+		// Origin is a browser security boundary. Native clients normally omit
+		// it and still authenticate with a scoped capability.
+		if origin == "" {
+			return true
+		}
 		for _, allowed := range allowedOrigins {
 			if origin == allowed {
 				return true
