@@ -1,120 +1,75 @@
-// Package callback provides a best-effort HTTP client for notifying the
-// control plane of relay-side source and subscriber lifecycle events.
-//
-// All public methods are fire-and-forget: they spawn no goroutines themselves
-// (callers use "go c.Push…") and never return an error to the caller. If
-// the control plane is unreachable the error is logged at WARN level and dropped.
-// If baseURL is empty the client is a no-op and no network calls are made.
+// Package callback sends complete RelaySession state to the control plane.
 package callback
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
-	"os"
+	"net/url"
+	"strings"
 	"time"
+
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
-// httpTimeout is the maximum time a single callback POST may take.
-// Kept short so a slow api-server does not delay session cleanup.
-const httpTimeout = 5 * time.Second
+const (
+	httpTimeout          = 5 * time.Second
+	maxResponseBodyBytes = 4096
+)
 
-// Client posts internal callback events to the control plane.
-// The zero value is not valid; use NewClient.
+var ErrInvalidConfiguration = errors.New("invalid control-plane callback configuration")
+
+// Client sends authenticated full-state replacement requests.
 type Client struct {
 	baseURL string
+	secret  string
 	http    http.Client
 }
 
-// NewClient returns a Client that posts to baseURL.
-// If baseURL is empty the client is permanently disabled (all calls are no-ops).
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL, secret string) (*Client, error) {
+	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || len(secret) < 32 {
+		return nil, ErrInvalidConfiguration
+	}
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(parsed.String(), "/"),
+		secret:  secret,
 		http:    http.Client{Timeout: httpTimeout},
-	}
+	}, nil
 }
 
-// sourceActiveBody is the JSON payload for the source-active callback.
-type sourceActiveBody struct {
-	Active bool `json:"active"`
-}
-
-// PushSourceActive posts {"active": active} to
-// {baseURL}/v1/internal/sessions/{sessionID}/source-active.
-//
-// Best-effort: errors are logged at WARN and discarded. Never blocks the
-// audio path — callers must invoke this in a goroutine.
-func (c *Client) PushSourceActive(sessionID string, active bool) {
-	if c.baseURL == "" {
-		return
-	}
-	body, err := json.Marshal(sourceActiveBody{Active: active})
+// PushState replaces the control-plane's Relay-owned state. Retrying the same
+// epoch and revision is safe; the receiver acknowledges it without mutation.
+func (client *Client) PushState(ctx context.Context, state session.ControlState) error {
+	body, err := json.Marshal(state)
 	if err != nil {
-		// json.Marshal of a plain bool struct never fails in practice; guard anyway.
-		slog.Warn("callback: marshal error", "event", "source_active", "error", err)
-		return
+		return err
 	}
-	url := fmt.Sprintf("%s/v1/internal/sessions/%s/source-active", c.baseURL, sessionID)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	endpoint := client.baseURL + "/v1/internal/sessions/" + url.PathEscape(state.SessionID) + "/relay-state"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
-		slog.Warn("callback: build request error", "event", "source_active", "error", err)
-		return
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if secret := os.Getenv("INTERNAL_SECRET"); secret != "" {
-		req.Header.Set("X-Internal-Secret", secret)
-	}
-	resp, err := c.http.Do(req)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-PocketStation-Internal-Secret", client.secret)
+	response, err := client.http.Do(request)
 	if err != nil {
-		slog.Warn("callback: POST failed", "event", "source_active", "session_id", sessionID, "active", active, "error", err)
-		return
+		return err
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		slog.Warn("callback: unexpected status", "event", "source_active", "session_id", sessionID, "status", resp.StatusCode)
+	defer response.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
+	if readErr != nil {
+		return readErr
 	}
-}
-
-// PushSubscriberActive posts the relay-confirmed subscriber activation.
-// Callers invoke it only after DTLS is connected and AddDownlink succeeds.
-func (c *Client) PushSubscriberActive(sessionID string) {
-	c.pushSubscriberLifecycle(sessionID, "subscriber-active")
-}
-
-// PushSubscriberLeave posts to
-// {baseURL}/v1/internal/sessions/{sessionID}/subscriber-leave.
-//
-// Best-effort: errors are logged at WARN and discarded. Never blocks the
-// audio path — callers must invoke this in a goroutine.
-func (c *Client) PushSubscriberLeave(sessionID string) {
-	c.pushSubscriberLifecycle(sessionID, "subscriber-leave")
-}
-
-func (c *Client) pushSubscriberLifecycle(sessionID string, event string) {
-	if c.baseURL == "" {
-		return
+	if len(responseBody) > maxResponseBodyBytes {
+		return fmt.Errorf("callback response exceeded %d bytes", maxResponseBodyBytes)
 	}
-	url := fmt.Sprintf("%s/v1/internal/sessions/%s/%s", c.baseURL, sessionID, event)
-	req, err := http.NewRequest(http.MethodPost, url, http.NoBody)
-	if err != nil {
-		slog.Warn("callback: build request error", "event", event, "error", err)
-		return
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("control-plane callback status %d", response.StatusCode)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if secret := os.Getenv("INTERNAL_SECRET"); secret != "" {
-		req.Header.Set("X-Internal-Secret", secret)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		slog.Warn("callback: POST failed", "event", event, "session_id", sessionID, "error", err)
-		return
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK &&
-		!(event == "subscriber-leave" && resp.StatusCode == http.StatusNotFound) {
-		slog.Warn("callback: unexpected status", "event", event, "session_id", sessionID, "status", resp.StatusCode)
-	}
+	return nil
 }

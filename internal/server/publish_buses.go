@@ -38,14 +38,11 @@ func newPublishBusPlan(
 ) (*publishBusPlan, error) {
 	if message.PublishBuses == nil {
 		busID := message.BusID
-		if claims.BusID != "" && busID != "" && busID != claims.BusID {
+		if busID == "" && len(claims.BusIDs) == 1 {
+			busID = claims.BusIDs[0]
+		}
+		if busID == "" || !claims.AllowsBus(string(busID)) {
 			return nil, errPublishBusScope
-		}
-		if busID == "" {
-			busID = claims.BusID
-		}
-		if busID == "" {
-			busID = "voice"
 		}
 		return &publishBusPlan{legacyBusID: busID}, nil
 	}
@@ -62,7 +59,7 @@ func newPublishBusPlan(
 		if !validPublishIdentifier(binding.StreamID) || !validPublishIdentifier(binding.BusID) {
 			return nil, errPublishBusIdentity
 		}
-		if claims.BusID != "" && binding.BusID != claims.BusID {
+		if !claims.AllowsBus(string(binding.BusID)) {
 			return nil, errPublishBusScope
 		}
 		if _, exists := byStreamID[binding.StreamID]; exists {

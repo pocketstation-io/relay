@@ -10,7 +10,7 @@ import (
 )
 
 func TestGivenLatencySampleWhenCanonicalEndpointQueriedThenP50StatsReturned(t *testing.T) {
-	relayServer := New(Config{JWTSecret: []byte("latency-test-secret")})
+	relayServer := New(Config{JWTSecret: []byte("latency-test-secret-0123456789abcdef")})
 	createRecorder := httptest.NewRecorder()
 	relayServer.Handler().ServeHTTP(
 		createRecorder,
@@ -94,7 +94,7 @@ func TestGivenLatencySampleWhenCanonicalEndpointQueriedThenP50StatsReturned(t *t
 }
 
 func TestGivenUnknownSessionWhenLatencyEndpointQueriedThenNotFound(t *testing.T) {
-	relayServer := New(Config{JWTSecret: []byte("latency-test-secret")})
+	relayServer := New(Config{JWTSecret: []byte("latency-test-secret-0123456789abcdef")})
 	recorder := httptest.NewRecorder()
 	relayServer.Handler().ServeHTTP(
 		recorder,

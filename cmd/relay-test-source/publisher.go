@@ -21,14 +21,16 @@ const (
 
 var validOpusSilence = []byte{0xF8, 0xFF, 0xFE}
 
-func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, logger *slog.Logger) error {
+func run(relayBase, sessionID, busID, sourceToken, stunURL string, streamDuration time.Duration, logger *slog.Logger) error {
 	websocketURL, err := relayWSURL(relayBase)
 	if err != nil {
 		return err
 	}
-	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
-	})
+	configuration := webrtc.Configuration{}
+	if stunURL != "" {
+		configuration.ICEServers = []webrtc.ICEServer{{URLs: []string{stunURL}}}
+	}
+	peerConnection, err := webrtc.NewPeerConnection(configuration)
 	if err != nil {
 		return fmt.Errorf("create peer connection: %w", err)
 	}
@@ -36,7 +38,7 @@ func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, lo
 
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-		"audio", "pocketstation-fake",
+		"audio", "pocketstation-test-source",
 	)
 	if err != nil {
 		return fmt.Errorf("create track: %w", err)
@@ -48,8 +50,14 @@ func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, lo
 	if err != nil {
 		return fmt.Errorf("create offer: %w", err)
 	}
+	gatheringComplete := webrtc.GatheringCompletePromise(peerConnection)
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("set local description: %w", err)
+	}
+	<-gatheringComplete
+	localDescription := peerConnection.LocalDescription()
+	if localDescription == nil {
+		return fmt.Errorf("local description unavailable after ICE gathering")
 	}
 
 	connection, _, err := websocket.DefaultDialer.Dial(websocketURL, nil)
@@ -58,7 +66,7 @@ func run(relayBase, roomID, sourceToken string, streamDuration time.Duration, lo
 	}
 	defer connection.Close()
 	if err := connection.WriteJSON(signaling.ClientMessage{
-		Type: signaling.TypePublish, Token: sourceToken, SDPOffer: offer.SDP,
+		Type: signaling.TypePublish, Token: sourceToken, BusID: busID, SDPOffer: localDescription.SDP,
 	}); err != nil {
 		return fmt.Errorf("send PUBLISH: %w", err)
 	}
@@ -148,8 +156,8 @@ func readRelayMessages(
 			if err := peerConnection.AddICECandidate(webrtc.ICECandidateInit{Candidate: message.Candidate}); err != nil {
 				logger.Error("add ICE candidate failed", "err", err)
 			}
-		case signaling.TypeRoomState:
-			logger.Info("room state", "source_active", message.SourceActive, "listeners", message.SubscriptionCount)
+		case signaling.TypeSessionState:
+			logger.Info("RelaySession state", "source_active", message.SourceActive, "subscription_count", message.SubscriptionCount)
 		case signaling.TypeError:
 			logger.Error("relay error", "code", message.Code, "message", message.Message)
 		}

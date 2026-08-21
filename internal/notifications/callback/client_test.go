@@ -1,175 +1,87 @@
-package callback_test
+package callback
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/pocketstation-io/relay/internal/notifications/callback"
+	"github.com/pocketstation-io/relay/internal/session"
 )
 
-// TestGivenCallbackClientWhenPushSourceActiveThenPostSent verifies that
-// PushSourceActive sends a POST with the expected JSON body to the correct path.
-func TestGivenCallbackClientWhenPushSourceActiveThenPostSent(t *testing.T) {
-	// Given
-	var (
-		capturedMethod string
-		capturedPath   string
-		capturedBody   map[string]any
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedMethod = r.Method
-		capturedPath = r.URL.Path
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &capturedBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+const callbackTestSecret = "0123456789abcdef0123456789abcdef"
 
-	c := callback.NewClient(srv.URL)
-	const roomID = "test-room-001"
+type roundTripFunc func(*http.Request) (*http.Response, error)
 
-	// When
-	c.PushSourceActive(roomID, true)
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
-	// Then
-	if capturedMethod != http.MethodPost {
-		t.Errorf("want POST, got %s", capturedMethod)
+func TestGivenControlStateWhenPushedThenRequestIsAuthenticatedFullReplacement(t *testing.T) {
+	client, err := NewClient("https://control.example/base", callbackTestSecret)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantPath := "/v1/internal/sessions/" + roomID + "/source-active"
-	if capturedPath != wantPath {
-		t.Errorf("want path %q, got %q", wantPath, capturedPath)
+	var captured *http.Request
+	var body session.ControlState
+	client.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		captured = request
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"changed":true}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	state := session.ControlState{
+		ContractVersion: session.RelayStateContractVersion,
+		SessionID:       "session-1",
+		RelayEpoch:      "relay-1",
+		Revision:        7,
+		ObservedAt:      time.Now().UTC(),
+		Buses: []session.ControlBusState{
+			{BusID: "application", Role: "application", SourceActive: true, SourceGeneration: 2},
+		},
+		Subscriptions: []session.ControlSubscriptionState{{SubscriberID: "receiver-1", BusID: "application"}},
 	}
-	if active, _ := capturedBody["active"].(bool); !active {
-		t.Errorf("want active=true in body, got %v", capturedBody)
+	if err := client.PushState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Method != http.MethodPut || captured.URL.Path != "/base/v1/internal/sessions/session-1/relay-state" {
+		t.Fatalf("unexpected request %s %s", captured.Method, captured.URL.Path)
+	}
+	if captured.Header.Get("X-PocketStation-Internal-Secret") != callbackTestSecret {
+		t.Fatal("internal authentication header missing")
+	}
+	if body.Revision != 7 || len(body.Buses) != 1 || len(body.Subscriptions) != 1 {
+		t.Fatalf("incomplete state body %#v", body)
 	}
 }
 
-// TestGivenCallbackClientWhenPushSourceActiveFalseThenPostSentWithFalse
-// verifies the inactive case sends active=false.
-func TestGivenCallbackClientWhenPushSourceActiveFalseThenPostSentWithFalse(t *testing.T) {
-	// Given
-	var capturedBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &capturedBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := callback.NewClient(srv.URL)
-
-	// When
-	c.PushSourceActive("room-abc", false)
-
-	// Then
-	if active, _ := capturedBody["active"].(bool); active {
-		t.Errorf("want active=false in body, got %v", capturedBody)
+func TestGivenInvalidCallbackConfigurationWhenClientIsCreatedThenConstructionFailsClosed(t *testing.T) {
+	for _, input := range []struct{ url, secret string }{
+		{"", callbackTestSecret},
+		{"ftp://control.example", callbackTestSecret},
+		{"https://control.example?token=x", callbackTestSecret},
+		{"https://control.example", "short"},
+	} {
+		if _, err := NewClient(input.url, input.secret); err == nil {
+			t.Fatalf("invalid config accepted: %#v", input)
+		}
 	}
 }
 
-// TestGivenCallbackClientWhenServerDownThenNoError verifies that a refused
-// connection causes no panic and no returned error (best-effort semantics).
-func TestGivenCallbackClientWhenServerDownThenNoError(t *testing.T) {
-	// Given — point at a port with nothing listening
-	c := callback.NewClient("http://127.0.0.1:1") // port 1 is reserved; always refused
-
-	// When / Then — must not panic
-	c.PushSourceActive("room-xyz", true)
-	c.PushSubscriberActive("room-xyz")
-	c.PushSubscriberLeave("room-xyz")
-}
-
-// TestGivenCallbackClientWhenBaseURLEmptyThenNoop verifies that an empty
-// baseURL disables all callbacks without any network activity.
-func TestGivenCallbackClientWhenBaseURLEmptyThenNoop(t *testing.T) {
-	// Given
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := callback.NewClient("") // disabled
-
-	// When
-	c.PushSourceActive("room-noop", true)
-	c.PushSubscriberActive("room-noop")
-	c.PushSubscriberLeave("room-noop")
-
-	// Then
-	if called {
-		t.Error("no HTTP call expected when baseURL is empty")
-	}
-}
-
-func TestGivenCallbackClientWhenPushSubscriberActiveThenPostSent(t *testing.T) {
-	var capturedPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	callback.NewClient(srv.URL).PushSubscriberActive("subscriber-room-008")
-
-	wantPath := "/v1/internal/sessions/subscriber-room-008/subscriber-active"
-	if capturedPath != wantPath {
-		t.Errorf("want path %q, got %q", wantPath, capturedPath)
-	}
-}
-
-// TestGivenCallbackClientWhenPushSubscriberLeaveThenPostSent verifies that
-// PushSubscriberLeave sends a POST to the canonical Session path.
-func TestGivenCallbackClientWhenPushSubscriberLeaveThenPostSent(t *testing.T) {
-	// Given
-	var (
-		capturedMethod string
-		capturedPath   string
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedMethod = r.Method
-		capturedPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := callback.NewClient(srv.URL)
-	const roomID = "listener-room-007"
-
-	// When
-	c.PushSubscriberLeave(roomID)
-
-	// Then
-	if capturedMethod != http.MethodPost {
-		t.Errorf("want POST, got %s", capturedMethod)
-	}
-	wantPath := "/v1/internal/sessions/" + roomID + "/subscriber-leave"
-	if capturedPath != wantPath {
-		t.Errorf("want path %q, got %q", wantPath, capturedPath)
-	}
-}
-
-func TestGivenDeletedSessionWhenPushSubscriberLeaveThenCleanupIsIdempotent(t *testing.T) {
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "session not found", http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-
-	callback.NewClient(srv.URL).PushSubscriberLeave("already-deleted")
-
-	if strings.Contains(logs.String(), "unexpected status") {
-		t.Fatalf("idempotent subscriber cleanup logged a warning: %s", logs.String())
+func TestGivenOversizedFailureResponseWhenStateIsPushedThenDeliveryFails(t *testing.T) {
+	client, _ := NewClient("https://control.example", callbackTestSecret)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(strings.Repeat("x", maxResponseBodyBytes+1))), Header: make(http.Header)}, nil
+	})
+	if err := client.PushState(context.Background(), session.ControlState{SessionID: "session-1"}); err == nil {
+		t.Fatal("oversized failure response accepted")
 	}
 }

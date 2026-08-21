@@ -19,7 +19,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-const shutdownTestJWTSecret = "shutdown-test-secret"
+const shutdownTestJWTSecret = "shutdown-test-secret-0123456789abcdef"
 
 // newShutdownTestServer creates a Server and a started httptest.Server.
 // Unlike newTestServer in integration tests, cleanup is NOT registered so
@@ -39,12 +39,12 @@ func newShutdownTestServer(t *testing.T) (*httptest.Server, *server.Server, *web
 	return ts, srv, api
 }
 
-// createShutdownRoom POSTs to /v1/rooms and returns source and listener tokens.
+// createShutdownRoom POSTs to /v1/sessions and returns source and listener tokens.
 func createShutdownRoom(t *testing.T, ts *httptest.Server) (roomID, sourceToken, listenerToken string) {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(nil))
 	if err != nil {
-		t.Fatalf("POST /v1/rooms: %v", err)
+		t.Fatalf("POST /v1/sessions: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -52,7 +52,7 @@ func createShutdownRoom(t *testing.T, ts *httptest.Server) (roomID, sourceToken,
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("decode room response: %v", err)
 	}
-	return payload["room_id"], payload["source_token"], payload["listener_token"]
+	return payload["session_id"], payload["source_token"], payload["subscriber_token"]
 }
 
 // dialShutdownSignal dials the /v1/signal endpoint.

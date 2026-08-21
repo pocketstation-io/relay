@@ -31,7 +31,7 @@ import (
 // testCrossServiceSecret is the shared HS256 secret used by both api-server
 // and relay in these tests. It mirrors the value POCKETSTATION_JWT_SECRET
 // would be set to in a real deployment.
-const testCrossServiceSecret = "cross-service-test-secret"
+const testCrossServiceSecret = "cross-service-test-secret-0123456789"
 
 // TestGivenApiServerTokenWhenUsedForRelaySignalThenAccepted verifies
 // that a token minted with the same HS256 secret and Claims struct as
@@ -47,14 +47,14 @@ func TestGivenApiServerTokenWhenUsedForRelaySignalThenAccepted(t *testing.T) {
 
 	// Given — a room exists so the relay knows the RoomID.
 	room := createRoom(t, ts)
-	roomID := room["room_id"]
+	roomID := room["session_id"]
 	if roomID == "" {
-		t.Fatal("no room_id in room response")
+		t.Fatal("no session_id in room response")
 	}
 
 	// Given — a source token minted the way api-server mints it:
 	// HS256, Claims{RoomID, Role}, same secret.
-	apiServerToken, err := auth.Sign([]byte(testCrossServiceSecret), roomID, auth.RoleSource, 15*time.Minute)
+	apiServerToken, err := auth.SignSource([]byte(testCrossServiceSecret), auth.ControlPlaneIssuer, roomID, []string{"application"}, 15*time.Minute)
 	if err != nil {
 		t.Fatalf("auth.Sign (simulating api-server): %v", err)
 	}
@@ -153,15 +153,15 @@ func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 	ts, clientAPI := newTestServerWithSecret(t, []byte(testCrossServiceSecret), loopbackAPI)
 
 	room := createRoom(t, ts)
-	roomID := room["room_id"]
+	roomID := room["session_id"]
 	if roomID == "" {
-		t.Fatal("no room_id in room response")
+		t.Fatal("no session_id in room response")
 	}
 
 	// Given — a token minted with the WRONG secret (simulates misconfigured
 	// api-server or a token from a different deployment).
-	wrongSecret := []byte("wrong-secret-not-the-shared-one")
-	badToken, err := auth.Sign(wrongSecret, roomID, auth.RoleSource, 15*time.Minute)
+	wrongSecret := []byte("wrong-secret-not-the-shared-one-32-bytes")
+	badToken, err := auth.SignSource(wrongSecret, auth.ControlPlaneIssuer, roomID, []string{"application"}, 15*time.Minute)
 	if err != nil {
 		t.Fatalf("auth.Sign (wrong secret): %v", err)
 	}
@@ -252,8 +252,9 @@ func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 func newTestServerWithSecret(t *testing.T, secret []byte, api *webrtc.API) (*httptest.Server, *webrtc.API) {
 	t.Helper()
 	srv := server.New(server.Config{
-		JWTSecret: secret,
-		API:       api,
+		JWTSecret:         secret,
+		SourceTokenIssuer: auth.ControlPlaneIssuer,
+		API:               api,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

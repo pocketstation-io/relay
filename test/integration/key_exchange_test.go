@@ -82,7 +82,7 @@ func TestGivenSourceInRoomWhenKeyExchangeSentThenAllListenersReceiveKey(t *testi
 	ts, clientAPI := newTestServer(t)
 	roomPayload := createRoom(t, ts)
 	sourceToken := roomPayload["source_token"]
-	listenerToken := roomPayload["listener_token"]
+	listenerToken := roomPayload["subscriber_token"]
 
 	// Source setup.
 	sourceConn := dialSignal(t, ts)

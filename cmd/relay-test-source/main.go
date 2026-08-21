@@ -6,10 +6,10 @@
 //
 // Usage:
 //
-//	relay-test-source [--relay http://localhost:8080] [--room ROOM_ID] [--token JWT] [--duration 5m]
+//	relay-test-source [--relay http://localhost:8080] [--session SESSION_ID] [--bus application] [--token JWT] [--duration 5m]
 //
-// If --room and --token are both omitted the binary creates a room via POST
-// /v1/rooms and prints the listener token to stdout before publishing.
+// If --session and --token are both omitted, the fixture asks a standalone
+// Relay to create a Session. Control-plane mode requires explicit credentials.
 package main
 
 import (
@@ -21,33 +21,35 @@ import (
 
 func main() {
 	relayURL := flag.String("relay", "http://localhost:8080", "relay base URL (http/https)")
-	roomID := flag.String("room", "", "room ID (omit to create a new room)")
-	token := flag.String("token", "", "source JWT (omit to create a new room)")
+	sessionID := flag.String("session", "", "RelaySession ID (omit only for standalone Relay)")
+	busID := flag.String("bus", "application", "named AudioBus to publish")
+	token := flag.String("token", "", "source capability (omit only for standalone Relay)")
+	stunURL := flag.String("stun", "", "optional STUN URL for a remote-path test")
 	duration := flag.Duration("duration", 5*time.Minute, "how long to stream")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	if (*roomID == "") != (*token == "") {
-		logger.Error("--room and --token must both be provided, or both omitted")
+	if (*sessionID == "") != (*token == "") {
+		logger.Error("--session and --token must both be provided, or both omitted")
 		os.Exit(1)
 	}
 
 	var sourceToken string
-	if *roomID == "" {
+	if *sessionID == "" {
 		var err error
-		*roomID, sourceToken, err = createRoom(*relayURL, logger)
+		*sessionID, sourceToken, err = createSession(*relayURL, logger)
 		if err != nil {
-			logger.Error("failed to create room", "err", err)
+			logger.Error("failed to create standalone RelaySession", "error", err)
 			os.Exit(1)
 		}
 	} else {
 		sourceToken = *token
 	}
 
-	logger.Info("publishing to room", "room_id", *roomID, "duration", *duration)
+	logger.Info("publishing test audio", "session_id", *sessionID, "bus_id", *busID, "duration", *duration)
 
-	if err := run(*relayURL, *roomID, sourceToken, *duration, logger); err != nil {
+	if err := run(*relayURL, *sessionID, *busID, sourceToken, *stunURL, *duration, logger); err != nil {
 		logger.Error("publisher exited with error", "err", err)
 		os.Exit(1)
 	}

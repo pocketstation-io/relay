@@ -102,6 +102,18 @@ func (reg *SessionRegistry) Get(id string) (*RelaySession, bool) {
 	return r, ok
 }
 
+// All returns a bounded snapshot of active RelaySession pointers for periodic
+// control-state reconciliation.
+func (reg *SessionRegistry) All() []*RelaySession {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	result := make([]*RelaySession, 0, len(reg.rooms))
+	for _, relaySession := range reg.rooms {
+		result = append(result, relaySession)
+	}
+	return result
+}
+
 // Delete closes and removes the RelaySession for id. No-op if absent.
 func (reg *SessionRegistry) Delete(id string) {
 	reg.mu.Lock()

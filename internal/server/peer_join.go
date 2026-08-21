@@ -19,7 +19,11 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 		return
 	}
 
-	claims, err := auth.Verify(peer.srv.jwtSecret, message.Token)
+	expectedRole := auth.RoleSubscriber
+	if message.Type == signaling.TypePublish {
+		expectedRole = auth.RoleSource
+	}
+	claims, err := peer.srv.verifyCapability(message.Token, expectedRole)
 	if err != nil {
 		slog.Warn("bad token", "session_id", peer.id, "error", err)
 		peer.sendError(signaling.ErrCodeBadToken, err.Error())
@@ -30,8 +34,7 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 		peer.sendError(signaling.ErrCodeRoleMismatch, "PUBLISH requires a source token")
 		return
 	}
-	if message.Type == signaling.TypeSubscribe &&
-		claims.Role != auth.RoleSubscriber && claims.Role != auth.RoleListener {
+	if message.Type == signaling.TypeSubscribe && claims.Role != auth.RoleSubscriber {
 		peer.sendError(signaling.ErrCodeRoleMismatch, "SUBSCRIBE requires a subscriber token")
 		return
 	}
@@ -49,6 +52,8 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 		return
 	}
 	peer.room = relaySession
+	peer.srv.bindControlState(relaySession)
+	peer.srv.queueControlState(relaySession)
 	peer.role = claims.Role
 
 	var publishBuses *publishBusPlan
@@ -131,11 +136,6 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 				peer.sendError(signaling.ErrCodeTrackError, sourceErr.Error())
 				_ = connection.Close()
 				return
-			}
-			if peer.srv.callbackClient != nil {
-				peer.srv.dispatchCallback(func() {
-					peer.srv.callbackClient.PushSourceActive(sessionID, true)
-				})
 			}
 			peer.srv.broadcastSessionState(relaySession)
 			peer.srv.webhookDispatcher.Send(webhook.Event{
@@ -240,11 +240,6 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 			}
 			slog.Info("subscription registered", "session_id", peer.id)
 			peer.srv.Metrics.ListenerCount.Add(1)
-			if peer.srv.callbackClient != nil {
-				peer.srv.dispatchCallback(func() {
-					peer.srv.callbackClient.PushSubscriberActive(relaySession.ID)
-				})
-			}
 			peer.srv.broadcastSessionState(relaySession)
 			peer.observeOutboundRTP(connection, relaySession)
 		})

@@ -37,7 +37,7 @@ func (s *signalPeer) handleKeyExchange(msg signaling.ClientMessage) {
 		if peer.id == s.id || peer.room == nil || peer.room.ID != s.room.ID {
 			continue
 		}
-		if peer.role == auth.RoleSubscriber || peer.role == auth.RoleListener {
+		if peer.role == auth.RoleSubscriber {
 			_ = peer.send(forward)
 		}
 	}

@@ -72,7 +72,7 @@ func TestGivenSourceIceFailsWhenPeerConnectionClosedThenRelayHealthy(t *testing.
 		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
 		t.Fatalf("add transceiver: %v", err)
 	}
-	doSubscribeHandshake(t, subConn, subPC, room["listener_token"], subMsgs, 10*time.Second)
+	doSubscribeHandshake(t, subConn, subPC, room["subscriber_token"], subMsgs, 10*time.Second)
 	waitICEConnected(ctx, t, subPC)
 
 	// Send a few packets to confirm forwarding is alive
@@ -135,7 +135,7 @@ func TestGivenBothPeersWhenIceFailsSimultaneouslyThenRelayRemainsHealthy(t *test
 	subPC, _ := api.NewPeerConnection(webrtc.Configuration{})
 	_, _ = subPC.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio,
 		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
-	doSubscribeHandshake(t, subConn, subPC, room["listener_token"], subMsgs, 10*time.Second)
+	doSubscribeHandshake(t, subConn, subPC, room["subscriber_token"], subMsgs, 10*time.Second)
 	waitICEConnected(ctx, t, subPC)
 
 	// When — both fail simultaneously

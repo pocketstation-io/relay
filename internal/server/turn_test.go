@@ -12,7 +12,7 @@ import (
 )
 
 // TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned verifies
-// that POST /v1/rooms includes the ice_servers field when the server is
+// that POST /v1/sessions includes the ice_servers field when the server is
 // configured with client ICE servers (RELAY-023).
 func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 	// Given — server with TURN client ICE servers configured.
@@ -28,12 +28,12 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 		},
 	}
 	srv := server.New(server.Config{
-		JWTSecret:        []byte("test-secret"),
+		JWTSecret:        []byte("test-secret-0123456789abcdef012345"),
 		ClientICEServers: turnServers,
 	})
 
 	// When — call handler directly via ResponseRecorder (no TCP binding needed)
-	req := httptest.NewRequest(http.MethodPost, "/v1/rooms", bytes.NewReader(nil))
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(nil))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	resp := w.Result()
@@ -48,14 +48,14 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if _, ok := body["room_id"]; !ok {
-		t.Error("response missing room_id")
+	if _, ok := body["session_id"]; !ok {
+		t.Error("response missing session_id")
 	}
 	if _, ok := body["source_token"]; !ok {
 		t.Error("response missing source_token")
 	}
-	if _, ok := body["listener_token"]; !ok {
-		t.Error("response missing listener_token")
+	if _, ok := body["subscriber_token"]; !ok {
+		t.Error("response missing subscriber_token")
 	}
 	rawICE, ok := body["ice_servers"]
 	if !ok {
@@ -77,11 +77,11 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 func TestGivenNoTURNConfigWhenCreateRoomThenNoIceServersField(t *testing.T) {
 	// Given — server with default STUN-only config (no ICEServers set)
 	srv := server.New(server.Config{
-		JWTSecret: []byte("test-secret"),
+		JWTSecret: []byte("test-secret-0123456789abcdef012345"),
 	})
 
 	// When
-	req := httptest.NewRequest(http.MethodPost, "/v1/rooms", bytes.NewReader(nil))
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(nil))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	resp := w.Result()

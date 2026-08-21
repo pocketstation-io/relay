@@ -17,7 +17,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-const rateLimitJWTSecret = "rate-limit-test-secret"
+const rateLimitJWTSecret = "rate-limit-test-secret-0123456789abcdef"
 
 // newRateLimitTestServer creates a test server with custom rate-limit ceilings.
 func newRateLimitTestServer(t *testing.T, maxRooms, maxListeners int) *httptest.Server {
@@ -36,12 +36,12 @@ func newRateLimitTestServer(t *testing.T, maxRooms, maxListeners int) *httptest.
 	return ts
 }
 
-// postRoom POSTs to /v1/rooms and returns the HTTP status and decoded body.
+// postRoom POSTs to /v1/sessions and returns the HTTP status and decoded body.
 func postRoom(t *testing.T, ts *httptest.Server) (statusCode int, body map[string]string) {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(nil))
 	if err != nil {
-		t.Fatalf("POST /v1/rooms: %v", err)
+		t.Fatalf("POST /v1/sessions: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -64,7 +64,7 @@ func dialRateLimitSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 }
 
 // TestGivenMaxRoomsReachedWhenCreateRoomThen429 verifies that once the
-// room count reaches MaxRooms, POST /v1/rooms returns HTTP 429 with
+// room count reaches MaxRooms, POST /v1/sessions returns HTTP 429 with
 // {"error":"room_limit_exceeded"}.
 func TestGivenMaxRoomsReachedWhenCreateRoomThen429(t *testing.T) {
 	// Given — a server with a limit of 2 rooms.
@@ -140,9 +140,9 @@ func TestGivenMaxListenersReachedWhenSubscribeThenErrorFrame(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("create room: expected 200, got %d", code)
 	}
-	listenerToken := roomBody["listener_token"]
+	listenerToken := roomBody["subscriber_token"]
 	if listenerToken == "" {
-		t.Fatal("no listener_token in room response")
+		t.Fatal("no subscriber_token in Session response")
 	}
 
 	// Send one SUBSCRIBE that fills the limit. We don't complete the full
@@ -154,15 +154,15 @@ func TestGivenMaxListenersReachedWhenSubscribeThenErrorFrame(t *testing.T) {
 	// minimal offer. We verify only that the second SUBSCRIBE gets the error.
 	conn1 := dialRateLimitSignal(t, ts)
 
-	// Parse room_id from the token to sign a second listener token.
+	// Parse session_id from the token to sign a second listener token.
 	claims, err := auth.Verify([]byte(rateLimitJWTSecret), listenerToken)
 	if err != nil {
 		t.Fatalf("verify listener token: %v", err)
 	}
-	roomID := claims.RoomID
+	roomID := claims.SessionID
 
 	// Sign a second listener token for the same room.
-	listenerToken2, err := auth.Sign([]byte(rateLimitJWTSecret), roomID, auth.RoleListener, time.Hour)
+	listenerToken2, err := auth.SignSubscriber([]byte(rateLimitJWTSecret), auth.RelayIssuer, roomID, "mix", time.Hour)
 	if err != nil {
 		t.Fatalf("sign second listener token: %v", err)
 	}

@@ -31,7 +31,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-const testJWTSecret = "test-secret"
+const testJWTSecret = "test-secret-0123456789abcdef012345"
 
 // newLoopbackSettingEngine returns a SettingEngine constrained to 127.0.0.1
 // host candidates so tests resolve immediately without external STUN.
@@ -86,12 +86,12 @@ func newTestServer(t *testing.T) (*httptest.Server, *webrtc.API) {
 	return ts, clientAPI
 }
 
-// createRoom POSTs to /v1/rooms and returns the decoded body.
+// createRoom POSTs to /v1/sessions and returns the decoded body.
 func createRoom(t *testing.T, ts *httptest.Server) map[string]string {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(nil))
 	if err != nil {
-		t.Fatalf("POST /v1/rooms: %v", err)
+		t.Fatalf("POST /v1/sessions: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -155,7 +155,7 @@ func doPublishHandshake(
 		conn,
 		pc,
 		token,
-		signaling.ClientMessage{},
+		signaling.ClientMessage{BusID: "application"},
 		msgs,
 		timeout,
 	)
@@ -401,7 +401,7 @@ func TestGivenSourcePublishingWhenListenerSubscribesThenRTPForwarded(t *testing.
 
 	roomPayload := createRoom(t, ts)
 	sourceToken := roomPayload["source_token"]
-	listenerToken := roomPayload["listener_token"]
+	listenerToken := roomPayload["subscriber_token"]
 
 	// Publisher setup.
 	pubConn := dialSignal(t, ts)
@@ -577,7 +577,7 @@ func TestGivenSourcePublishingWhenPacketForwardedThenOneWayLatencyUnder1ms(t *te
 
 	roomPayload := createRoom(t, ts)
 	sourceToken := roomPayload["source_token"]
-	listenerToken := roomPayload["listener_token"]
+	listenerToken := roomPayload["subscriber_token"]
 
 	// Publisher.
 	pubConn := dialSignal(t, ts)

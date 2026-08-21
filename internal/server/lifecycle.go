@@ -12,10 +12,13 @@ import (
 const shutdownDrainTimeout = 5 * time.Second
 
 func (s *Server) Serve(address string) error {
+	s.startControlStateSync()
 	httpServer := &http.Server{
 		Addr:              address,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
 	}
 	s.mu.Lock()
 	s.httpServer = httpServer
@@ -26,6 +29,7 @@ func (s *Server) Serve(address string) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopControlStateSync()
 	s.mu.Lock()
 	httpServer := s.httpServer
 	peers := make([]*signalPeer, 0, len(s.signalPeers))

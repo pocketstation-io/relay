@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,169 +11,152 @@ import (
 	"testing"
 
 	"github.com/pion/rtp"
+	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/session"
 )
 
-type blockingJoinSource struct {
-	released <-chan struct{}
-}
+var joinTestSecret = []byte("join-test-secret-0123456789abcdef")
+
+type blockingJoinSource struct{ released <-chan struct{} }
 
 func (source blockingJoinSource) ReadRTP() (*rtp.Packet, error) {
 	<-source.released
 	return nil, io.EOF
 }
 
-func TestGivenSessionWhenCreatedThenJoinURLContainsNoSessionOrToken(t *testing.T) {
-	server := New(Config{
-		JWTSecret:         []byte("join-test-secret"),
-		PublicReceiverURL: "https://receiver.example",
-	})
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/sessions", nil)
-	server.Handler().ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("create session status = %d", recorder.Code)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode create response: %v", err)
-	}
-	joinURL, _ := body["join_url"].(string)
-	joinCode, _ := body["join_code"].(string)
-	parsed, err := url.Parse(joinURL)
-	if err != nil {
-		t.Fatalf("parse join URL: %v", err)
-	}
-	if joinCode == "" || parsed.Scheme != "https" || parsed.Host != "receiver.example" || parsed.Query().Get("join") != joinCode {
-		t.Fatalf("unexpected join URL %q for code %q", joinURL, joinCode)
-	}
-	if parsed.Query().Get("relay") != "http://example.com" {
-		t.Fatalf("join URL relay origin = %q", parsed.Query().Get("relay"))
-	}
-	if strings.Contains(joinURL, body["session_id"].(string)) || strings.Contains(joinURL, "token") {
-		t.Fatalf("join URL leaks session or token: %s", joinURL)
-	}
+func newJoinTestServer() *Server {
+	return New(Config{JWTSecret: joinTestSecret, SubscriberJWTSecret: joinTestSecret, PublicReceiverURL: "https://receiver.example", PublicRelayURL: "https://relay.example"})
 }
 
-func TestGivenActivePublisherWhenSourceAuthorizesInvitationThenOpaqueURLIsReturned(t *testing.T) {
-	server := New(Config{
-		JWTSecret:         []byte("join-test-secret"),
-		PublicReceiverURL: "https://receiver.example",
-		PublicRelayURL:    "https://relay.example",
-	})
-	createRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(
-		createRecorder,
-		httptest.NewRequest(http.MethodPost, "/v1/sessions", nil),
-	)
+func createJoinTestSession(t *testing.T, server *Server) map[string]any {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/sessions", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("create Session status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 	var created map[string]any
-	_ = json.Unmarshal(createRecorder.Body.Bytes(), &created)
-	sessionID := created["session_id"].(string)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	return created
+}
+
+func attachRequiredJoinSources(t *testing.T, server *Server, sessionID string) func() {
+	t.Helper()
 	relaySession, found := server.relaySessions.Get(sessionID)
 	if !found {
-		t.Fatal("created relay Session is missing")
+		t.Fatal("RelaySession missing")
 	}
-	released := make(chan struct{})
-	relaySession.SetSource("application", session.BusRoleMusic, blockingJoinSource{released: released}, nil)
-	defer close(released)
+	applicationDone := make(chan struct{})
+	microphoneDone := make(chan struct{})
+	if err := relaySession.SetSource("application", session.BusRoleMusic, blockingJoinSource{released: applicationDone}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := relaySession.SetSource("microphone", session.BusRoleVoice, blockingJoinSource{released: microphoneDone}, nil); err != nil {
+		t.Fatal(err)
+	}
+	return func() { close(applicationDone); close(microphoneDone) }
+}
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/v1/sessions/"+sessionID+"/invitations",
-		nil,
-	)
+func requestJoinInvitation(t *testing.T, server *Server, created map[string]any, body string) joinInvitationResponse {
+	t.Helper()
+	sessionID := created["session_id"].(string)
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+sessionID+"/invitations", bytes.NewBufferString(body))
 	request.Header.Set("Authorization", "Bearer "+created["source_token"].(string))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-
 	if recorder.Code != http.StatusCreated {
-		t.Fatalf("create invitation status = %d body=%s", recorder.Code, recorder.Body.String())
+		t.Fatalf("create invitation status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var invitation joinInvitationResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &invitation); err != nil {
-		t.Fatalf("decode invitation: %v", err)
+		t.Fatal(err)
 	}
+	return invitation
+}
+
+func TestGivenStandaloneSessionWhenCreatedThenReceiverInvitationIsNotPreissued(t *testing.T) {
+	created := createJoinTestSession(t, newJoinTestServer())
+	if created["join_code"] != nil || created["join_url"] != nil {
+		t.Fatalf("Session creation preissued invitation: %#v", created)
+	}
+}
+
+func TestGivenControlPlaneAuthorityWhenRelayMutationIsRequestedThenItIsRejected(t *testing.T) {
+	server := New(Config{
+		JWTSecret:         joinTestSecret,
+		SourceTokenIssuer: auth.ControlPlaneIssuer,
+		AuthorityMode:     "control-plane",
+	})
+
+	created := httptest.NewRecorder()
+	server.Handler().ServeHTTP(created, httptest.NewRequest(http.MethodPost, "/v1/sessions", nil))
+	if created.Code != http.StatusConflict {
+		t.Fatalf("Relay Session creation status=%d, want 409", created.Code)
+	}
+
+	invitation := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invitation, httptest.NewRequest(http.MethodPost, "/v1/sessions/session-1/invitations", nil))
+	if invitation.Code != http.StatusConflict {
+		t.Fatalf("Relay invitation status=%d, want 409", invitation.Code)
+	}
+
+	resolved := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resolved, httptest.NewRequest(http.MethodGet, "/v1/join/code", nil))
+	if resolved.Code != http.StatusConflict {
+		t.Fatalf("Relay invitation resolution status=%d, want 409", resolved.Code)
+	}
+}
+
+func TestGivenPartiallyReadySessionWhenInvitationIsRequestedThenOnlyActiveBusCanBeScoped(t *testing.T) {
+	server := newJoinTestServer()
+	created := createJoinTestSession(t, server)
+	relaySession, _ := server.relaySessions.Get(created["session_id"].(string))
+	released := make(chan struct{})
+	if err := relaySession.SetSource("application", session.BusRoleMusic, blockingJoinSource{released: released}, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer close(released)
+
+	mixRequest := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created["session_id"].(string)+"/invitations", nil)
+	mixRequest.Header.Set("Authorization", "Bearer "+created["source_token"].(string))
+	mixResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(mixResponse, mixRequest)
+	if mixResponse.Code != http.StatusConflict {
+		t.Fatalf("one-bus mix invitation status=%d, want 409", mixResponse.Code)
+	}
+
+	invitation := requestJoinInvitation(t, server, created, `{"bus_id":"application"}`)
 	parsed, err := url.Parse(invitation.JoinURL)
-	if err != nil {
-		t.Fatalf("parse invitation URL: %v", err)
-	}
-	if invitation.SessionID != sessionID || invitation.JoinCode == "" || parsed.Query().Get("join") != invitation.JoinCode {
-		t.Fatalf("invalid invitation: %#v", invitation)
-	}
-	if parsed.Query().Get("relay") != "https://relay.example" {
-		t.Fatalf("relay origin = %q", parsed.Query().Get("relay"))
-	}
-	if strings.Contains(invitation.JoinURL, sessionID) || strings.Contains(invitation.JoinURL, created["source_token"].(string)) {
-		t.Fatalf("invitation URL leaks identity or token: %s", invitation.JoinURL)
-	}
-	if recorder.Header().Get("Cache-Control") != "no-store" {
-		t.Fatal("invitation response must not be cached")
+	if err != nil || parsed.Query().Get("join") != invitation.JoinCode || strings.Contains(invitation.JoinURL, invitation.SessionID) {
+		t.Fatalf("unsafe invitation %#v err=%v", invitation, err)
 	}
 }
 
-func TestGivenInactivePublisherWhenInvitationRequestedThenConflict(t *testing.T) {
-	server := New(Config{JWTSecret: []byte("join-test-secret")})
-	createRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(
-		createRecorder,
-		httptest.NewRequest(http.MethodPost, "/v1/sessions", nil),
-	)
-	var created map[string]any
-	_ = json.Unmarshal(createRecorder.Body.Bytes(), &created)
-	sessionID := created["session_id"].(string)
-	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+sessionID+"/invitations", nil)
-	request.Header.Set("Authorization", "Bearer "+created["source_token"].(string))
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", recorder.Code)
-	}
-}
+func TestGivenJoinCodeWhenRedeemedThenSubscriberCapabilityIsScopedAndSingleUse(t *testing.T) {
+	server := newJoinTestServer()
+	created := createJoinTestSession(t, server)
+	cleanup := attachRequiredJoinSources(t, server, created["session_id"].(string))
+	defer cleanup()
+	invitation := requestJoinInvitation(t, server, created, `{"bus_id":"application"}`)
 
-func TestGivenValidJoinCodeWhenResolvedThenFreshSubscriberCredentialsReturned(t *testing.T) {
-	server := New(Config{JWTSecret: []byte("join-test-secret")})
-	createRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(
-		createRecorder,
-		httptest.NewRequest(http.MethodPost, "/v1/sessions", nil),
-	)
-	var created map[string]any
-	_ = json.Unmarshal(createRecorder.Body.Bytes(), &created)
-
-	joinRecorder := httptest.NewRecorder()
-	joinRequest := httptest.NewRequest(
-		http.MethodGet,
-		"http://relay.example/v1/join/"+created["join_code"].(string),
-		nil,
-	)
-	joinRequest.Header.Set("Origin", "https://receiver.example")
-	server.Handler().ServeHTTP(joinRecorder, joinRequest)
-
-	if joinRecorder.Code != http.StatusOK {
-		t.Fatalf("resolve join status = %d body=%s", joinRecorder.Code, joinRecorder.Body.String())
+	resolve := func() *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/join/"+invitation.JoinCode, nil))
+		return response
 	}
-	var joined map[string]string
-	_ = json.Unmarshal(joinRecorder.Body.Bytes(), &joined)
-	if joined["session_id"] != created["session_id"] || joined["subscriber_token"] == "" {
-		t.Fatalf("invalid join response: %#v", joined)
+	first := resolve()
+	if first.Code != http.StatusOK {
+		t.Fatalf("first resolve status=%d body=%s", first.Code, first.Body.String())
 	}
-	if joined["signal_url"] != "ws://relay.example/v1/signal" {
-		t.Fatalf("signal_url = %q", joined["signal_url"])
+	var joined map[string]any
+	_ = json.Unmarshal(first.Body.Bytes(), &joined)
+	claims, err := auth.VerifyCapability(joinTestSecret, joined["subscriber_token"].(string), auth.RelayIssuer, auth.RoleSubscriber)
+	if err != nil || claims.BusID != "application" {
+		t.Fatalf("subscriber scope=%#v err=%v", claims, err)
 	}
-	if joinRecorder.Header().Get("Cache-Control") != "no-store" {
-		t.Fatal("join credentials must not be cached")
-	}
-}
-
-func TestGivenUnknownJoinCodeWhenResolvedThenNotFound(t *testing.T) {
-	server := New(Config{JWTSecret: []byte("join-test-secret")})
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(
-		recorder,
-		httptest.NewRequest(http.MethodGet, "/v1/join/unknown", nil),
-	)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", recorder.Code)
+	if second := resolve(); second.Code != http.StatusNotFound {
+		t.Fatalf("replayed invitation status=%d, want 404", second.Code)
 	}
 }

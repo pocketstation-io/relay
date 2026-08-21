@@ -115,7 +115,7 @@ func (s *signalPeer) cleanup() {
 	}
 	if s.room != nil {
 		switch s.role {
-		case auth.RoleSubscriber, auth.RoleListener:
+		case auth.RoleSubscriber:
 			if s.slotReserved.Swap(false) {
 				s.room.ReleaseSlot()
 			}
@@ -123,20 +123,10 @@ func (s *signalPeer) cleanup() {
 				s.room.RemoveSubscription(s.id)
 				s.srv.Metrics.ListenerCount.Add(-1)
 				s.srv.broadcastSessionState(s.room)
-				if s.srv.callbackClient != nil {
-					s.srv.dispatchCallback(func() {
-						s.srv.callbackClient.PushSubscriberLeave(s.room.ID)
-					})
-				}
 			} else {
 				s.room.RemoveSubscription(s.id)
 			}
 		case auth.RoleSource:
-			if s.srv.callbackClient != nil {
-				s.srv.dispatchCallback(func() {
-					s.srv.callbackClient.PushSourceActive(s.room.ID, false)
-				})
-			}
 			s.srv.broadcastSessionState(s.room)
 		}
 		s.srv.webhookDispatcher.Send(webhook.Event{

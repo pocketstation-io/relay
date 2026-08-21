@@ -1,527 +1,225 @@
-# PocketStation Relay signaling contract
+# Relay signaling contract
 
-This document defines the public control contract between a Relay client and
-PocketStation Relay. It covers Session creation, browser invitations, WebSocket
-signaling, named `AudioBus` publication, WHIP/WHEP signaling, authentication,
-errors, and compatibility behavior.
+This document defines how a publisher or subscriber joins one PocketStation
+`RelaySession`. It describes transport signaling only. Capture, graph
+execution, recording, models, and durable Session ownership are outside Relay.
 
-The contract is intentionally smaller than the implementation. Internal Go
-types, package paths, and transport workers may change without changing this
-wire API.
+## Contract profile
 
-## The model in one minute
+| Property | Value |
+|---|---|
+| WebSocket endpoint | `/v1/signal` |
+| Ingest endpoint | `POST /v1/sessions/{id}/whip` |
+| Egress endpoint | `POST /v1/sessions/{id}/whep` |
+| Media | Opus over WebRTC/SRTP |
+| Session term | `RelaySession` |
+| Named media lane | `AudioBus` |
+| Receiver attachment | `BusSubscription` |
+| Capability algorithm | HS256 only |
+| Capability audience | `pocketstation-relay` |
+| Capability type | `pks-relay-capability+jwt` |
 
-```text
-create RelaySession
-  → receive source and subscriber credentials
-  → publisher attaches one or more named AudioBuses
-  → subscriber selects one bus or the intentional mix
-  → WebRTC carries audio; signaling carries lifecycle and control
-```
+All JSON messages have a finite size. Unknown message types, invalid state
+transitions, excess capacity, and out-of-scope buses fail explicitly.
 
-The stable identity is the `session_id` plus a named `bus_id`. SSRCs, ICE
-candidates, PeerConnections, and individual source attachments are transient.
+## Capability authority
 
-## Origins and transports
+In `control-plane` mode, Relay accepts capabilities issued by
+`pocketstation-control-plane` and signed with `POCKETSTATION_JWT_SECRET`.
+Relay's local Session and invitation endpoints return `409
+control_plane_authority_required`.
 
-Examples use `relay.example.com` as the Relay origin.
+In `standalone` mode, Relay accepts capabilities issued by
+`pocketstation-relay`. Source and subscriber credentials use distinct configured
+secrets.
 
-| Purpose | Transport | Endpoint |
-|---|---|---|
-| Create Session | HTTPS + JSON | `POST /v1/sessions` |
-| Create invitation | HTTPS + JSON | `POST /v1/sessions/{id}/invitations` |
-| Resolve invitation | HTTPS + JSON | `GET /v1/join/{code}` |
-| PocketStation signaling | WebSocket + JSON text frames | `wss://relay.example.com/v1/signal` |
-| WebRTC ingest | WHIP over HTTPS | `POST /v1/sessions/{id}/whip` |
-| WebRTC egress | WHEP-style HTTPS | `POST /v1/sessions/{id}/whep` |
-| Trickle ICE | HTTPS SDP fragment | `PATCH /v1/connections/{connection_id}` |
-| Close HTTP-signaled peer | HTTPS | `DELETE /v1/connections/{connection_id}` |
+Every capability requires:
 
-WebSocket credentials are carried inside the first `PUBLISH` or `SUBSCRIBE`
-message. They are not query parameters. WHIP/WHEP credentials use
-`Authorization: Bearer <token>`.
+- an exact HS256 algorithm;
+- `typ: pks-relay-capability+jwt`;
+- the configured issuer;
+- `aud: pocketstation-relay`;
+- an exact role-specific subject;
+- `jti`, `iat`, `nbf`, and `exp`;
+- one `session_id`;
+- a source `bus_ids` set or one subscriber `bus_id`, never both.
 
-## Create a RelaySession
+## Publisher handshake
 
-```http
-POST /v1/sessions HTTP/1.1
-Host: relay.example.com
-```
-
-Successful response:
-
-```json
-{
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "source_token": "<JWT>",
-  "subscriber_token": "<JWT>",
-  "join_code": "<opaque-value>",
-  "join_url": "https://receiver.example.com/?join=<opaque-value>&relay=https%3A%2F%2Frelay.example.com",
-  "ice_servers": []
-}
-```
-
-Clients must treat `session_id`, `join_code`, tokens, and URLs as opaque. The
-current server generates UUID-shaped identifiers, but their internal format is
-not a client contract.
-
-`ice_servers` is present only when the Relay is configured to advertise ICE
-servers. Credentials and invitation responses must not be cached or logged.
-
-For compatibility, current responses also include `room_id`, `listener_token`,
-and `qr_url`. New clients use the Session/subscriber names.
-
-### Create an invitation after publication starts
-
-```http
-POST /v1/sessions/{session_id}/invitations HTTP/1.1
-Authorization: Bearer <source_token>
-```
-
-The source credential must target the path Session, and that Session must have
-an active source. Success is `201 Created`:
-
-```json
-{
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "join_code": "<opaque-value>",
-  "join_url": "https://receiver.example.com/?join=<opaque-value>&relay=https%3A%2F%2Frelay.example.com"
-}
-```
-
-Expected failures include `403` for invalid authority, `404` for an unknown
-Session, and `409` while the source is not active.
-
-### Resolve an invitation
-
-```http
-GET /v1/join/{join_code} HTTP/1.1
-```
-
-Success returns a short-lived subscriber credential and the canonical signal
-URL:
-
-```json
-{
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "subscriber_token": "<JWT>",
-  "signal_url": "wss://relay.example.com/v1/signal",
-  "ice_servers": []
-}
-```
-
-Invitation responses use `Cache-Control: no-store`. Expired, unknown, or
-orphaned invitations return `404`.
-
-## Credentials and authority
-
-Relay credentials are HS256 JWTs issued by the Relay or its trusted control
-plane. The effective claims are:
-
-```json
-{
-  "session_id": "<RelaySession>",
-  "bus_id": "<optional AudioBus scope>",
-  "role": "source | subscriber",
-  "iat": 0,
-  "exp": 0
-}
-```
-
-Rules:
-
-- `source` may publish and create an invitation for its Session;
-- `subscriber` may receive;
-- an optional `bus_id` narrows the credential to one bus;
-- the token's Session and bus scope are authoritative;
-- expired, malformed, or wrongly scoped credentials fail closed.
-
-`room_id` and role `listener` are accepted compatibility aliases. New issuers
-and clients use `session_id` and `subscriber`.
-
-## WebSocket framing and lifecycle
-
-- WebSocket protocol: RFC 6455.
-- Endpoint: `/v1/signal`.
-- Application messages: one JSON object per text frame.
-- Maximum inbound message size: 64 KiB.
-- Server ping interval: 30 seconds.
-- Read timeout without traffic or pong: 90 seconds.
-- Maximum queued ICE candidates before a remote description: 64.
-- Unknown message types receive an `ERROR` with code `unknown_type`.
-
-The first application message must establish the role:
-
-```text
-CONNECTED
-  ├── PUBLISH   → publishing peer
-  └── SUBSCRIBE → subscribing peer
-
-publishing/subscribing peer
-  ├── ICE
-  ├── SDP_ANSWER when Relay offered
-  ├── role-specific control messages
-  └── LEAVE or socket close → teardown
-```
-
-Sending `PUBLISH` or `SUBSCRIBE` twice on one connection fails with
-`already_joined`.
-
-## JSON envelopes
-
-Client to Relay:
+The first WebSocket message is `PUBLISH`:
 
 ```json
 {
   "type": "PUBLISH",
-  "session_id": "<optional compatibility/fallback identity>",
-  "graph_id": "<optional graph label>",
-  "bus_id": "<single-bus selection>",
-  "publish_buses": [
-    {"stream_id": "application-stream", "bus_id": "application"}
-  ],
-  "token": "<JWT>",
-  "sdp_offer": "<optional SDP>",
-  "sdp_answer": "<optional SDP>",
-  "candidate": "<optional ICE candidate>",
-  "sframe_key": "<optional opaque base64>",
-  "latency_report": null,
-  "public": false
-}
-```
-
-Relay to client:
-
-```json
-{
-  "type": "SESSION_STATE",
-  "session_id": "<RelaySession>",
-  "bus_id": "<optional AudioBus>",
-  "sdp_offer": "<optional SDP>",
-  "sdp_answer": "<optional SDP>",
-  "candidate": "<optional ICE candidate>",
-  "source_active": true,
-  "subscription_count": 1,
-  "codec": "opus",
-  "code": "<optional stable error code>",
-  "message": "<optional diagnostic>",
-  "sframe_key": "<optional opaque base64>",
-  "codec_hint": null,
-  "use_turn": false
-}
-```
-
-Fields not relevant to a message type are omitted. Clients must branch on
-`type`, not on field presence.
-
-## Publish audio
-
-### Single bus
-
-```json
-{
-  "type": "PUBLISH",
-  "token": "<source_token>",
+  "token": "<source capability>",
   "bus_id": "application",
-  "sdp_offer": "<offer>"
+  "sdp_offer": "v=0..."
 }
 ```
 
-Bus selection order is message `bus_id`, token `bus_id`, then the legacy
-default `voice`. A message bus cannot escape a bus-scoped credential.
-
-### Multiple independent buses
-
-One publisher PeerConnection can attach up to 16 audio streams:
+For a multi-track publisher, replace `bus_id` with `publish_buses`:
 
 ```json
 {
   "type": "PUBLISH",
-  "token": "<source_token>",
+  "token": "<source capability>",
   "publish_buses": [
-    {"stream_id": "app-stream", "bus_id": "application"},
-    {"stream_id": "mic-stream", "bus_id": "microphone"}
+    {"stream_id":"application","bus_id":"application"},
+    {"stream_id":"microphone","bus_id":"microphone"}
   ],
-  "sdp_offer": "<offer containing both stream IDs>"
+  "sdp_offer": "v=0..."
 }
 ```
 
-The declaration is transactional and finite:
+`bus_id` and `publish_buses` are mutually exclusive. A multi-bus declaration
+contains 1–16 bindings. Every stream ID and bus ID is finite, portable, unique,
+and inside the source capability.
 
-- `publish_buses` contains 1–16 bindings;
-- `stream_id` and `bus_id` are each 1–64 ASCII characters from
-  `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`;
-- stream IDs are unique;
-- bus IDs are unique;
-- every arriving WebRTC track must use a declared stream ID;
-- each declared stream may attach once;
-- `bus_id` and `publish_buses` cannot appear together;
-- a bus-scoped source token can publish only that bus.
+Relay answers with `SDP_ANSWER`, then both peers exchange `ICE` messages:
 
-This mapping prevents two tracks from aliasing or replacing each other inside
-one publisher lifecycle.
+```json
+{"type":"SDP_ANSWER","sdp_answer":"v=0..."}
+```
 
-## Subscribe to audio
+```json
+{"type":"ICE","candidate":"candidate:..."}
+```
+
+The `stream_id` in `publish_buses` must match the WebRTC stream ID received for
+that track. An undeclared or repeated track is rejected.
+
+## Subscriber handshake
+
+The first message is `SUBSCRIBE`:
 
 ```json
 {
   "type": "SUBSCRIBE",
-  "token": "<subscriber_token>",
+  "token": "<subscriber capability>",
   "bus_id": "application",
-  "sdp_offer": "<offer>"
+  "sdp_offer": "v=0..."
 }
 ```
 
-Selection order is message `bus_id`, token `bus_id`, then `mix`.
-`publish_buses` is invalid for a subscriber. Subscriber capacity is reserved
-during the handshake and becomes an active `BusSubscription` only after the
-PeerConnection reaches `connected`.
+If `bus_id` is omitted, Relay uses the exact bus in the capability. Supplying a
+different bus fails. A `mix` capability receives the Session's declared mixed
+output.
 
-## SDP and ICE exchange
+Relay registers a `BusSubscription` only after the WebRTC connection is
+connected. Pending handshakes do not count as active subscriptions.
 
-Clients may offer or ask Relay to offer.
+## WHIP and WHEP
 
-### Client offers
+WHIP and WHEP use the same capability and bus-scope rules as WebSocket
+signaling.
 
-```text
-client  → PUBLISH or SUBSCRIBE with sdp_offer
-relay   → SDP_ANSWER
-both    ↔ ICE
-relay   → SESSION_STATE
+```http
+POST /v1/sessions/{session_id}/whip?bus=application
+Authorization: Bearer <source capability>
+Content-Type: application/sdp
 ```
 
-### Relay offers
-
-```text
-client  → PUBLISH or SUBSCRIBE without sdp_offer
-relay   → SDP_OFFER
-client  → SDP_ANSWER
-both    ↔ ICE
-relay   → SESSION_STATE
+```http
+POST /v1/sessions/{session_id}/whep?bus=application
+Authorization: Bearer <subscriber capability>
+Content-Type: application/sdp
 ```
 
-ICE messages carry the candidate string:
+The response is `201 Created`, contains the SDP answer, and returns a
+connection resource in `Location`. Use `PATCH` for trickle ICE and `DELETE` for
+bounded teardown.
 
-```json
-{"type": "ICE", "candidate": "candidate:..."}
-```
+The Session ID in the path must equal the capability Session ID. The selected
+bus must be inside the capability.
 
-Candidates received before the remote description are held in the finite
-pending-candidate buffer.
+## Session state messages
 
-## Lifecycle and control messages
-
-### `SESSION_STATE`
-
-Sent after join and whenever source/subscriber state changes:
+Relay may send a transport-facing `SESSION_STATE` message:
 
 ```json
 {
   "type": "SESSION_STATE",
-  "session_id": "<RelaySession>",
+  "session_id": "16d2491c-86ef-4a86-9ba7-af1d2d246244",
   "source_active": true,
   "subscription_count": 2,
   "codec": "opus"
 }
 ```
 
-Clients should accept deprecated `ROOM_STATE` from older relays. The current
-Relay sends `SESSION_STATE`.
+This message is a convenience observation for connected signaling peers. It is
+not the authoritative control-plane record. The authoritative record is the
+revisioned full-state callback described below.
 
-### `LEAVE`
+## Control-plane synchronization
 
-```json
-{"type": "LEAVE"}
+For every source attachment, source detachment, subscription attachment, or
+subscription removal, Relay advances one revision and queues a complete state
+snapshot:
+
+```http
+PUT /v1/internal/sessions/{session_id}/relay-state
+X-PocketStation-Internal-Secret: <shared secret>
+Content-Type: application/json
 ```
-
-Requests graceful teardown. Closing the WebSocket also tears down the peer and
-releases its source/subscription ownership.
-
-### `KEY_EXCHANGE`
-
-A source may forward opaque SFrame key material:
-
-```json
-{"type": "KEY_EXCHANGE", "sframe_key": "<base64>"}
-```
-
-Relay does not decrypt the value. It retains the current opaque string in the
-RelaySession, forwards it to active subscribers, and sends it to later
-subscribers. Subscriber-originated key exchange fails with `role_mismatch`.
-Applications remain responsible for key generation, rotation, recipient trust,
-and media encryption semantics.
-
-### `LATENCY_REPORT`
-
-After joining, either role may report measured segments:
 
 ```json
 {
-  "type": "LATENCY_REPORT",
-  "latency_report": {
-    "session_id": "<RelaySession>",
-    "capture_ms": 1.2,
-    "encode_ms": 0.8,
-    "relay_rtt_ms": 12.4,
-    "jitter_buffer_ms": 20.0,
-    "decode_ms": 0.7,
-    "packet_loss_pct": 0.2,
-    "clock_drift_ppm": 3.1
-  }
+  "contract_version": 1,
+  "session_id": "16d2491c-86ef-4a86-9ba7-af1d2d246244",
+  "relay_epoch": "f78124e8-4be8-451b-8b44-3238faf7e802",
+  "revision": 7,
+  "observed_at": "2026-08-21T17:45:00Z",
+  "buses": [
+    {"bus_id":"application","role":"application","source_active":true,"source_generation":2},
+    {"bus_id":"microphone","role":"microphone","source_active":true,"source_generation":1}
+  ],
+  "subscriptions": [
+    {"subscriber_id":"af37ddaa-...","bus_id":"application"}
+  ]
 }
 ```
 
-Values are observations supplied by the client. Relay does not reinterpret
-them as independently measured end-to-end latency.
+The callback is a complete replacement, not a delta. Delivery uses a bounded
+nonblocking mailbox and a finite HTTP deadline. A periodic pass resends the
+latest unchanged revision. This makes lost delivery recoverable and duplicate
+delivery idempotent.
 
-### `CODEC_HINT`
-
-Relay may send an advisory encoder profile derived from receiver feedback:
-
-```json
-{
-  "type": "CODEC_HINT",
-  "codec_hint": {
-    "bitrate_kbps": 64,
-    "complexity": 8,
-    "fec": true,
-    "dtx": false,
-    "frame_ms": 20
-  }
-}
-```
-
-No acknowledgement is required. Publishers apply supported fields
-best-effort; unsupported hints may be ignored.
-
-### `ICE_RESTART`
-
-Relay may ask the source to renegotiate a degraded ICE path:
-
-```json
-{"type": "ICE_RESTART", "use_turn": true}
-```
-
-`use_turn` reports whether Relay is configured to offer TURN for the next
-negotiation. The message is a request, not proof that reconnection succeeded.
+`relay_epoch` changes when the Relay process restarts. Revisions are monotonic
+within an epoch. The control plane remembers retired epochs so a delayed
+snapshot from an older process cannot regress current state.
 
 ## Errors
 
-WebSocket protocol failures use:
+WebSocket errors use:
 
 ```json
-{
-  "type": "ERROR",
-  "code": "bad_token",
-  "message": "diagnostic text"
-}
+{"type":"ERROR","code":"bad_token","message":"..."}
 ```
 
-Clients branch on `code`. `message` is diagnostic text and is not stable.
+Stable categories include:
 
-| Code | Meaning |
-|---|---|
-| `bad_token` | Credential is invalid, expired, or wrongly scoped |
-| `already_joined` | This socket already owns a peer lifecycle |
-| `role_mismatch` | Credential role cannot perform the operation |
-| `pc_error` | PeerConnection creation failed |
-| `sdp_error` | SDP state or content is invalid |
-| `ice_error` | ICE candidate/state handling failed |
-| `track_error` | Track creation, mapping, or attachment failed |
-| `listener_limit_exceeded` | RelaySession subscriber capacity is exhausted |
-| `room_limit_exceeded` | Relay process Session capacity is exhausted; legacy code name |
-| `not_joined` | Operation requires an established Session role |
-| `bad_request` | Message fields violate the contract |
-| `unknown_type` | Message `type` is unsupported |
+- `bad_token` — invalid issuer, audience, type, signature, time, role, Session,
+  or bus scope;
+- `role_mismatch` — a source token used to subscribe or subscriber token used
+  to publish;
+- `bad_request` — malformed or ambiguous declaration;
+- `room_limit_exceeded` — retained wire code for RelaySession admission until a
+  protocol-major revision changes it;
+- `listener_limit_exceeded` — retained wire code for subscription admission
+  until a protocol-major revision changes it;
+- `sdp_error` and `ice_error` — negotiation failures.
 
-An `ERROR` does not imply that a client may retry blindly. Retry policy belongs
-to the adapter and must respect the code, operation stage, deadline, and
-credential lifetime.
+The retained error strings are wire compatibility values, not public type or
+documentation vocabulary.
 
-## WHIP and WHEP
+## Lifecycle
 
-WHIP ingest follows RFC 9725:
+`LEAVE` requests clean teardown. Connection loss also removes the attachment.
+Source reconnect retains `AudioBus` identity and advances
+`source_generation`. Relay shutdown stops control synchronization, closes
+signaling peers and WebRTC connections, and waits within the configured grace
+period.
 
-```http
-POST /v1/sessions/{session_id}/whip?bus=application HTTP/1.1
-Authorization: Bearer <source_token>
-Content-Type: application/sdp
-
-<SDP offer>
-```
-
-WHEP-style egress uses the corresponding subscriber credential:
-
-```http
-POST /v1/sessions/{session_id}/whep?bus=application HTTP/1.1
-Authorization: Bearer <subscriber_token>
-Content-Type: application/sdp
-
-<SDP offer>
-```
-
-Success is `201 Created`, `Content-Type: application/sdp`, an SDP answer body,
-and a `Location: /v1/connections/{connection_id}` resource. Configured ICE
-servers are returned as `Link` headers.
-
-Use the returned resource for trickle ICE and teardown:
-
-```http
-PATCH /v1/connections/{connection_id}
-Content-Type: application/trickle-ice-sdpfrag
-
-DELETE /v1/connections/{connection_id}
-```
-
-WHIP/WHEP exposes a narrower interoperable path. PocketStation-specific
-multi-bus declaration and control messages use `/v1/signal`.
-
-## Security and operational invariants
-
-- Run WebSocket and HTTP signaling over TLS outside local development.
-- Never place source/subscriber tokens or SFrame keys in URLs or logs.
-- Configure `ALLOWED_ORIGINS` for browser deployments.
-- Treat `join_code` as a bearer secret until it expires.
-- Apply Session, subscriber, bus, and concurrent-handshake limits before media
-  allocation.
-- Keep retry loops finite and inside a caller-owned startup deadline.
-- Do not infer delivery from signaling success; readiness requires an active
-  WebRTC connection and registered source/subscription.
-- Do not infer complete PocketStation `FrameLineage` from bus identity. Remote
-  per-frame lineage requires its own versioned metadata contract.
-
-## Compatibility policy
-
-Primary vocabulary is:
-
-```text
-RelaySession · session_id · subscriber · subscriber_token · SESSION_STATE
-```
-
-The following aliases remain for existing clients:
-
-```text
-/v1/rooms · room_id · listener · listener_token · ROOM_STATE
-```
-
-New code must not introduce additional room/listener vocabulary. Removing an
-accepted alias or changing field meaning requires a new compatibility revision,
-fixtures for old and new clients, and an explicit migration path.
-
-## Implementation conformance
-
-The authoritative Go projections are:
-
-| Contract concern | Implementation |
-|---|---|
-| Message envelopes | `internal/signaling/messages.go` |
-| Stable error codes | `internal/signaling/errors.go` |
-| Credential claims | `internal/auth/token.go` |
-| WebSocket lifecycle | `internal/server/signal_peer.go` |
-| Join and role validation | `internal/server/peer_join.go` |
-| Multi-bus mapping | `internal/server/publish_buses.go` |
-| Invitations | `internal/server/invitations.go` |
-| WHIP/WHEP resources | `internal/server/whip.go`, `internal/server/whip_resource.go` |
-
-Every protocol change must update these projections, this contract, positive
-and negative compatibility tests, and cross-language fixtures together.
+Relay callbacks and signaling messages are observations. They do not replace
+PocketStation Core lineage. Complete per-frame Core lineage over a remote
+transport requires an additional versioned metadata contract.

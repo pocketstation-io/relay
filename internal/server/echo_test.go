@@ -17,7 +17,7 @@ import (
 // it back alongside a recv_timestamp_ns that is >= send_timestamp_ns.
 func TestGivenEchoEndpointWhenSendTimestampThenReflected(t *testing.T) {
 	// Given
-	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
+	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
@@ -57,7 +57,7 @@ func TestGivenEchoEndpointWhenSendTimestampThenReflected(t *testing.T) {
 // the echo endpoint handles multiple round-trips in sequence without error.
 func TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected(t *testing.T) {
 	// Given
-	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
+	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
@@ -87,7 +87,7 @@ func TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected(t *testing.T) {
 // echo endpoint rejects plain HTTP requests (not WebSocket upgrades).
 func TestGivenEchoEndpointWhenHTTPNotWebSocketThenBadRequest(t *testing.T) {
 	// Given
-	srv := server.New(server.Config{JWTSecret: []byte("test-secret")})
+	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
 
 	// When — plain HTTP GET (no Upgrade header)
 	req := httptest.NewRequest(http.MethodGet, "/v1/echo", nil)

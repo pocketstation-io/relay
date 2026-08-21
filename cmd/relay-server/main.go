@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/notifications/webhook"
 	"github.com/pocketstation-io/relay/internal/server"
@@ -21,16 +22,40 @@ import (
 )
 
 func main() {
-	jwtSecretStr := os.Getenv("POCKETSTATION_JWT_SECRET")
-	if jwtSecretStr == "" {
-		slog.Warn("POCKETSTATION_JWT_SECRET not set, using insecure default — set this env var in production")
-		jwtSecretStr = "dev-secret-change-me"
+	jwtSecret := []byte(os.Getenv("POCKETSTATION_JWT_SECRET"))
+	if len(jwtSecret) < 32 {
+		slog.Error("POCKETSTATION_JWT_SECRET must contain at least 32 bytes")
+		os.Exit(1)
 	}
-	jwtSecret := []byte(jwtSecretStr)
+	authorityMode := getenv("RELAY_AUTHORITY_MODE", "control-plane")
+	if authorityMode != "control-plane" && authorityMode != "standalone" {
+		slog.Error("RELAY_AUTHORITY_MODE must be control-plane or standalone")
+		os.Exit(1)
+	}
+	subscriberSecret := []byte(os.Getenv("RELAY_INVITATION_SECRET"))
+	if authorityMode == "standalone" && len(subscriberSecret) < 32 {
+		slog.Error("RELAY_INVITATION_SECRET must contain at least 32 bytes in standalone authority mode")
+		os.Exit(1)
+	}
+	sourceIssuer := auth.ControlPlaneIssuer
+	if authorityMode == "standalone" {
+		sourceIssuer = auth.RelayIssuer
+	}
 
 	var cbClient *callback.Client
-	if apiURL := os.Getenv("RELAY_API_SERVER_URL"); apiURL != "" {
-		cbClient = callback.NewClient(apiURL)
+	apiURL := os.Getenv("RELAY_API_SERVER_URL")
+	if authorityMode == "control-plane" && apiURL == "" {
+		slog.Error("RELAY_API_SERVER_URL is required in control-plane authority mode")
+		os.Exit(1)
+	}
+	if apiURL != "" {
+		internalSecret := os.Getenv("POCKETSTATION_INTERNAL_SECRET")
+		var err error
+		cbClient, err = callback.NewClient(apiURL, internalSecret)
+		if err != nil {
+			slog.Error("invalid control-plane callback configuration", "error", err)
+			os.Exit(1)
+		}
 		slog.Info("relay callback client enabled", "api_server_url", apiURL)
 	}
 
@@ -47,23 +72,31 @@ func main() {
 	// the relay's TURN server. The relay's own Pion peers use ICEServers=nil
 	// (falls back to stun.l.google.com when NAT1To1IPs is unset, or no STUN at
 	// all when NAT1To1IPs is set) to avoid self-STUN via the embedded TURN.
-	clientICEServers, turnSrv := setupTURN(jwtSecret)
+	turnSecret := []byte(os.Getenv("TURN_SHARED_SECRET"))
+	if os.Getenv("TURN_PUBLIC_IP") != "" && len(turnSecret) < 32 {
+		slog.Error("TURN_SHARED_SECRET must contain at least 32 bytes when TURN is enabled")
+		os.Exit(1)
+	}
+	clientICEServers, turnSrv := setupTURN(turnSecret)
 	useTURN := len(clientICEServers) > 0
 
 	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)              // 0 → package default (30 min)
 	reconnectWindowSec := getenvInt("SOURCE_RECONNECT_WINDOW_SEC", 0) // 0 → package default (60 s)
 
 	cfg := server.Config{
-		JWTSecret:               jwtSecret,
-		MaxRooms:                getenvInt("RELAY_MAX_ROOMS", 0),
-		MaxSubscribersPerRoom:   getenvInt("RELAY_MAX_LISTENERS_PER_ROOM", 0),
-		MaxRoomsPerIPPerMinute:  getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
-		MaxConcurrentHandshakes: getenvInt("RELAY_MAX_CONCURRENT_HANDSHAKES", 0),
-		MaxConcurrentCallbacks:  getenvInt("RELAY_MAX_CONCURRENT_CALLBACKS", 0),
-		CallbackClient:          cbClient,
-		WebhookDispatcher:       whDispatcher,
-		ClientICEServers:        clientICEServers,
-		UseTURN:                 useTURN,
+		JWTSecret:                jwtSecret,
+		SubscriberJWTSecret:      subscriberSecret,
+		SourceTokenIssuer:        sourceIssuer,
+		AuthorityMode:            authorityMode,
+		MaxRooms:                 getenvInt("RELAY_MAX_ROOMS", 0),
+		MaxSubscribersPerRoom:    getenvInt("RELAY_MAX_SUBSCRIBERS_PER_SESSION", 0),
+		MaxRoomsPerIPPerMinute:   getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 0),
+		MaxConcurrentHandshakes:  getenvInt("RELAY_MAX_CONCURRENT_HANDSHAKES", 0),
+		CallbackClient:           cbClient,
+		WebhookDispatcher:        whDispatcher,
+		ClientICEServers:         clientICEServers,
+		UseTURN:                  useTURN,
+		ControlReconcileInterval: time.Duration(getenvInt("CONTROL_RECONCILE_INTERVAL_SEC", 5)) * time.Second,
 		RegistryConfig: session.RegistryConfig{
 			InactivityTimeout: time.Duration(roomExpiryMin) * time.Minute,
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,

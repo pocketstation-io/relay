@@ -12,7 +12,7 @@ import (
 	relayTurn "github.com/pocketstation-io/relay/internal/turn"
 )
 
-func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTurn.Server) {
+func setupTURN(turnSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTurn.Server) {
 	publicIPString := os.Getenv("TURN_PUBLIC_IP")
 	if publicIPString == "" {
 		slog.Info("TURN_PUBLIC_IP not set; relay running in STUN-only mode")
@@ -43,7 +43,7 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTur
 	var err error
 	relay, err = relayTurn.Start(relayTurn.ServerConfig{
 		PublicIP: publicIP,
-		Secret:   jwtSecret,
+		Secret:   turnSecret,
 		UDPPort:  udpPort,
 		TCPPort:  tcpPort,
 		TLSPort:  tlsPort,
@@ -55,7 +55,7 @@ func setupTURN(jwtSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTur
 	}
 
 	const credentialTTL = 2 * time.Hour
-	username, password := relayTurn.Credentials(jwtSecret, "relay", credentialTTL)
+	username, password := relayTurn.Credentials(turnSecret, "relay", credentialTTL)
 	iceServers = []webrtc.ICEServer{
 		{URLs: []string{"stun:" + net.JoinHostPort(publicIPString, strconv.Itoa(udpPort))}},
 		{

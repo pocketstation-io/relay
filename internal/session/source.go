@@ -70,7 +70,8 @@ func (relaySession *RelaySession) SetSource(
 			errorCounts,
 			&deadSubscriptions,
 		)
-	})
+	}, relaySession.notifyStateChange)
+	relaySession.notifyStateChange()
 	return nil
 }
 

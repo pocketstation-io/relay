@@ -246,6 +246,7 @@ func (relaySession *RelaySession) AddBusSubscription(
 		subscription: subscription,
 	}
 	relaySession.subscriptions.Store(&next)
+	relaySession.notifyStateChange()
 	return nil
 }
 
@@ -277,6 +278,9 @@ func (relaySession *RelaySession) RemoveSubscription(subscriberID string) {
 
 	for _, entry := range removed {
 		entry.subscription.StopForwarding()
+	}
+	if len(removed) > 0 {
+		relaySession.notifyStateChange()
 	}
 }
 

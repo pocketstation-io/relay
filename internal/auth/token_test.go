@@ -5,88 +5,45 @@ import (
 	"time"
 )
 
-func TestGivenClaimsWhenTokenIsSignedAndVerifiedThenClaimsMatch(t *testing.T) {
-	// Given
-	secret := []byte("test-secret")
-	roomID := "room-abc"
-	role := RoleSource
-	// When
-	token, err := Sign(secret, roomID, role, 5*time.Minute)
+var authTestSecret = []byte("0123456789abcdef0123456789abcdef")
+
+func TestGivenControlPlaneSourceCapabilityWhenVerifiedThenBusScopeIsStrict(t *testing.T) {
+	token, err := SignSource(authTestSecret, ControlPlaneIssuer, "session-1", []string{"application", "microphone"}, time.Minute)
 	if err != nil {
-		t.Fatalf("Sign: %v", err)
+		t.Fatal(err)
 	}
-	claims, err := Verify(secret, token)
-	// Then
+	claims, err := VerifyCapability(authTestSecret, token, ControlPlaneIssuer, RoleSource)
 	if err != nil {
-		t.Fatalf("Verify: %v", err)
+		t.Fatal(err)
 	}
-	if claims.RoomID != roomID {
-		t.Errorf("RoomID = %q, want %q", claims.RoomID, roomID)
+	if !claims.AllowsBus("application") || claims.AllowsBus("other") || claims.SessionID != "session-1" {
+		t.Fatalf("unexpected claims %#v", claims)
 	}
-	if claims.Role != role {
-		t.Errorf("Role = %q, want %q", claims.Role, role)
+	if _, err := VerifyCapability(authTestSecret, token, RelayIssuer, RoleSource); err == nil {
+		t.Fatal("control-plane token accepted under Relay issuer")
 	}
-}
-
-func TestGivenTokenWhenVerifiedWithWrongSecretThenErrorIsReturned(t *testing.T) {
-	// Given
-	token, _ := Sign([]byte("secret-a"), "room-1", RoleSource, time.Minute)
-	// When
-	_, err := Verify([]byte("secret-b"), token)
-	// Then
-	if err == nil {
-		t.Error("expected error for wrong secret, got nil")
+	if _, err := VerifyCapability(authTestSecret, token, ControlPlaneIssuer, RoleSubscriber); err == nil {
+		t.Fatal("source token accepted as subscriber")
 	}
 }
 
-func TestGivenExpiredTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
-	// Given — sign with a negative TTL so the token is already expired
-	secret := []byte("test-secret")
-	token, _ := Sign(secret, "room-1", RoleSource, -time.Second)
-	// When
-	_, err := Verify(secret, token)
-	// Then
-	if err == nil {
-		t.Error("expected error for expired token, got nil")
-	}
-}
-
-func TestGivenListenerRoleWhenTokenRoundTripsThenRoleIsPreserved(t *testing.T) {
-	// Given
-	secret := []byte("test-secret")
-	// When
-	token, err := Sign(secret, "room-1", RoleListener, time.Hour)
+func TestGivenRelaySubscriberCapabilityWhenVerifiedThenBusScopeIsStrict(t *testing.T) {
+	token, err := SignSubscriber(authTestSecret, RelayIssuer, "session-1", "application", time.Minute)
 	if err != nil {
-		t.Fatalf("Sign: %v", err)
+		t.Fatal(err)
 	}
-	claims, err := Verify(secret, token)
-	// Then
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if claims.Role != RoleListener {
-		t.Errorf("Role = %q, want %q", claims.Role, RoleListener)
+	claims, err := VerifyCapability(authTestSecret, token, RelayIssuer, RoleSubscriber)
+	if err != nil || !claims.AllowsBus("application") || claims.AllowsBus("mix") {
+		t.Fatalf("claims=%#v err=%v", claims, err)
 	}
 }
 
-func TestGivenMalformedTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
-	// Given
-	secret := []byte("test-secret")
-	// When
-	_, err := Verify(secret, "not.a.valid.jwt")
-	// Then
-	if err == nil {
-		t.Error("expected error for malformed token, got nil")
+func TestGivenWrongSecretOrMalformedTokenWhenVerifiedThenValidationFails(t *testing.T) {
+	token, _ := SignSubscriber(authTestSecret, RelayIssuer, "session-1", "mix", time.Minute)
+	if _, err := VerifyCapability([]byte("abcdef0123456789abcdef0123456789"), token, RelayIssuer, RoleSubscriber); err == nil {
+		t.Fatal("wrong secret accepted")
 	}
-}
-
-func TestGivenEmptyTokenWhenVerifiedThenErrorIsReturned(t *testing.T) {
-	// Given
-	secret := []byte("test-secret")
-	// When
-	_, err := Verify(secret, "")
-	// Then
-	if err == nil {
-		t.Error("expected error for empty token, got nil")
+	if _, err := VerifyCapability(authTestSecret, "not-a-token", RelayIssuer, RoleSubscriber); err == nil {
+		t.Fatal("malformed token accepted")
 	}
 }

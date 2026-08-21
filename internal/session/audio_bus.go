@@ -77,7 +77,12 @@ func newAudioBus(id BusID, role BusRole, graphID string, inactivityTimeout, reco
 // SetSource sets the audio source and starts the forward loop.
 // If a previous source is active (ICE restart), it is closed first.
 // deliver is called for each received RTP packet to write to subscribers.
-func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp.Packet, uint64)) {
+func (b *AudioBus) SetSource(
+	src SourceSession,
+	closer func(),
+	deliver func(*rtp.Packet, uint64),
+	onDetached func(),
+) {
 	newLoopDone := make(chan struct{})
 	generation := b.sourceGeneration.Add(1)
 
@@ -112,7 +117,7 @@ func (b *AudioBus) SetSource(src SourceSession, closer func(), deliver func(*rtp
 	// Seed the watchdog clock so a freshly-attached source is not reported as
 	// stalled before its first packet arrives.
 	b.lastRTPAtNanos.Store(time.Now().UnixNano())
-	go b.forwardLoop(src, generation, newLoopDone, deliver)
+	go b.forwardLoop(src, generation, newLoopDone, deliver, onDetached)
 }
 
 // SourceActive reports whether a source is currently attached to this bus.
@@ -230,6 +235,7 @@ func (b *AudioBus) forwardLoop(
 	generation uint64,
 	loopDone chan struct{},
 	deliver func(*rtp.Packet, uint64),
+	onDetached func(),
 ) {
 	defer close(loopDone)
 	defer func() {
@@ -240,6 +246,9 @@ func (b *AudioBus) forwardLoop(
 			b.sourceTimeline.Store(nil)
 		}
 		b.sourceMu.Unlock()
+		if onDetached != nil {
+			onDetached()
+		}
 
 		select {
 		case <-b.done:
@@ -281,3 +290,5 @@ func (b *AudioBus) forwardLoop(
 		})
 	}
 }
+
+func (b *AudioBus) SourceGeneration() uint64 { return b.sourceGeneration.Load() }

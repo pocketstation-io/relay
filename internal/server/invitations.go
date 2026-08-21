@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,8 +14,11 @@ import (
 
 const joinCodeTTL = 2 * time.Hour
 
+var errInvitationCapacity = errors.New("receiver invitation capacity reached")
+
 type joinInvite struct {
 	sessionID string
+	busID     string
 	expiresAt time.Time
 }
 
@@ -24,9 +29,13 @@ type joinInvitationResponse struct {
 }
 
 func (s *Server) createJoinInvitation(w http.ResponseWriter, r *http.Request) {
+	if s.authorityMode != "standalone" {
+		http.Error(w, `{"error":"control_plane_authority_required"}`, http.StatusConflict)
+		return
+	}
 	id := r.PathValue("id")
 	rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claims, err := auth.Verify(s.jwtSecret, rawToken)
+	claims, err := auth.VerifyCapability(s.jwtSecret, rawToken, s.sourceTokenIssuer, auth.RoleSource)
 	if err != nil || claims.EffectiveSessionID() != id || claims.Role != auth.RoleSource {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
@@ -36,11 +45,51 @@ func (s *Server) createJoinInvitation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"session_not_found"}`, http.StatusNotFound)
 		return
 	}
-	if !relaySession.SourceActive() {
+	busID := "mix"
+	if r.ContentLength != 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		var request struct {
+			BusID string `json:"bus_id"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			http.Error(w, `{"error":"bad_request"}`, http.StatusBadRequest)
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			http.Error(w, `{"error":"bad_request"}`, http.StatusBadRequest)
+			return
+		}
+		if request.BusID != "" {
+			busID = request.BusID
+		}
+	}
+	if busID != "mix" && !claims.AllowsBus(busID) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	ready := true
+	if busID == "mix" {
+		for _, requiredBus := range claims.BusIDs {
+			if !relaySession.BusSourceActive(requiredBus) {
+				ready = false
+				break
+			}
+		}
+	} else {
+		ready = relaySession.BusSourceActive(busID)
+	}
+	if !ready {
 		http.Error(w, `{"error":"source_not_active"}`, http.StatusConflict)
 		return
 	}
-	joinCode, joinURL := s.issueJoinInvitation(r, id)
+	joinCode, joinURL, err := s.issueJoinInvitation(r, id, busID)
+	if errors.Is(err, errInvitationCapacity) {
+		http.Error(w, `{"error":"invitation_capacity_reached"}`, http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -51,24 +100,35 @@ func (s *Server) createJoinInvitation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) issueJoinInvitation(r *http.Request, sessionID string) (string, string) {
-	joinCode := newID()
+func (s *Server) issueJoinInvitation(r *http.Request, sessionID, busID string) (string, string, error) {
+	now := time.Now()
 	s.joinMu.Lock()
+	for code, invitation := range s.joinInvites {
+		if now.After(invitation.expiresAt) {
+			delete(s.joinInvites, code)
+		}
+	}
+	if len(s.joinInvites) >= s.maxInvitations {
+		s.joinMu.Unlock()
+		return "", "", errInvitationCapacity
+	}
+	joinCode := newID()
 	s.joinInvites[joinCode] = joinInvite{
 		sessionID: sessionID,
-		expiresAt: time.Now().Add(joinCodeTTL),
+		busID:     busID,
+		expiresAt: now.Add(joinCodeTTL),
 	}
 	s.joinMu.Unlock()
 
 	receiverURL, err := url.Parse(s.publicReceiverURL)
 	if err != nil {
-		return joinCode, s.publicReceiverURL + "?join=" + url.QueryEscape(joinCode)
+		return joinCode, s.publicReceiverURL + "?join=" + url.QueryEscape(joinCode), nil
 	}
 	query := receiverURL.Query()
 	query.Set("join", joinCode)
 	query.Set("relay", s.publicRelayHTTPURL(r))
 	receiverURL.RawQuery = query.Encode()
-	return joinCode, receiverURL.String()
+	return joinCode, receiverURL.String(), nil
 }
 
 func (s *Server) publicRelayHTTPURL(r *http.Request) string {
@@ -83,6 +143,10 @@ func (s *Server) publicRelayHTTPURL(r *http.Request) string {
 }
 
 func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
+	if s.authorityMode != "standalone" {
+		http.Error(w, `{"error":"control_plane_authority_required"}`, http.StatusConflict)
+		return
+	}
 	setJoinCORS(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
@@ -95,6 +159,9 @@ func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
 		delete(s.joinInvites, code)
 		found = false
 	}
+	if found {
+		delete(s.joinInvites, code)
+	}
 	s.joinMu.Unlock()
 	if !found {
 		http.Error(w, `{"error":"join_not_found"}`, http.StatusNotFound)
@@ -105,7 +172,7 @@ func (s *Server) resolveJoinCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.Sign(s.jwtSecret, invite.sessionID, auth.RoleSubscriber, joinCodeTTL)
+	token, err := auth.SignSubscriber(s.subscriberJWTSecret, auth.RelayIssuer, invite.sessionID, invite.busID, joinCodeTTL)
 	if err != nil {
 		http.Error(w, `{"error":"token_error"}`, http.StatusInternalServerError)
 		return

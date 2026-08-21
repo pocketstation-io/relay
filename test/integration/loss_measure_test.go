@@ -42,7 +42,7 @@ func TestGivenSourceSendsKnownCountWhenForwardedThenListenerLossIsLow(t *testing
 
 	roomPayload := createRoom(t, ts)
 	sourceToken := roomPayload["source_token"]
-	listenerToken := roomPayload["listener_token"]
+	listenerToken := roomPayload["subscriber_token"]
 
 	// Publisher.
 	pubConn := dialSignal(t, ts)

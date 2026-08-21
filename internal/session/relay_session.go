@@ -60,7 +60,10 @@ type RelaySession struct {
 	keyMu      sync.RWMutex
 	currentKey string
 
-	latency *latencyStore
+	latency      *latencyStore
+	controlState controlStateOwner
+
+	stateObserver atomic.Pointer[stateObserver]
 
 	// maxSubscriptions: 0 = unlimited.
 	maxSubscriptions int
@@ -79,6 +82,28 @@ type RelaySession struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
+}
+
+type stateObserver struct {
+	notify func()
+}
+
+// SetStateObserver installs the nonblocking control-state notification owned
+// by the composing server. Reinstalling the same observer is safe.
+func (r *RelaySession) SetStateObserver(observer func()) {
+	if observer == nil {
+		r.stateObserver.Store(nil)
+		return
+	}
+	r.stateObserver.Store(&stateObserver{notify: observer})
+}
+
+func (r *RelaySession) notifyStateChange() {
+	r.controlState.revision.Add(1)
+	observer := r.stateObserver.Load()
+	if observer != nil {
+		observer.notify()
+	}
 }
 
 // New returns an open RelaySession with default timeouts.
@@ -101,6 +126,7 @@ func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration
 		latency:           newLatencyStore(),
 		createdAt:         time.Now().UTC(),
 	}
+	r.controlState.revision.Store(1)
 	empty := make([]*subscriptionEntry, 0)
 	r.subscriptions.Store(&empty)
 	r.expiryMu.Lock()

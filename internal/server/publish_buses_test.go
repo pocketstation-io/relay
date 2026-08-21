@@ -56,7 +56,7 @@ func TestGivenExplicitEmptyMultiBusDeclarationOnWireWhenPlannedThenItIsRejected(
 func TestGivenLegacyPublishWhenTrackArrivesThenSingleBusIsClaimedOnce(t *testing.T) {
 	plan, err := newPublishBusPlan(
 		signaling.ClientMessage{Type: signaling.TypePublish, BusID: "application"},
-		&auth.Claims{},
+		&auth.Claims{BusIDs: []string{"application"}},
 	)
 	if err != nil {
 		t.Fatalf("new publish bus plan: %v", err)
@@ -83,7 +83,7 @@ func TestGivenMultiBusPublishWhenTracksArriveThenEachIndependentBusIsClaimed(t *
 				{StreamID: "microphone", BusID: "microphone"},
 			},
 		},
-		&auth.Claims{},
+		&auth.Claims{BusIDs: []string{"application", "microphone"}},
 	)
 	if err != nil {
 		t.Fatalf("new publish bus plan: %v", err)
@@ -137,7 +137,8 @@ func TestGivenInvalidMultiBusDeclarationsWhenPlannedThenTheyAreRejected(t *testi
 				{StreamID: "capture", BusID: "application"},
 				{StreamID: "capture", BusID: "microphone"},
 			}},
-			want: errPublishBusDuplicate,
+			claims: auth.Claims{BusIDs: []string{"application", "microphone"}},
+			want:   errPublishBusDuplicate,
 		},
 		{
 			name: "duplicate bus",
@@ -145,7 +146,8 @@ func TestGivenInvalidMultiBusDeclarationsWhenPlannedThenTheyAreRejected(t *testi
 				{StreamID: "application", BusID: "capture"},
 				{StreamID: "microphone", BusID: "capture"},
 			}},
-			want: errPublishBusDuplicate,
+			claims: auth.Claims{BusIDs: []string{"capture"}},
+			want:   errPublishBusDuplicate,
 		},
 		{
 			name: "invalid identity",
@@ -159,13 +161,13 @@ func TestGivenInvalidMultiBusDeclarationsWhenPlannedThenTheyAreRejected(t *testi
 			message: signaling.ClientMessage{PublishBuses: []signaling.PublishBusBinding{
 				{StreamID: "microphone", BusID: "microphone"},
 			}},
-			claims: auth.Claims{BusID: "application"},
+			claims: auth.Claims{BusIDs: []string{"application"}},
 			want:   errPublishBusScope,
 		},
 		{
 			name:    "legacy token bus scope",
 			message: signaling.ClientMessage{BusID: "microphone"},
-			claims:  auth.Claims{BusID: "application"},
+			claims:  auth.Claims{BusIDs: []string{"application"}},
 			want:    errPublishBusScope,
 		},
 	}
@@ -203,7 +205,7 @@ func TestGivenMultiBusPlanWhenUnknownOrRepeatedTrackArrivesThenClaimFails(t *tes
 		signaling.ClientMessage{PublishBuses: []signaling.PublishBusBinding{
 			{StreamID: "application", BusID: "application"},
 		}},
-		&auth.Claims{},
+		&auth.Claims{BusIDs: []string{"application"}},
 	)
 	if err != nil {
 		t.Fatalf("new publish bus plan: %v", err)

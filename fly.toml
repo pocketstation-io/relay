@@ -15,6 +15,11 @@ dockerfile = "Dockerfile"
   TURN_UDP_PORT    = "3478"
   TURN_TCP_PORT    = "3478"
   TURN_REALM       = "pocketstation.io"
+  RELAY_AUTHORITY_MODE = "control-plane"
+  RELAY_API_SERVER_URL = "https://pocketstation-api.fly.dev"
+  PUBLIC_RELAY_URL = "https://pocketstation-relay.fly.dev"
+  PUBLIC_RECEIVER_URL = "https://pocketstation-receiver.fly.dev"
+  CONTROL_RECONCILE_INTERVAL_SEC = "5"
 
 # Signaling + control plane (WebSocket + HTTP)
 [http_service]
@@ -26,6 +31,13 @@ min_machines_running = 1
 type = "connections"
 hard_limit = 500
 soft_limit = 400
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "2s"
+  grace_period = "15s"
+  method = "GET"
+  path = "/healthz"
 
 # ICE-TCP media plane — single multiplexed TCP port for all WebRTC peers.
 # Clients behind NAT use this when direct UDP to the relay is blocked.

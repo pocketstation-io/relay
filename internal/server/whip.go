@@ -64,9 +64,8 @@ const (
 var errInvalidWHIPDirection = errors.New("invalid WHIP direction")
 
 type whipPolicy struct {
-	requiredRole   auth.Role
-	compatibleRole auth.Role
-	defaultBus     session.BusID
+	requiredRole auth.Role
+	defaultBus   session.BusID
 }
 
 func (direction whipDirection) policy() (whipPolicy, error) {
@@ -74,11 +73,7 @@ func (direction whipDirection) policy() (whipPolicy, error) {
 	case whipIngress:
 		return whipPolicy{requiredRole: auth.RoleSource, defaultBus: "voice"}, nil
 	case whepEgress:
-		return whipPolicy{
-			requiredRole:   auth.RoleSubscriber,
-			compatibleRole: auth.RoleListener,
-			defaultBus:     session.BusMix,
-		}, nil
+		return whipPolicy{requiredRole: auth.RoleSubscriber, defaultBus: session.BusMix}, nil
 	default:
 		return whipPolicy{}, errInvalidWHIPDirection
 	}
@@ -131,14 +126,9 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 	}
 
 	rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claims, err := auth.Verify(s.jwtSecret, rawToken)
+	claims, err := s.verifyCapability(rawToken, policy.requiredRole)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	if claims.Role != policy.requiredRole && claims.Role != policy.compatibleRole {
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -146,14 +136,26 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 	if sessionID == "" {
 		sessionID = claims.EffectiveSessionID()
 	}
+	if sessionID != claims.SessionID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	// Bus ID: URL query param > token claim > default.
 	busID := r.URL.Query().Get("bus")
 	if busID == "" {
-		busID = claims.BusID
+		if claims.Role == auth.RoleSubscriber {
+			busID = claims.BusID
+		} else if len(claims.BusIDs) == 1 {
+			busID = claims.BusIDs[0]
+		}
 	}
 	if busID == "" {
 		busID = policy.defaultBus
+	}
+	if !claims.AllowsBus(string(busID)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 
 	offerBytes, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
@@ -167,6 +169,8 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 		http.Error(w, "relay session limit exceeded", http.StatusTooManyRequests)
 		return
 	}
+	s.bindControlState(rm)
+	s.queueControlState(rm)
 
 	pc, lineage, err := s.newWHIPPeerConnection()
 	if err != nil {

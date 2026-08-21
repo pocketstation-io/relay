@@ -1,73 +1,197 @@
+// Package auth validates explicit Relay transport capabilities.
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Role identifies the capability of a token holder.
+const (
+	ControlPlaneIssuer  = "pocketstation-control-plane"
+	RelayIssuer         = "pocketstation-relay"
+	Audience            = "pocketstation-relay"
+	tokenTyp            = "pks-relay-capability+jwt"
+	maxBusScopes        = 16
+	maxIdentifierLength = 128
+)
+
 type Role string
 
 const (
 	RoleSource     Role = "source"
-	RoleListener   Role = "listener" // v2.3 alias; v3.0 uses RoleSubscriber
 	RoleSubscriber Role = "subscriber"
 )
 
-// Claims is the JWT payload for relay session tokens.
-// SessionID (v3.0) and RoomID (v2.3 alias) both identify the target RelaySession.
-// BusID identifies the named bus for PUBLISH tokens; empty means "any bus".
+var ErrInvalidCapability = errors.New("invalid relay capability")
+
 type Claims struct {
-	SessionID string `json:"session_id,omitempty"` // v3.0
-	RoomID    string `json:"room_id,omitempty"`    // v2.3 alias — used when SessionID absent
-	BusID     string `json:"bus_id,omitempty"`     // named bus; "" = any / mix
-	Role      Role   `json:"role"`
+	SessionID string   `json:"session_id"`
+	BusID     string   `json:"bus_id,omitempty"`
+	BusIDs    []string `json:"bus_ids,omitempty"`
+	Role      Role     `json:"role"`
 	jwt.RegisteredClaims
 }
 
-// EffectiveSessionID returns the session/room ID, preferring SessionID (v3.0)
-// over RoomID (v2.3) for backward compatibility.
-func (c *Claims) EffectiveSessionID() string {
-	if c.SessionID != "" {
-		return c.SessionID
-	}
-	return c.RoomID
-}
+func (claims *Claims) EffectiveSessionID() string { return claims.SessionID }
 
-// Sign mints a signed HS256 JWT for sessionID with the given role and ttl.
-// busID may be empty (any bus / subscriber token).
+// Sign is the standalone-service helper. Production control-plane source
+// capabilities use SignSource with ControlPlaneIssuer.
 func Sign(secret []byte, sessionID string, role Role, ttl time.Duration) (string, error) {
-	return SignBus(secret, sessionID, "", role, ttl)
+	switch role {
+	case RoleSource:
+		return SignSource(secret, RelayIssuer, sessionID, []string{"voice"}, ttl)
+	case RoleSubscriber:
+		return SignSubscriber(secret, RelayIssuer, sessionID, "mix", ttl)
+	default:
+		return "", ErrInvalidCapability
+	}
 }
 
-// SignBus mints a signed HS256 JWT scoped to a specific bus.
 func SignBus(secret []byte, sessionID, busID string, role Role, ttl time.Duration) (string, error) {
-	now := time.Now()
-	claims := Claims{
-		SessionID: sessionID,
-		RoomID:    sessionID, // keep v2.3 field populated for old clients
-		BusID:     busID,
-		Role:      role,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(now),
-		},
+	switch role {
+	case RoleSource:
+		return SignSource(secret, RelayIssuer, sessionID, []string{busID}, ttl)
+	case RoleSubscriber:
+		return SignSubscriber(secret, RelayIssuer, sessionID, busID, ttl)
+	default:
+		return "", ErrInvalidCapability
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
 
-// Verify parses and validates a relay JWT. Returns the Claims on success.
-func Verify(secret []byte, token string) (*Claims, error) {
-	parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(t *jwt.Token) (any, error) {
-		return secret, nil
-	})
-	if err != nil {
-		return nil, err
+func SignSource(secret []byte, issuer, sessionID string, busIDs []string, ttl time.Duration) (string, error) {
+	if len(busIDs) == 0 || len(busIDs) > maxBusScopes || invalidIdentifiers(busIDs, 64) {
+		return "", ErrInvalidCapability
 	}
-	claims, ok := parsed.Claims.(*Claims)
-	if !ok || !parsed.Valid {
-		return nil, jwt.ErrTokenInvalidClaims
+	return sign(secret, issuer, Claims{SessionID: sessionID, BusIDs: append([]string(nil), busIDs...), Role: RoleSource}, ttl)
+}
+
+func SignSubscriber(secret []byte, issuer, sessionID, busID string, ttl time.Duration) (string, error) {
+	if !validIdentifier(busID, 64) {
+		return "", ErrInvalidCapability
+	}
+	return sign(secret, issuer, Claims{SessionID: sessionID, BusID: busID, Role: RoleSubscriber}, ttl)
+}
+
+func sign(secret []byte, issuer string, claims Claims, ttl time.Duration) (string, error) {
+	if len(secret) < 32 || !validIdentifier(claims.SessionID, maxIdentifierLength) || (issuer != ControlPlaneIssuer && issuer != RelayIssuer) || ttl <= 0 {
+		return "", ErrInvalidCapability
+	}
+	now := time.Now().UTC()
+	jti, err := randomTokenID()
+	if err != nil {
+		return "", err
+	}
+	claims.RegisteredClaims = jwt.RegisteredClaims{
+		Issuer: issuer, Subject: "relay-session:" + claims.SessionID + ":" + string(claims.Role),
+		Audience: jwt.ClaimStrings{Audience}, ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+		NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)), IssuedAt: jwt.NewNumericDate(now), ID: jti,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token.Header["typ"] = tokenTyp
+	return token.SignedString(secret)
+}
+
+func Verify(secret []byte, encoded string) (*Claims, error) {
+	return verify(secret, encoded, RelayIssuer, "")
+}
+
+// VerifyCapability validates one mutually exclusive issuer+role profile.
+func VerifyCapability(secret []byte, encoded, issuer string, role Role) (*Claims, error) {
+	return verify(secret, encoded, issuer, role)
+}
+
+func verify(secret []byte, encoded, issuer string, expectedRole Role) (*Claims, error) {
+	if len(secret) < 32 || encoded == "" {
+		return nil, ErrInvalidCapability
+	}
+	claims := &Claims{}
+	parsed, err := jwt.ParseWithClaims(
+		encoded,
+		claims,
+		func(token *jwt.Token) (any, error) {
+			if token.Method != jwt.SigningMethodHS256 || token.Header["typ"] != tokenTyp {
+				return nil, ErrInvalidCapability
+			}
+			return secret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(issuer), jwt.WithAudience(Audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(5*time.Second),
+	)
+	if err != nil || !parsed.Valid || !validIdentifier(claims.SessionID, maxIdentifierLength) || claims.ID == "" ||
+		claims.IssuedAt == nil || claims.NotBefore == nil || claims.ExpiresAt == nil ||
+		claims.Subject != "relay-session:"+claims.SessionID+":"+string(claims.Role) ||
+		claims.ExpiresAt.Time.Before(claims.IssuedAt.Time) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCapability, err)
+	}
+	if expectedRole != "" && claims.Role != expectedRole {
+		return nil, ErrInvalidCapability
+	}
+	switch claims.Role {
+	case RoleSource:
+		if claims.BusID != "" || len(claims.BusIDs) == 0 || len(claims.BusIDs) > maxBusScopes || invalidIdentifiers(claims.BusIDs, 64) {
+			return nil, ErrInvalidCapability
+		}
+	case RoleSubscriber:
+		if !validIdentifier(claims.BusID, 64) || len(claims.BusIDs) != 0 {
+			return nil, ErrInvalidCapability
+		}
+	default:
+		return nil, ErrInvalidCapability
 	}
 	return claims, nil
+}
+
+func (claims *Claims) AllowsBus(busID string) bool {
+	if claims.Role == RoleSubscriber {
+		return claims.BusID == busID
+	}
+	for _, allowed := range claims.BusIDs {
+		if allowed == busID {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidIdentifiers(values []string, maximum int) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validIdentifier(value, maximum) {
+			return true
+		}
+		if _, found := seen[value]; found {
+			return true
+		}
+		seen[value] = struct{}{}
+	}
+	return false
+}
+
+func validIdentifier(value string, maximum int) bool {
+	if len(value) == 0 || len(value) > maximum {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func randomTokenID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
 }
