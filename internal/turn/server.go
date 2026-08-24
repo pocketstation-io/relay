@@ -50,6 +50,12 @@ type ServerConfig struct {
 	// Realm is the STUN realm string included in TURN error responses.
 	// Defaults to "pocketstation.io".
 	Realm string
+
+	// RelayMinPort and RelayMaxPort bound UDP relay allocations to an inclusive
+	// range. Set both to zero to let the operating system select ports. A public
+	// deployment must expose every configured port to TURN clients.
+	RelayMinPort int
+	RelayMaxPort int
 }
 
 // Server is the embedded TURN server.
@@ -76,9 +82,9 @@ func Start(cfg ServerConfig) (*Server, error) {
 		realm = "pocketstation.io"
 	}
 
-	relayGen := &pionTurn.RelayAddressGeneratorStatic{
-		RelayAddress: cfg.PublicIP,
-		Address:      "0.0.0.0",
+	relayGen, err := relayAddressGenerator(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	var packetConns []pionTurn.PacketConnConfig
@@ -151,6 +157,27 @@ func Start(cfg ServerConfig) (*Server, error) {
 	}
 
 	return &Server{inner: srv}, nil
+}
+
+func relayAddressGenerator(cfg ServerConfig) (pionTurn.RelayAddressGenerator, error) {
+	if cfg.RelayMinPort == 0 && cfg.RelayMaxPort == 0 {
+		return &pionTurn.RelayAddressGeneratorStatic{
+			RelayAddress: cfg.PublicIP,
+			Address:      "0.0.0.0",
+		}, nil
+	}
+	if cfg.RelayMinPort < 1024 || cfg.RelayMaxPort > 65535 || cfg.RelayMinPort > cfg.RelayMaxPort {
+		return nil, fmt.Errorf(
+			"turn.Start: relay port range must be within 1024..65535 and ordered",
+		)
+	}
+	return &pionTurn.RelayAddressGeneratorPortRange{
+		RelayAddress: cfg.PublicIP,
+		Address:      "0.0.0.0",
+		MinPort:      uint16(cfg.RelayMinPort),
+		MaxPort:      uint16(cfg.RelayMaxPort),
+		MaxRetries:   (cfg.RelayMaxPort - cfg.RelayMinPort + 1) * 2,
+	}, nil
 }
 
 // Stop shuts down the TURN server and releases all listeners.

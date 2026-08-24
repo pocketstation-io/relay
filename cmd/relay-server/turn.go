@@ -38,16 +38,20 @@ func setupTURN(turnSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTu
 	udpPort := getenvInt("TURN_UDP_PORT", 3478)
 	tcpPort := getenvInt("TURN_TCP_PORT", 3478)
 	tlsPort := getenvInt("TURN_TLS_PORT", 0)
+	relayMinPort := getenvInt("TURN_RELAY_MIN_PORT", 0)
+	relayMaxPort := getenvInt("TURN_RELAY_MAX_PORT", 0)
 	realm := getenv("TURN_REALM", "pocketstation.io")
 
 	var err error
 	relay, err = relayTurn.Start(relayTurn.ServerConfig{
-		PublicIP: publicIP,
-		Secret:   turnSecret,
-		UDPPort:  udpPort,
-		TCPPort:  tcpPort,
-		TLSPort:  tlsPort,
-		Realm:    realm,
+		PublicIP:     publicIP,
+		Secret:       turnSecret,
+		UDPPort:      udpPort,
+		TCPPort:      tcpPort,
+		TLSPort:      tlsPort,
+		Realm:        realm,
+		RelayMinPort: relayMinPort,
+		RelayMaxPort: relayMaxPort,
 	})
 	if err != nil {
 		slog.Error("failed to start embedded TURN server", "error", err)
@@ -71,6 +75,8 @@ func setupTURN(turnSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTu
 		"udp_port", udpPort,
 		"tcp_port", tcpPort,
 		"tls_port", tlsPort,
+		"relay_min_port", relayMinPort,
+		"relay_max_port", relayMaxPort,
 	)
 	return iceServers, relay
 }
