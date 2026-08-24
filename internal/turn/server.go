@@ -1,14 +1,10 @@
 package turn
 
 import (
-	"crypto/hmac"
-	"crypto/sha1" //nolint:gosec
 	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
-	"time"
 
 	pionTurn "github.com/pion/turn/v4"
 )
@@ -30,7 +26,7 @@ type ServerConfig struct {
 	PublicIP net.IP
 
 	// Secret is the HMAC key for authenticating TURN credentials.
-	// Must match the relay's POCKETSTATION_JWT_SECRET.
+	// Must match the control plane's TURN_SHARED_SECRET.
 	Secret []byte
 
 	// UDPPort is the port for TURN/UDP (standard: 3478). Zero disables UDP.
@@ -132,23 +128,9 @@ func Start(cfg ServerConfig) (*Server, error) {
 		slog.Info("turn TLS listener started", "addr", tlsAddr)
 	}
 
-	secret := cfg.Secret
 	srv, err := pionTurn.NewServer(pionTurn.ServerConfig{
-		Realm: realm,
-		AuthHandler: func(username, _ string, _ net.Addr) ([]byte, bool) {
-			parts := strings.SplitN(username, ":", 2)
-			if len(parts) != 2 {
-				return nil, false
-			}
-			var expiry int64
-			_, parseErr := fmt.Sscanf(parts[0], "%d", &expiry)
-			if parseErr != nil || time.Now().Unix() > expiry {
-				return nil, false
-			}
-			mac := hmac.New(sha1.New, secret) //nolint:gosec
-			mac.Write([]byte(username))
-			return mac.Sum(nil), true
-		},
+		Realm:             realm,
+		AuthHandler:       AuthHandler(cfg.Secret),
 		PacketConnConfigs: packetConns,
 		ListenerConfigs:   listeners,
 	})
