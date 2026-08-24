@@ -5,10 +5,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/relay-server/
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o turn-server ./cmd/turn-server/
 
 FROM gcr.io/distroless/static:nonroot
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=$GIT_SHA
 COPY --from=builder /app/relay /relay
+COPY --from=builder /app/turn-server /turn-server
 EXPOSE 8080 8081/tcp 3478/udp 3478/tcp
 ENTRYPOINT ["/relay"]
