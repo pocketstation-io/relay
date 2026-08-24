@@ -8,7 +8,7 @@ import (
 
 func (peer *signalPeer) newPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
 	iceServers := peer.srv.iceServers
-	if len(iceServers) == 0 && !(peer.srv.useTURN && len(peer.srv.nat1to1IPs) > 0) {
+	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
 	}
 	configuration := webrtc.Configuration{ICEServers: iceServers}
@@ -46,10 +46,7 @@ func (peer *signalPeer) newPeerConnection() (*webrtc.PeerConnection, *clocklinea
 			settingEngine.SetICETCPMux(peer.srv.iceTCPMux)
 		}
 		if len(peer.srv.nat1to1IPs) > 0 {
-			settingEngine.SetNAT1To1IPs(
-				peer.srv.nat1to1IPs,
-				nat1To1CandidateType(peer.srv.useTURN),
-			)
+			settingEngine.SetNAT1To1IPs(peer.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)
 		}
 		api = webrtc.NewAPI(
 			webrtc.WithSettingEngine(settingEngine),
@@ -64,16 +61,6 @@ func (peer *signalPeer) newPeerConnection() (*webrtc.PeerConnection, *clocklinea
 	}
 	peer.configureICEForwarding(connection)
 	return connection, lineage, nil
-}
-
-func nat1To1CandidateType(useEmbeddedTURN bool) webrtc.ICECandidateType {
-	if useEmbeddedTURN {
-		// Keep the private host candidate so the co-located TURN allocation can
-		// reach this PeerConnection without a public-IP hairpin. The mapped
-		// public address remains available to direct WAN clients as srflx.
-		return webrtc.ICECandidateTypeSrflx
-	}
-	return webrtc.ICECandidateTypeHost
 }
 
 func (peer *signalPeer) configureICEForwarding(connection *webrtc.PeerConnection) {

@@ -7,7 +7,7 @@ import (
 
 func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, *clocklineage.Registry, error) {
 	iceServers := s.iceServers
-	if len(iceServers) == 0 && !(s.useTURN && len(s.nat1to1IPs) > 0) {
+	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
 	}
 	configuration := webrtc.Configuration{ICEServers: iceServers}
@@ -29,7 +29,7 @@ func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, *clocklineage.
 		settingEngine.SetICETCPMux(s.iceTCPMux)
 	}
 	if len(s.nat1to1IPs) > 0 {
-		settingEngine.SetNAT1To1IPs(s.nat1to1IPs, nat1To1CandidateType(s.useTURN))
+		settingEngine.SetNAT1To1IPs(s.nat1to1IPs, webrtc.ICECandidateTypeHost)
 	}
 	api := webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingEngine),

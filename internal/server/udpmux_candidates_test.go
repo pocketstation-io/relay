@@ -95,12 +95,3 @@ func TestGivenProductionICEConfigWhenGatheringThenOneUDPAddressPort(t *testing.T
 		t.Fatalf("expected exactly 1 distinct ip:port UDP host candidate under production config, got %d: %v", len(distinct), distinct)
 	}
 }
-
-func TestGivenEmbeddedTURNWhenSelectingNATCandidateTypeThenPrivateHostIsRetained(t *testing.T) {
-	if got := nat1To1CandidateType(true); got != webrtc.ICECandidateTypeSrflx {
-		t.Fatalf("embedded TURN candidate type = %s, want srflx", got)
-	}
-	if got := nat1To1CandidateType(false); got != webrtc.ICECandidateTypeHost {
-		t.Fatalf("direct-only candidate type = %s, want host", got)
-	}
-}
