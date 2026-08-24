@@ -119,9 +119,12 @@ func main() {
 		slog.Info("ICE-TCP mux started", "addr", tcpAddr)
 	}
 
-	// NAT1To1IPs: public IP(s) for ICE host candidates behind NAT (Fly.io).
+	// NAT1To1IPs: public IP(s) for ICE candidates behind NAT (Fly.io).
 	// Set RELAY_PUBLIC_IPS to the relay's public IP so remote peers receive
 	// reachable ICE candidates. Multiple IPs are comma-separated.
+	// When embedded TURN is active, Pion publishes this address as srflx and
+	// retains the private host candidate that the co-located TURN server needs.
+	// Direct-only deployments replace the host candidate with this address.
 	// Special value "auto": resolve the app's public IP at startup (fly.io).
 	if publicIPs := os.Getenv("RELAY_PUBLIC_IPS"); publicIPs != "" {
 		if strings.EqualFold(publicIPs, "auto") {
