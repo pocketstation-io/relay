@@ -1,4 +1,4 @@
-// Package bussub_test — Wave 13b media soak for per-bus subscriptions (spec §7).
+// Package bussub_test checks sustained per-bus subscription delivery.
 //
 // This soak forwards real RTP through a real RelaySession (real forwardLoop
 // goroutines, real deliver hot path) for a long duration. It proves three
@@ -11,9 +11,7 @@
 //   - no goroutine leak and no panic across the run.
 //
 // It lives in its own package (not test/soak directly) because the sibling
-// test/soak/reconnect_test.go still imports the removed v2.3 internal/room
-// package and does not compile; isolating here keeps this soak runnable without
-// touching that out-of-scope Phase 1 migration leftover.
+// This package is isolated so its opt-in soak can run independently.
 //
 // Run short (default, ~2s, two payload profiles):
 //

@@ -1,6 +1,6 @@
 package server
 
-// Unit tests for ICE restart loss tracking and debounce (spec §10.4).
+// Tests for ICE restart loss tracking and debounce.
 //
 // Test naming follows the GWT convention established by codec_hint_test.go:
 // TestGiven[context]_When_[action]_Then_[expected].

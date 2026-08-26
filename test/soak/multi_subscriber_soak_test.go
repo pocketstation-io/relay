@@ -1,8 +1,8 @@
-// Package soak_test contains the Phase 2 soak test.
+// Package soak_test contains the multi-subscriber soak test.
 //
 // Run:
 //
-//	go test -race -timeout 35m -run TestSoakPhase2 ./test/soak/
+//	go test -race -timeout 35m -run TestMultiSubscriberSoak ./test/soak/
 //
 // Pass -short to skip. The test runs for 30 minutes with 1 publisher and 50
 // in-process subscribers, sampling goroutine count and RSS at t=0, t=5min,
@@ -43,10 +43,10 @@ func newIPv4Server(handler http.Handler) *httptest.Server {
 }
 
 const (
-	phase2ListenerCount   = 50
-	phase2SoakDuration    = 30 * time.Minute
-	phase2GoroutineSlop   = 20 // larger window: 50 PCs have more variance than 1
-	phase2RSSGrowthBudget = 0.20
+	multiSubscriberListenerCount   = 50
+	multiSubscriberSoakDuration    = 30 * time.Minute
+	multiSubscriberGoroutineSlop   = 20 // larger window: 50 PCs have more variance than 1
+	multiSubscriberRSSGrowthBudget = 0.20
 )
 
 // connectListener dials a SUBSCRIBE WebSocket to ts and blocks until stopCh
@@ -128,11 +128,11 @@ func connectListener(
 	//            → wg.Done()
 }
 
-// TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded runs the Phase 2 soak: 1 publisher + 50 in-process
+// TestGivenRelayWhenMultiSubscriberSoakRunsThenResourcesRemainBounded runs the multi-subscriber soak: 1 publisher + 50 in-process
 // subscribers, 30 minutes, race detector active. Asserts no goroutine leak
 // between the 5-minute and 30-minute samples and no unbounded RSS growth.
-func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) {
-	requireSoak(t, "RELAY_SOAK_PHASE2")
+func TestGivenRelayWhenMultiSubscriberSoakRunsThenResourcesRemainBounded(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_MULTI_SUBSCRIBER")
 
 	// pubChildWg tracks publisher-side goroutines (drainMessages + ICE relay).
 	// Registered first so it runs last in LIFO, after pubPC/pubConn are closed.
@@ -141,7 +141,7 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
-		JWTSecret: []byte("soak-phase2-secret"),
+		JWTSecret: []byte("soak-multi-subscriber-secret"),
 		API:       api,
 	})
 	ts := newIPv4Server(srv.Handler())
@@ -184,7 +184,7 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 		t.Fatalf("add track: %v", err)
 	}
 
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), phase2SoakDuration+2*time.Minute)
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), multiSubscriberSoakDuration+2*time.Minute)
 	defer pubCancel()
 
 	publishHandshake(t, pubConn, pubPC, room.SourceToken, pubMsgs, 10*time.Second, &pubChildWg)
@@ -229,7 +229,7 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 	// Connect 50 listeners, staggered by 100ms each to avoid thundering-herd
 	// on ICE negotiation and keep OS resource usage smooth.
 	var listenerWg sync.WaitGroup
-	for i := 0; i < phase2ListenerCount; i++ {
+	for i := 0; i < multiSubscriberListenerCount; i++ {
 		listenerWg.Add(1)
 		go connectListener(t, ts, api, room.ListenerToken, soakStop, &listenerWg)
 		time.Sleep(100 * time.Millisecond)
@@ -268,17 +268,17 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 
 	// Assertions — delta measured from 5min to 30min (after all connections stable).
 	delta := s30.goroutines - s5.goroutines
-	if delta > phase2GoroutineSlop {
+	if delta > multiSubscriberGoroutineSlop {
 		t.Errorf("goroutine leak: 5min=%d 30min=%d delta=%d (limit=%d)",
-			s5.goroutines, s30.goroutines, delta, phase2GoroutineSlop)
+			s5.goroutines, s30.goroutines, delta, multiSubscriberGoroutineSlop)
 	}
 
 	var rssGrowth float64
 	if s5.rssBytes > 0 {
 		rssGrowth = float64(s30.rssBytes-s5.rssBytes) / float64(s5.rssBytes)
-		if rssGrowth > phase2RSSGrowthBudget {
+		if rssGrowth > multiSubscriberRSSGrowthBudget {
 			t.Errorf("RSS growth %.1f%% > budget %.0f%% (5min=%dMB 30min=%dMB)",
-				rssGrowth*100, phase2RSSGrowthBudget*100, s5.rssBytes>>20, s30.rssBytes>>20)
+				rssGrowth*100, multiSubscriberRSSGrowthBudget*100, s5.rssBytes>>20, s30.rssBytes>>20)
 		}
 	}
 
@@ -288,16 +288,16 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 	}
 
 	goroutineLeakVerdict := "PASS"
-	if delta > phase2GoroutineSlop {
+	if delta > multiSubscriberGoroutineSlop {
 		goroutineLeakVerdict = "FAIL"
 	}
 	rssVerdict := "PASS"
-	if rssGrowth > phase2RSSGrowthBudget {
+	if rssGrowth > multiSubscriberRSSGrowthBudget {
 		rssVerdict = "FAIL"
 	}
 
 	results := fmt.Sprintf(
-		"# Phase 2 soak baseline\n"+
+		"# multi-subscriber soak baseline\n"+
 			"# Generated: %s\n"+
 			"# Platform: darwin/arm64 (Apple M5)\n"+
 			"# Configuration: 1 publisher + %d listeners, 30-minute run\n\n"+
@@ -308,7 +308,7 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 			"goroutine_leak=%s (delta %d <= limit %d)\n"+
 			"rss_growth=%s\n",
 		time.Now().Format("2006-01-02"),
-		phase2ListenerCount,
+		multiSubscriberListenerCount,
 		s0.goroutines, s5.goroutines, s15.goroutines, s30.goroutines,
 		s30.goroutines-s5.goroutines,
 		s0.rssBytes>>20, s5.rssBytes>>20, s15.rssBytes>>20, s30.rssBytes>>20,
@@ -316,9 +316,9 @@ func TestGivenRelayWhenPhaseTwoSoakRunsThenResourcesRemainBounded(t *testing.T) 
 		srv.Metrics.PacketsForwarded.Load(),
 		srv.Metrics.PacketsDropped.Load(),
 		srv.Metrics.ListenerCount.Load(),
-		goroutineLeakVerdict, delta, phase2GoroutineSlop,
+		goroutineLeakVerdict, delta, multiSubscriberGoroutineSlop,
 		rssVerdict,
 	)
-	writeSoakArtifact(t, "phase2-baseline.txt", []byte(results))
+	writeSoakArtifact(t, "multi-subscriber-baseline.txt", []byte(results))
 	t.Logf("soak results:\n%s", results)
 }

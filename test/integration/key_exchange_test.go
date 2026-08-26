@@ -64,7 +64,7 @@ func fanOutMessages(
 //  1. All 3 listeners receive a KEY_EXCHANGE ServerMessage with the correct key.
 //  2. The source does NOT receive the KEY_EXCHANGE back.
 //  3. A 4th listener joining after the KEY_EXCHANGE immediately receives the
-//     stored key via the late-join path (RELAY-014).
+//     stored key through the late-join path.
 func TestGivenSourceInRoomWhenKeyExchangeSentThenAllListenersReceiveKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test uses real Pion ICE — skipped in -short mode")

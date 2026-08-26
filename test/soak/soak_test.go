@@ -1,4 +1,4 @@
-// Package soak_test contains the Phase 1 soak test.
+// Package soak_test contains the single-subscriber soak test.
 //
 // Run:
 //
@@ -39,7 +39,7 @@ func relaySoakFull() bool {
 	return os.Getenv("RELAY_SOAK_FULL") == "1"
 }
 
-func phase1SoakSchedule() (time.Duration, time.Duration, time.Duration) {
+func singleSubscriberSoakSchedule() (time.Duration, time.Duration, time.Duration) {
 	if relaySoakFull() {
 		return 5 * time.Minute, 1 * time.Minute, 4 * time.Minute
 	}
@@ -261,10 +261,10 @@ func takeSample(t *testing.T, label string) soakSample {
 	return s
 }
 
-// TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded runs the Phase 1 soak: 1 publisher + 1 in-process subscriber, 5 minutes,
+// TestGivenRelayWhenSingleSubscriberSoakRunsThenResourcesRemainBounded runs the single-subscriber soak: 1 publisher + 1 in-process subscriber, 5 minutes,
 // race detector active. Asserts no goroutine leak and no unbounded RSS growth.
-func TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded(t *testing.T) {
-	requireSoak(t, "RELAY_SOAK_PHASE1")
+func TestGivenRelayWhenSingleSubscriberSoakRunsThenResourcesRemainBounded(t *testing.T) {
+	requireSoak(t, "RELAY_SOAK_SINGLE_SUBSCRIBER")
 
 	// childWg tracks all goroutines spawned by drainMessages, publishHandshake,
 	// subscribeHandshake, and the RTP drain goroutine. defer childWg.Wait() is
@@ -273,7 +273,7 @@ func TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded(t *testing.T) 
 	var childWg sync.WaitGroup
 	defer childWg.Wait()
 
-	soakDuration, firstSampleAfter, finalSampleAfter := phase1SoakSchedule()
+	soakDuration, firstSampleAfter, finalSampleAfter := singleSubscriberSoakSchedule()
 	ctx, cancel := context.WithTimeout(context.Background(), soakDuration+60*time.Second)
 	defer cancel()
 
@@ -440,7 +440,7 @@ func TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded(t *testing.T) 
 
 	// Write results file.
 	results := fmt.Sprintf(
-		"# Phase 1 soak baseline\n# Generated: 2026-05-20\n# Platform: darwin/arm64 (Apple M5)\n\n"+
+		"# single-subscriber soak baseline\n# Generated: 2026-05-20\n# Platform: darwin/arm64 (Apple M5)\n\n"+
 			"duration=%s full_mode=%t first_sample_after=%s final_sample_after=%s\n"+
 			"goroutines start=%d steady=%d end=%d delta(steady→end)=%d\n"+
 			"rss_mb     start=%d steady=%d end=%d growth(steady→end)=%.1f%%\n"+
@@ -462,6 +462,6 @@ func TestGivenRelayWhenPhaseOneSoakRunsThenResourcesRemainBounded(t *testing.T) 
 		srv.Metrics.ListenerCount.Load(),
 		s5.goroutines-s1.goroutines, goroutineSlop,
 	)
-	writeSoakArtifact(t, "phase1-baseline.txt", []byte(results))
+	writeSoakArtifact(t, "single-subscriber-baseline.txt", []byte(results))
 	t.Logf("soak results:\n%s", results)
 }

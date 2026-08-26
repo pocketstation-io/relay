@@ -41,7 +41,7 @@ jobs:
       - run: go test -race -timeout 2m -run "TestGivenApiServerToken" ./test/integration/
 
   smoke:
-    # P5-PROD-004: binary subprocess smoke test.
+    # Exercise the built server as a subprocess.
     # Builds relay-test-source and relay-server binaries; starts relay-server in the
     # background; runs relay-test-source against it for 3 seconds; verifies clean exit.
     runs-on: ubuntu-latest

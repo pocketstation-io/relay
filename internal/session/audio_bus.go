@@ -16,7 +16,7 @@ import (
 // its own forwardLoop goroutine. Packets are written to the parent RelaySession's
 // subscription list, tagged with this bus's ID, so BusMix subscribers receive
 // from all buses on a single track while per-bus subscribers receive only
-// their selected bus (relay.out("mix") semantics for Phase 1; spec §7).
+// their selected bus. A mix subscription receives every declared bus.
 //
 // Invariants:
 //   - sourceMu guards source, sourceCloser, loopDone.

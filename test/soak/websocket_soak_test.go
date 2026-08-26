@@ -1,4 +1,4 @@
-// Package soak_test contains Phase 3 soak tests.
+// Package soak_test contains opt-in WebSocket soak tests.
 //
 // Script A — WebSocket keepalive soak:
 //
