@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// SessionRegistry manages the set of active RelaySessions.
-// (Named SessionRegistry, not Manager, per CODE_PROTOCOL LAW 18.)
+// SessionRegistry owns the active RelaySessions.
 type SessionRegistry struct {
 	mu    sync.RWMutex
 	rooms map[string]*RelaySession
@@ -155,7 +154,7 @@ func (reg *SessionRegistry) CloseAll() {
 }
 
 // SessionSummary is a snapshot of a RelaySession's observable state.
-// Used by GET /v1/channels (spec §3.1).
+// Used by GET /v1/channels.
 type SessionSummary struct {
 	SessionID         string    `json:"session_id"`
 	SubscriptionCount int       `json:"subscription_count"`

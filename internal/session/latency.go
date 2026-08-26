@@ -6,7 +6,7 @@ import (
 )
 
 // latencyWindowSizeCount is the rolling window depth for P50 percentile
-// computation (spec §13.4).
+// computation.
 const latencyWindowSizeCount = 100
 
 // LatencyStats holds aggregated per-segment latency percentiles for a

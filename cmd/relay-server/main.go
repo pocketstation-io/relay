@@ -65,7 +65,7 @@ func main() {
 		slog.Info("relay webhook dispatcher enabled", "webhook_url", webhookURL)
 	}
 
-	// Build ICE server list and start embedded TURN if configured (ADR-023).
+	// Build the ICE server list and start embedded TURN when configured.
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
 	//
 	// clientICEServers is what clients receive in createRoom so they can reach

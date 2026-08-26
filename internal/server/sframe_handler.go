@@ -6,7 +6,7 @@ import (
 )
 
 // handleKeyExchange forwards an SFrame KEY_EXCHANGE message from the source to
-// all subscriber sessions in the room (RELAY-014). The relay forwards SFrameKey
+// all subscriber sessions. The relay forwards SFrameKey
 // verbatim without reading the key material, preserving the SFrame guarantee
 // that the relay never holds plaintext audio.
 //

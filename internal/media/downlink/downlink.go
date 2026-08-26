@@ -35,7 +35,7 @@ var writeDurBucketMaxNs = [writeDurBucketCount]int64{
 
 // writeDurHistogram tracks write-duration samples using lock-free atomic bucket counters.
 // The hot-path cost of observe() is one conditional scan + one atomic.Add: no mutex, no allocation.
-// CODE_PROTOCOL LAW 11 (atomics on hot path) and LAW 15 (no lock/alloc in forwarding path) are met.
+// The forwarding path uses atomics and performs no locking or allocation.
 type writeDurHistogram struct {
 	counts [writeDurBucketCount]atomic.Uint64
 }

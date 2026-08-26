@@ -11,9 +11,7 @@
 // Invariant: sharedSecret is the relay's POCKETSTATION_JWT_SECRET. No new
 // secret surface is introduced.
 //
-// Phase scope: Phase 5, RELAY-023.
-// Intentionally not implemented: per-user quota enforcement, IP allow-listing
-// (deferred to Phase 6 when multi-region routing lands).
+// Per-user quotas and IP allow-listing are not implemented.
 package turn
 
 import (
