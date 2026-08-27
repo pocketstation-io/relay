@@ -51,7 +51,7 @@ var ErrEmptyPrimary = errors.New("red: primary payload must not be empty")
 // Block is one redundant media payload carried ahead of the primary.
 type Block struct {
 	PayloadType            uint8  // media PT of this block (e.g. Opus PT 111)
-	TimestampOffsetSamples uint32 // RTP-clock distance before the RED packet's own timestamp; 960 = one 20 ms Opus frame at 48 kHz (ADR-012)
+	TimestampOffsetSamples uint32 // RTP-clock distance before RED's timestamp; 960 is one 20 ms Opus frame at 48 kHz.
 	Payload                []byte // redundant media payload
 }
 

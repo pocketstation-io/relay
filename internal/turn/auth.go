@@ -11,9 +11,7 @@
 // Invariant: sharedSecret is the dedicated TURN_SHARED_SECRET shared with the
 // control plane that issues credentials. It is not a Session JWT secret.
 //
-// Phase scope: Phase 5, RELAY-023.
-// Intentionally not implemented: per-user quota enforcement, IP allow-listing
-// (deferred to Phase 6 when multi-region routing lands).
+// Per-user quotas and IP allow-listing are not implemented.
 package turn
 
 import (

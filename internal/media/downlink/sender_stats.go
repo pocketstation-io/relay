@@ -4,7 +4,7 @@ import "sync/atomic"
 
 // SenderStats holds per-subscriber delivery counters.
 // All fields are accessed atomically so any goroutine may read a snapshot
-// while the forwardLoop goroutine writes (LAW 11).
+// while the forwarding goroutine writes.
 type SenderStats struct {
 	PacketsSent         atomic.Uint64
 	BytesSent           atomic.Uint64

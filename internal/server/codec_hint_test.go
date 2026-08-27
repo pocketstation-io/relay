@@ -15,7 +15,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
-// Pure-function unit tests for the D13 codec-hint logic (RELAY-021).
+// Pure-function tests for codec-hint selection.
 // End-to-end WebSocket delivery is covered by
 // TestGivenHighLossRTCPRRWhenMaybeEmitCodecHintThenCodecHintSentToSource.
 

@@ -1,4 +1,4 @@
-// Package integration_test — ICE failure mode tests (P5-PROD-003 / Phase 2 C3).
+// Package integration_test checks ICE failure behavior.
 //
 // Tests that the relay handles source ICE disconnection gracefully:
 // - Source PeerConnection forcibly closed (simulates ICE failure / hard disconnect)

@@ -1,6 +1,6 @@
 package server
 
-// Spec §10.4 — Bandwidth-Adaptive Codec Control: ICE restart on sustained loss.
+// Restart ICE after sustained packet loss.
 //
 // When packet loss exceeds 15% for 3 consecutive RTCP Receiver Reports, the
 // relay sends an ICE_RESTART message to the source WebSocket. The source calls
@@ -25,11 +25,11 @@ import (
 const iceRestartDebounce = 30 * time.Second
 
 // lossICEThreshold is the packet-loss fraction above which a report is counted
-// as a "high-loss" sample for ICE restart purposes (spec §10.4: 15%).
+// as a high-loss sample for ICE restart purposes.
 const lossICEThreshold = 0.15
 
 // iceRestartConsecutiveRequired is the number of consecutive high-loss RTCP
-// reports required before an ICE_RESTART is triggered (spec §10.4: 3).
+// reports required before an ICE_RESTART is triggered.
 const iceRestartConsecutiveRequired = 3
 
 // lossTracker counts consecutive RTCP reports where the loss fraction exceeds

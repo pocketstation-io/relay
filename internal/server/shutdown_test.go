@@ -75,8 +75,8 @@ func dialShutdownSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 // "PeerReceivesLeave" is implemented as: the WebSocket read on the subscriber
 // side returns an error (connection closed by server), which is the observable
 // signal that the session was terminated. A protocol-level LEAVE message would
-// require the server to iterate sessions; the Phase 2 design uses room.Close
-// which tears down the underlying connection.
+// require the server to iterate sessions; shutdown closes the underlying
+// connection directly.
 func TestGivenRelayShutdownWhenActiveConnectionThenPeerReceivesLeave(t *testing.T) {
 	if testing.Short() {
 		t.Skip("shutdown test relies on goroutine scheduling timing — skipped in -short mode")

@@ -1,11 +1,11 @@
-// Package stress contains Phase 2 exit-criterion stress tests.
+// Package stress checks concurrent subscriber changes.
 //
 // Run:
 //
 //	go test -race -run TestFiftyListeners ./test/stress/
 //
 // The test uses the Session package directly — no real WebRTC, no network.
-// It verifies the copy-on-write subscription slice (RELAY-005) is free of data
+// It verifies that the copy-on-write subscription slice is free of data
 // races and that the RelaySession reaches a clean steady state after 50 concurrent
 // join/leave cycles.
 package stress
@@ -21,7 +21,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/session"
 )
 
-// listenerCount is the Phase 2 exit criterion value.
+// listenerCount is the concurrent subscriber target for this stress test.
 const listenerCount = 50
 
 // mockSource delivers packets from a buffered channel and signals EOF on close.
@@ -65,8 +65,8 @@ func makePacket() *rtp.Packet {
 	}
 }
 
-// TestFiftyListenersJoinLeaveRapidly verifies the Phase 2 exit criterion:
-// "Relay handles 50 subscribers joining/leaving rapidly without crash."
+// TestFiftyListenersJoinLeaveRapidly verifies 50 concurrent join and leave
+// operations without a crash.
 //
 // Given: a RelaySession with an active source forwarding RTP at ~1 kHz.
 // When:  50 goroutines each add a subscription, yield the CPU once, then remove it.

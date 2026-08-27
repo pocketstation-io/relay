@@ -16,22 +16,22 @@ const (
 	TypeRoomState MessageType = "ROOM_STATE"
 	TypeError     MessageType = "ERROR"
 	// TypeKeyExchange is sent by the source to distribute an SFrame encryption
-	// key to all subscribers (RELAY-014). The relay forwards verbatim without
+	// key to all subscribers. The relay forwards it verbatim without
 	// reading the key material.
 	TypeKeyExchange MessageType = "KEY_EXCHANGE"
 	// TypeCodecHint is sent by the relay to the source when RTCP Receiver Reports
-	// indicate a change in packet-loss tier (RELAY-021).
+	// indicate a change in packet-loss tier.
 	TypeCodecHint MessageType = "CODEC_HINT"
 	// TypeLatencyReport is sent by source or subscriber clients to report
-	// per-segment latency measurements (spec §13.4).
+	// per-segment latency measurements.
 	TypeLatencyReport MessageType = "LATENCY_REPORT"
 	// TypeICERestart is sent by the relay to the source when sustained packet
-	// loss indicates the ICE path has degraded beyond recovery (spec §10.4).
+	// loss indicates that the ICE path has degraded beyond recovery.
 	TypeICERestart MessageType = "ICE_RESTART"
 )
 
 // LatencyReport is sent by source/subscriber clients to report per-segment
-// latency. All duration fields carry ms suffixes per CODE_PROTOCOL LAW 1.
+// latency. Duration fields use an `ms` suffix.
 type LatencyReport struct {
 	SessionID      string  `json:"session_id"`
 	CaptureMs      float64 `json:"capture_ms"`
@@ -93,7 +93,7 @@ type ClientMessage struct {
 	SFrameKey string `json:"sframe_key,omitempty"`
 	// LatencyReport is populated on LATENCY_REPORT messages.
 	LatencyReport *LatencyReport `json:"latency_report,omitempty"`
-	// Public marks the session as a public broadcast channel (spec §3.1).
+	// Public marks the session as a public broadcast channel.
 	Public bool `json:"public,omitempty"`
 }
 
@@ -124,7 +124,7 @@ type ServerMessage struct {
 	// CodecHint is populated on CODEC_HINT messages from relay to source.
 	CodecHint *CodecHintPayload `json:"codec_hint,omitempty"`
 	// UseTURN is set on ICE_RESTART messages when the relay has an embedded TURN
-	// server configured (spec §10.4, RELAY-023).
+	// server configured.
 	UseTURN bool `json:"use_turn,omitempty"`
 
 	// v3.0 session state fields
