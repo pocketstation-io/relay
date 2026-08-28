@@ -21,7 +21,10 @@ const (
 	maxResponseBodyBytes = 4096
 )
 
-var ErrInvalidConfiguration = errors.New("invalid control-plane callback configuration")
+var (
+	ErrInvalidConfiguration = errors.New("invalid control-plane callback configuration")
+	ErrSessionNotFound      = errors.New("control-plane session not found")
+)
 
 // Client sends authenticated full-state replacement requests.
 type Client struct {
@@ -67,6 +70,9 @@ func (client *Client) PushState(ctx context.Context, state session.ControlState)
 	}
 	if len(responseBody) > maxResponseBodyBytes {
 		return fmt.Errorf("callback response exceeded %d bytes", maxResponseBodyBytes)
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: callback status %d", ErrSessionNotFound, response.StatusCode)
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("control-plane callback status %d", response.StatusCode)
