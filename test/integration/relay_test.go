@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -37,7 +38,9 @@ const testJWTSecret = "test-secret-0123456789abcdef012345"
 // host candidates so tests resolve immediately without external STUN.
 func newLoopbackSettingEngine() webrtc.SettingEngine {
 	se := webrtc.SettingEngine{}
-	se.SetNAT1To1IPs([]string{"127.0.0.1"}, webrtc.ICECandidateTypeHost)
+	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	se.SetIncludeLoopbackCandidate(true)
+	se.SetIPFilter(net.IP.IsLoopback)
 	// Aggressive timeouts keep tests fast; values are (disconnected, failed, keepalive).
 	se.SetICETimeouts(10*time.Second, 10*time.Second, 3*time.Second)
 	return se
@@ -172,12 +175,25 @@ func doPublishHandshakeWithMessage(
 ) {
 	t.Helper()
 
+	// Register before SetLocalDescription so immediate loopback candidates are
+	// never lost. The authenticated PUBLISH message is written first, ensuring
+	// the Relay owns the peer before the first trickled candidate can arrive.
+	var writeMu sync.Mutex
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.WriteJSON(signaling.ClientMessage{
+			Type:      signaling.TypeIce,
+			Candidate: candidate.ToJSON().Candidate,
+		})
+	})
+
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		t.Fatalf("create offer: %v", err)
-	}
-	if err := pc.SetLocalDescription(offer); err != nil {
-		t.Fatalf("set local description: %v", err)
 	}
 
 	message.Type = signaling.TypePublish
@@ -186,20 +202,9 @@ func doPublishHandshakeWithMessage(
 	if err := conn.WriteJSON(message); err != nil {
 		t.Fatalf("send PUBLISH: %v", err)
 	}
-
-	// Wire outgoing ICE candidates.
-	var wmu sync.Mutex
-	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			return
-		}
-		wmu.Lock()
-		defer wmu.Unlock()
-		_ = conn.WriteJSON(signaling.ClientMessage{
-			Type:      signaling.TypeIce,
-			Candidate: c.ToJSON().Candidate,
-		})
-	})
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set local description: %v", err)
+	}
 
 	deadline := time.After(timeout)
 	for {
@@ -255,12 +260,24 @@ func doSubscribeHandshake(
 		t.Fatalf("add transceiver: %v", err)
 	}
 
+	// Register before SetLocalDescription so immediate loopback candidates are
+	// never lost. The authenticated SUBSCRIBE message is written first.
+	var writeMu sync.Mutex
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.WriteJSON(signaling.ClientMessage{
+			Type:      signaling.TypeIce,
+			Candidate: candidate.ToJSON().Candidate,
+		})
+	})
+
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		t.Fatalf("create offer: %v", err)
-	}
-	if err := pc.SetLocalDescription(offer); err != nil {
-		t.Fatalf("set local description: %v", err)
 	}
 
 	if err := conn.WriteJSON(signaling.ClientMessage{
@@ -270,19 +287,9 @@ func doSubscribeHandshake(
 	}); err != nil {
 		t.Fatalf("send SUBSCRIBE: %v", err)
 	}
-
-	var wmu sync.Mutex
-	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			return
-		}
-		wmu.Lock()
-		defer wmu.Unlock()
-		_ = conn.WriteJSON(signaling.ClientMessage{
-			Type:      signaling.TypeIce,
-			Candidate: c.ToJSON().Candidate,
-		})
-	})
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set local description: %v", err)
+	}
 
 	deadline := time.After(timeout)
 	for {
