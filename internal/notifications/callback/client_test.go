@@ -3,6 +3,7 @@ package callback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -83,5 +84,21 @@ func TestGivenOversizedFailureResponseWhenStateIsPushedThenDeliveryFails(t *test
 	})
 	if err := client.PushState(context.Background(), session.ControlState{SessionID: "session-1"}); err == nil {
 		t.Fatal("oversized failure response accepted")
+	}
+}
+
+func TestGivenMissingControlPlaneSessionWhenStateIsPushedThenAbsenceIsTyped(t *testing.T) {
+	client, _ := NewClient("https://control.example", callbackTestSecret)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"session not found"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	err := client.PushState(context.Background(), session.ControlState{SessionID: "session-1"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("PushState error = %v, want ErrSessionNotFound", err)
 	}
 }

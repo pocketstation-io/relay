@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 )
 
 func TestGivenSessionRegistryWhenGetOrCreateThenSameRoomReturned(t *testing.T) {
@@ -87,5 +88,45 @@ func TestGivenRegistryAtSessionLimitWhenNewIdentityArrivesThenCreationIsRejected
 	}
 	if got := registry.RoomCount(); got != 1 {
 		t.Fatalf("session count = %d, want 1", got)
+	}
+}
+
+func TestGivenClosedSessionAtLimitWhenNewIdentityArrivesThenCapacityIsRecovered(t *testing.T) {
+	registry := NewRegistry()
+	first, created, accepted := registry.GetOrCreateWithinLimit("first", 1)
+	if first == nil || !created || !accepted {
+		t.Fatalf("first acquisition = (%v, %t, %t), want created and accepted", first, created, accepted)
+	}
+
+	first.Close()
+
+	second, created, accepted := registry.GetOrCreateWithinLimit("second", 1)
+	if second == nil || !created || !accepted {
+		t.Fatalf("second acquisition = (%v, %t, %t), want reclaimed capacity", second, created, accepted)
+	}
+	if _, found := registry.Get("first"); found {
+		t.Fatal("closed Session remains addressable after registry reclamation")
+	}
+	if got := registry.RoomCount(); got != 1 {
+		t.Fatalf("session count = %d, want only the replacement Session", got)
+	}
+}
+
+func TestGivenExpiredSessionAtLimitWhenNewIdentityArrivesThenCapacityIsRecovered(t *testing.T) {
+	registry := NewRegistryWithConfig(RegistryConfig{InactivityTimeout: 10 * time.Millisecond})
+	first, _, accepted := registry.GetOrCreateWithinLimit("first", 1)
+	if first == nil || !accepted {
+		t.Fatal("first Session was not accepted")
+	}
+
+	select {
+	case <-first.done:
+	case <-time.After(time.Second):
+		t.Fatal("first Session did not expire")
+	}
+
+	second, created, accepted := registry.GetOrCreateWithinLimit("second", 1)
+	if second == nil || !created || !accepted {
+		t.Fatalf("second acquisition = (%v, %t, %t), want capacity after expiry", second, created, accepted)
 	}
 }

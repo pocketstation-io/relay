@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/session"
 )
 
@@ -60,6 +62,15 @@ func (server *Server) runControlStateSync() {
 func (server *Server) pushControlState(relaySession *session.RelaySession) {
 	state := relaySession.ControlState(server.relayEpoch)
 	if err := server.callbackClient.PushState(server.controlSyncContext, state); err != nil {
+		if errors.Is(err, callback.ErrSessionNotFound) {
+			server.relaySessions.Delete(relaySession.ID)
+			slog.Info("relay session removed after control-plane deletion",
+				"relay_session_id", relaySession.ID,
+				"relay_epoch", state.RelayEpoch,
+				"relay_revision", state.Revision,
+			)
+			return
+		}
 		slog.Warn("control-state synchronization failed",
 			"relay_session_id", relaySession.ID,
 			"relay_epoch", state.RelayEpoch,

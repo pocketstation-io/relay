@@ -1,9 +1,12 @@
 package turn_test
 
 import (
+	"bytes"
+	"net"
 	"testing"
 	"time"
 
+	pionTurn "github.com/pion/turn/v4"
 	"github.com/pocketstation-io/relay/internal/turn"
 )
 
@@ -23,6 +26,20 @@ func TestGivenValidSecretWhenCredentialsGeneratedThenPasswordValidates(t *testin
 	}
 	if !turn.Validate(testSecret, username, password) {
 		t.Errorf("Validate returned false for just-generated credentials")
+	}
+}
+
+func TestGivenIssuedCredentialWhenTURNAuthenticatesThenMessageIntegrityKeyMatches(t *testing.T) {
+	username, password := turn.Credentials(testSecret, "session-abc", time.Hour)
+	realm := "pocketstation.io"
+
+	key, ok := turn.AuthHandler(testSecret)(username, realm, &net.UDPAddr{})
+	if !ok {
+		t.Fatal("TURN authentication rejected a current issued credential")
+	}
+	want := pionTurn.GenerateAuthKey(username, realm, password)
+	if !bytes.Equal(key, want) {
+		t.Fatal("TURN authentication returned the wrong MESSAGE-INTEGRITY key")
 	}
 }
 

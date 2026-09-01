@@ -61,6 +61,7 @@ func NewRegistryWithConfig(cfg RegistryConfig) *SessionRegistry {
 func (reg *SessionRegistry) GetOrCreate(id string) *RelaySession {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	return reg.getOrCreateLocked(id)
 }
 
@@ -73,6 +74,7 @@ func (reg *SessionRegistry) GetOrCreateWithinLimit(
 ) (relaySession *RelaySession, created bool, accepted bool) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	if r := reg.rooms[id]; r != nil {
 		return r, false, true
 	}
@@ -95,8 +97,9 @@ func (reg *SessionRegistry) getOrCreateLocked(id string) *RelaySession {
 
 // Get returns the RelaySession for id and whether it was found.
 func (reg *SessionRegistry) Get(id string) (*RelaySession, bool) {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	r, ok := reg.rooms[id]
 	return r, ok
 }
@@ -104,8 +107,9 @@ func (reg *SessionRegistry) Get(id string) (*RelaySession, bool) {
 // All returns a bounded snapshot of active RelaySession pointers for periodic
 // control-state reconciliation.
 func (reg *SessionRegistry) All() []*RelaySession {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	result := make([]*RelaySession, 0, len(reg.rooms))
 	for _, relaySession := range reg.rooms {
 		result = append(result, relaySession)
@@ -125,22 +129,38 @@ func (reg *SessionRegistry) Delete(id string) {
 
 // RoomCount returns the number of active RelaySessions.
 func (reg *SessionRegistry) RoomCount() int {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	return len(reg.rooms)
 }
 
 // PacketStats returns aggregate forwarded and dropped packet counts across
 // all currently active RelaySessions.
 func (reg *SessionRegistry) PacketStats() (forwarded, dropped uint64) {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 	for _, r := range reg.rooms {
 		pkts, _, drop := r.PacketStats()
 		forwarded += pkts
 		dropped += drop
 	}
 	return
+}
+
+// removeClosedLocked reclaims RelaySessions whose lifecycle has ended before
+// applying admission limits or returning registry snapshots. RelaySession
+// expiry closes the Session asynchronously; the registry is the owner that
+// removes the closed identity from its bounded admission set.
+func (reg *SessionRegistry) removeClosedLocked() {
+	for id, relaySession := range reg.rooms {
+		select {
+		case <-relaySession.done:
+			delete(reg.rooms, id)
+		default:
+		}
+	}
 }
 
 // CloseAll closes every active RelaySession and removes it from the registry.
@@ -166,8 +186,9 @@ type SessionSummary struct {
 // ListPublic returns a summary of every RelaySession created with Public==true.
 // Returns a non-nil empty slice when no public rooms exist.
 func (reg *SessionRegistry) ListPublic() []SessionSummary {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.removeClosedLocked()
 
 	result := make([]SessionSummary, 0)
 	for _, r := range reg.rooms {

@@ -14,6 +14,8 @@ dockerfile = "Dockerfile"
   TURN_PUBLIC_IP   = "auto"
   TURN_UDP_PORT    = "3478"
   TURN_TCP_PORT    = "3478"
+  TURN_RELAY_MIN_PORT = "49160"
+  TURN_RELAY_MAX_PORT = "49167"
   TURN_REALM       = "pocketstation.io"
   RELAY_AUTHORITY_MODE = "control-plane"
   RELAY_API_SERVER_URL = "https://pocketstation-api.fly.dev"
@@ -69,17 +71,63 @@ protocol = "udp"
   [[services.ports]]
   port = 10000
 
-# TURN/STUN UDP — standard port for STUN reflexive discovery and TURN/UDP.
-# Note: TURN relay-address allocations (dynamic ephemeral ports) are not
-# accessible on Fly.io shared anycast without a dedicated IPv4 block.
-# STUN and TURN control-plane work; ICE-TCP (port 8081) handles the media
-# path for peers behind strict NAT.
+# TURN/STUN UDP — standard port for discovery and allocation requests.
 [[services]]
 internal_port = 3478
 protocol = "udp"
 
   [[services.ports]]
   port = 3478
+
+# TURN media allocations use a finite range on the app's dedicated IPv4.
+# Each public UDP port maps to the same port inside the Relay machine.
+[[services]]
+internal_port = 49160
+protocol = "udp"
+  [[services.ports]]
+  port = 49160
+
+[[services]]
+internal_port = 49161
+protocol = "udp"
+  [[services.ports]]
+  port = 49161
+
+[[services]]
+internal_port = 49162
+protocol = "udp"
+  [[services.ports]]
+  port = 49162
+
+[[services]]
+internal_port = 49163
+protocol = "udp"
+  [[services.ports]]
+  port = 49163
+
+[[services]]
+internal_port = 49164
+protocol = "udp"
+  [[services.ports]]
+  port = 49164
+
+[[services]]
+internal_port = 49165
+protocol = "udp"
+  [[services.ports]]
+  port = 49165
+
+[[services]]
+internal_port = 49166
+protocol = "udp"
+  [[services.ports]]
+  port = 49166
+
+[[services]]
+internal_port = 49167
+protocol = "udp"
+  [[services.ports]]
+  port = 49167
 
 # TURN/TCP — TURN over plain TCP for clients where UDP:3478 is filtered.
 [[services]]
