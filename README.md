@@ -21,9 +21,9 @@ An `AudioBus` keeps a stable semantic identity while a transient publisher
 attachment, SSRC, and source generation may change. A subscriber selects one
 bus or the declared `mix` output.
 
-## Authority modes
+## Choose who issues credentials
 
-A self-hosted deployment normally uses control-plane authority:
+A self-hosted deployment normally lets the control plane issue credentials:
 
 ```text
 control plane creates the Session and capabilities
@@ -52,8 +52,8 @@ with the same strict issuer, audience, token-type, role, and bus-scope profile.
 
 `RELAY_AUTHORITY_MODE=standalone` is an explicit self-hosted mode. Relay then
 creates its own Sessions and single-use invitations. It uses the independent
-`RELAY_INVITATION_SECRET` for subscriber capabilities. Credentials from one
-authority mode are not accepted by the other.
+`RELAY_INVITATION_SECRET` for subscriber capabilities. Credentials issued in
+one mode are not accepted in the other.
 
 ## Publish named buses
 
@@ -167,8 +167,8 @@ Relay bounds:
 - callback duration and response size;
 - packet queues, repair caches, and packet age.
 
-When capacity is unavailable, Relay rejects new work before allocating a media
-path. It returns an explicit capacity response and does not grow an unbounded
+When capacity is unavailable, Relay rejects new work before allocating media
+resources. It returns an explicit capacity response and does not grow an unbounded
 retry or callback queue. Operators should set limits for their own budget and
 expected audience; the repository's `fly.toml` intentionally describes only a
 small demonstration deployment.

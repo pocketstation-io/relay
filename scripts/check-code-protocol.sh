@@ -4,6 +4,13 @@ set -euo pipefail
 repository_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repository_root"
 
+if public_doc_vocabulary=$(rg -n -i \
+  '\b(boundary|path|surface|authority|projection|lowering|flow|layer)\b' \
+  README.md docs --glob '*.md' --glob '*.mdx' || true); [[ -n "$public_doc_vocabulary" ]]; then
+  printf 'CODE_PROTOCOL: public documentation uses vague architecture shorthand:\n%s\n' "$public_doc_vocabulary" >&2
+  exit 1
+fi
+
 if unformatted=$(gofmt -l cmd internal test); [[ -n "$unformatted" ]]; then
   printf 'CODE_PROTOCOL: gofmt violations:\n%s\n' "$unformatted" >&2
   exit 1

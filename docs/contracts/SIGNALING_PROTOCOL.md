@@ -22,7 +22,7 @@ execution, recording, models, and durable Session ownership are outside Relay.
 All JSON messages have a finite size. Unknown message types, invalid state
 transitions, excess capacity, and out-of-scope buses fail explicitly.
 
-## Capability authority
+## Capability issuers
 
 In `control-plane` mode, Relay accepts capabilities issued by
 `pocketstation-control-plane` and signed with `POCKETSTATION_JWT_SECRET`.
@@ -129,7 +129,7 @@ The response is `201 Created`, contains the SDP answer, and returns a
 connection resource in `Location`. Use `PATCH` for trickle ICE and `DELETE` for
 bounded teardown.
 
-The Session ID in the path must equal the capability Session ID. The selected
+The Session ID in the request URL must equal the capability Session ID. The selected
 bus must be inside the capability.
 
 ## Session state messages
