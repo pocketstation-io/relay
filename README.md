@@ -1,6 +1,6 @@
 # PocketStation Relay
 
-PocketStation Relay is a bounded, source-aware WebRTC audio plane. It carries
+PocketStation Relay carries source-aware audio over WebRTC. It forwards
 independent application, microphone, caller, and generated-audio buses to
 native or browser receivers without taking ownership of capture, recording,
 models, or durable Session state.
@@ -155,6 +155,9 @@ go run ./cmd/relay-test-source -- \
 It emits valid synthetic Opus for transport verification. It is not physical
 capture evidence.
 
+For a complete local setup, public-network requirements, configuration, and
+operating guidance, start with the [Relay documentation](docs/README.md).
+
 ## Finite work
 
 Relay bounds:
@@ -194,5 +197,5 @@ CI must pass before Fly deploys. Deployment checks out the exact successful CI
 revision and records it in the OCI image. A successful local or same-host test
 does not establish WAN/TURN or multi-region performance.
 
-See [the signaling protocol](docs/contracts/SIGNALING_PROTOCOL.md) for the wire
-protocol and failure model.
+See [the signaling protocol](docs/reference/signaling.md) for message
+formats and failure behavior.
