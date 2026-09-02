@@ -42,7 +42,7 @@ POCKETSTATION_INTERNAL_SECRET=<shared state-synchronization secret>
 
 Deploy the control plane and Relay under endpoints you own. PocketStation's
 Fly endpoints are a small, rate-limited demonstration environment used by the
-installed Python example. They are not a hosted-service contract, an SLA, or a
+installed Python example. They are not a hosted service, an SLA, or a
 default for Relay itself, and may return `429 Too Many Requests` when the demo
 capacity is in use.
 
@@ -194,5 +194,5 @@ CI must pass before Fly deploys. Deployment checks out the exact successful CI
 revision and records it in the OCI image. A successful local or same-host test
 does not establish WAN/TURN or multi-region performance.
 
-See [the signaling contract](docs/contracts/SIGNALING_PROTOCOL.md) for the wire
+See [the signaling protocol](docs/contracts/SIGNALING_PROTOCOL.md) for the wire
 protocol and failure model.

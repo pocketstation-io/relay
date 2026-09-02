@@ -1,10 +1,10 @@
-# Relay signaling contract
+# Relay signaling protocol
 
 This document defines how a publisher or subscriber joins one PocketStation
 `RelaySession`. It describes transport signaling only. Capture, graph
 execution, recording, models, and durable Session ownership are outside Relay.
 
-## Contract profile
+## Protocol settings
 
 | Property | Value |
 |---|---|
@@ -222,4 +222,4 @@ period.
 
 Relay callbacks and signaling messages are observations. They do not replace
 PocketStation Core lineage. Complete per-frame Core lineage over a remote
-transport requires an additional versioned metadata contract.
+transport requires an additional versioned metadata schema.
