@@ -1,6 +1,6 @@
 # PocketStation Relay
 
-PocketStation Relay is a bounded, source-aware WebRTC audio plane. It carries
+PocketStation Relay carries source-aware audio over WebRTC. It forwards
 independent application, microphone, caller, and generated-audio buses to
 native or browser receivers without taking ownership of capture, recording,
 models, or durable Session state.
@@ -12,7 +12,7 @@ authenticated source attachment
               ↓
     named AudioBus + generation
               ↓
- bounded BusSubscription fan-out
+ BusSubscription fan-out with per-subscriber queue limits
               ↓
  RTP continuity, pacing, repair, and observations
 ```
@@ -42,7 +42,7 @@ POCKETSTATION_INTERNAL_SECRET=<shared state-synchronization secret>
 
 Deploy the control plane and Relay under endpoints you own. PocketStation's
 Fly endpoints are a small, rate-limited demonstration environment used by the
-installed Python example. They are not a hosted-service contract, an SLA, or a
+installed Python example. They are not a hosted service, an SLA, or a
 default for Relay itself, and may return `429 Too Many Requests` when the demo
 capacity is in use.
 
@@ -112,8 +112,9 @@ Relay sends one complete state document for every accepted attachment change:
 }
 ```
 
-The callback is authenticated and bounded. A full snapshot replaces all
-Relay-owned state, so duplicate delivery is safe and callback loss is repaired
+The callback is authenticated, has a maximum payload size, and finishes within
+an HTTP deadline. A full snapshot replaces all Relay-owned state, so duplicate
+delivery is safe and callback loss is repaired
 by periodic reconciliation. Reconciliation resends the current revision; it
 does not manufacture a new transition.
 
@@ -155,7 +156,10 @@ go run ./cmd/relay-test-source -- \
 It emits valid synthetic Opus for transport verification. It is not physical
 capture evidence.
 
-## Finite work
+For a complete local setup, public-network requirements, configuration, and
+operating guidance, start with the [Relay documentation](docs/README.md).
+
+## Set capacity limits
 
 Relay bounds:
 
@@ -168,10 +172,10 @@ Relay bounds:
 - packet queues, repair caches, and packet age.
 
 When capacity is unavailable, Relay rejects new work before allocating media
-resources. It returns an explicit capacity response and does not grow an unbounded
-retry or callback queue. Operators should set limits for their own budget and
-expected audience; the repository's `fly.toml` intentionally describes only a
-small demonstration deployment.
+resources. It returns an explicit capacity response instead of allowing retry
+or callback queues to grow without a limit. Operators should set limits for
+their own budget and expected audience; the repository's `fly.toml`
+intentionally describes only a small demonstration deployment.
 
 The checked-in Fly configuration keeps one 512 MB Relay machine running and
 lets the 256 MB Control Plane stop when idle. At current `iad` shared-CPU
@@ -194,5 +198,5 @@ CI must pass before Fly deploys. Deployment checks out the exact successful CI
 revision and records it in the OCI image. A successful local or same-host test
 does not establish WAN/TURN or multi-region performance.
 
-See [the signaling contract](docs/contracts/SIGNALING_PROTOCOL.md) for the wire
-protocol and failure model.
+See [the signaling protocol](docs/reference/signaling.md) for message
+formats and failure behavior.
