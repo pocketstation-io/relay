@@ -126,8 +126,8 @@ Content-Type: application/sdp
 ```
 
 The response is `201 Created`, contains the SDP answer, and returns a
-connection resource in `Location`. Use `PATCH` for trickle ICE and `DELETE` for
-bounded teardown.
+connection resource in `Location`. Use `PATCH` for trickle ICE and `DELETE` to
+finish teardown within the server deadline.
 
 The Session ID in the request URL must equal the capability Session ID. The selected
 bus must be inside the capability.
@@ -179,8 +179,8 @@ Content-Type: application/json
 }
 ```
 
-The callback is a complete replacement, not a delta. Delivery uses a bounded
-nonblocking mailbox and a finite HTTP deadline. A periodic pass resends the
+The callback is a complete replacement, not a delta. Delivery uses a
+fixed-capacity nonblocking mailbox and an HTTP deadline. A periodic pass resends the
 latest unchanged revision. This makes lost delivery recoverable and duplicate
 delivery idempotent.
 

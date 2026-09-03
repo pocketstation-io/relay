@@ -17,7 +17,7 @@ and operating mode.
 | `GET /v1/sessions/{id}/health` | AudioBus health for one RelaySession. |
 | `GET /v1/sessions/{id}/latency` | RelaySession latency observations. |
 | `GET /v1/sessions/{id}/media-debug` | Source clock and downlink observations. |
-| `GET /v1/sessions/{id}/packet-log` | Bounded packet log for one named bus. |
+| `GET /v1/sessions/{id}/packet-log` | Packet log up to the configured record limit for one named bus. |
 
 Standalone mode additionally enables:
 

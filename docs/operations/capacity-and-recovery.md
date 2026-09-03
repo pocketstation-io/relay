@@ -16,8 +16,8 @@ Set these values from the expected concurrent audience and host budget:
 - TURN allocation port count.
 
 When admission fails, clients receive an explicit HTTP or signaling failure.
-Apply bounded retry with jitter in the client only for failures that can
-recover. Invalid credentials, invalid bus scope, and malformed signaling need
+Retry recoverable failures with jitter, a maximum attempt count, and a maximum
+elapsed time. Invalid credentials, invalid bus scope, and malformed signaling need
 configuration or code changes, not retry.
 
 ## Monitor the process

@@ -12,7 +12,7 @@ authenticated source attachment
               ↓
     named AudioBus + generation
               ↓
- bounded BusSubscription fan-out
+ BusSubscription fan-out with per-subscriber queue limits
               ↓
  RTP continuity, pacing, repair, and observations
 ```
@@ -112,8 +112,9 @@ Relay sends one complete state document for every accepted attachment change:
 }
 ```
 
-The callback is authenticated and bounded. A full snapshot replaces all
-Relay-owned state, so duplicate delivery is safe and callback loss is repaired
+The callback is authenticated, has a maximum payload size, and finishes within
+an HTTP deadline. A full snapshot replaces all Relay-owned state, so duplicate
+delivery is safe and callback loss is repaired
 by periodic reconciliation. Reconciliation resends the current revision; it
 does not manufacture a new transition.
 
@@ -158,7 +159,7 @@ capture evidence.
 For a complete local setup, public-network requirements, configuration, and
 operating guidance, start with the [Relay documentation](docs/README.md).
 
-## Finite work
+## Set capacity limits
 
 Relay bounds:
 
@@ -171,10 +172,10 @@ Relay bounds:
 - packet queues, repair caches, and packet age.
 
 When capacity is unavailable, Relay rejects new work before allocating media
-resources. It returns an explicit capacity response and does not grow an unbounded
-retry or callback queue. Operators should set limits for their own budget and
-expected audience; the repository's `fly.toml` intentionally describes only a
-small demonstration deployment.
+resources. It returns an explicit capacity response instead of allowing retry
+or callback queues to grow without a limit. Operators should set limits for
+their own budget and expected audience; the repository's `fly.toml`
+intentionally describes only a small demonstration deployment.
 
 The checked-in Fly configuration keeps one 512 MB Relay machine running and
 lets the 256 MB Control Plane stop when idle. At current `iad` shared-CPU

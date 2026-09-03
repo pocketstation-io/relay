@@ -17,7 +17,7 @@ required secrets and mode-specific URLs fail startup.
 | `ALLOWED_ORIGINS` | any origin | Comma-separated browser origins accepted by the signaling WebSocket. Native clients without an `Origin` header still require a capability. |
 | `PUBLIC_RELAY_URL` | unset | Public Relay URL returned in invitations. |
 | `PUBLIC_RECEIVER_URL` | unset | Browser receiver URL used to build join links. |
-| `WEBHOOK_URL` | unset | Optional bounded event delivery destination. |
+| `WEBHOOK_URL` | unset | Optional event delivery destination with payload and request-time limits. |
 
 ## Session capacity and time
 
