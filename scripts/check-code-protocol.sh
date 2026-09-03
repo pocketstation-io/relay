@@ -5,7 +5,7 @@ repository_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repository_root"
 
 if public_doc_vocabulary=$(rg -n -i \
-  '\b(boundary|path|surface|authority|projection|lowering|flow|layer|contracts?)\b' \
+  '\b(boundary|path|surface|authority|projection|lowering|flow|layer|bounded|contracts?)\b' \
   README.md docs --glob '*.md' --glob '*.mdx' 2>/dev/null \
   | rg -v '\]\(docs/contracts/' || true); [[ -n "$public_doc_vocabulary" ]]; then
   printf 'CODE_PROTOCOL: public documentation uses vague architecture shorthand:\n%s\n' "$public_doc_vocabulary" >&2
