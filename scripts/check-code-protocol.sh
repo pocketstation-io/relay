@@ -4,20 +4,28 @@ set -euo pipefail
 repository_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repository_root"
 
+public_documents=()
+while IFS= read -r -d '' document; do
+  case "$document" in
+    *.md|*.mdx) public_documents+=("$document") ;;
+  esac
+done < <(git ls-files -z -- README.md docs)
+
 if public_doc_vocabulary=$(rg -n -i \
   '\b(boundary|path|surface|authority|projection|lowering|flow|layer|bounded|contracts?)\b' \
-  README.md docs --glob '*.md' --glob '*.mdx' 2>/dev/null \
-  | rg -v '\]\(docs/contracts/' || true); [[ -n "$public_doc_vocabulary" ]]; then
+  "${public_documents[@]}" 2>/dev/null \
+  | rg -v '\]\(docs/contracts/' \
+  | rg -v '^docs/contracts/SIGNALING_PROTOCOL\.md:[0-9]+:GET /v1/internal/sessions/\{session_id\}/authority$' || true); [[ -n "$public_doc_vocabulary" ]]; then
   printf 'CODE_PROTOCOL: public documentation uses vague architecture shorthand:\n%s\n' "$public_doc_vocabulary" >&2
   exit 1
 fi
 
-if unformatted=$(gofmt -l cmd internal test); [[ -n "$unformatted" ]]; then
+if unformatted=$(gofmt -l access cmd internal test); [[ -n "$unformatted" ]]; then
   printf 'CODE_PROTOCOL: gofmt violations:\n%s\n' "$unformatted" >&2
   exit 1
 fi
 
-if vague_directories=$(find cmd internal test -type d \( \
+if vague_directories=$(find access cmd internal test -type d \( \
   -name utils -o -name helpers -o -name common -o -name misc -o \
   -name shared -o -name base -o -name core -o -name manager -o \
   -name handler -o -name system \
@@ -40,12 +48,12 @@ if [[ -e cmd/fake-source ]]; then
   exit 1
 fi
 
-if section_banners=$(rg --no-ignore -n '^\s*//\s*[-=*#]{3,}' cmd internal test --glob '*.go' || true); [[ -n "$section_banners" ]]; then
+if section_banners=$(rg --no-ignore -n '^\s*//\s*[-=*#]{3,}' access cmd internal test --glob '*.go' || true); [[ -n "$section_banners" ]]; then
   printf 'CODE_PROTOCOL: section divider comments:\n%s\n' "$section_banners" >&2
   exit 1
 fi
 
-test_functions=$(rg --no-ignore -n '^func Test[A-Za-z0-9_]+' cmd internal test --glob '*.go' || true)
+test_functions=$(rg --no-ignore -n '^func Test[A-Za-z0-9_]+' access cmd internal test --glob '*.go' || true)
 if bad_tests=$(printf '%s\n' "$test_functions" | grep -v -E 'func TestGiven.+When.+Then|func TestMain' || true); [[ -n "$bad_tests" ]]; then
   printf 'CODE_PROTOCOL: tests without TestGiven...When...Then names:\n%s\n' "$bad_tests" >&2
   exit 1
@@ -53,12 +61,12 @@ fi
 
 if semantic_booleans=$(rg --no-ignore -n --pcre2 \
   '\b(reason|cause|category|policy|mode|direction|role|strategy|ownership|outcome|overrun)\s*:?\s*bool\b' \
-  cmd internal test --glob '*.go' || true); [[ -n "$semantic_booleans" ]]; then
+  access cmd internal test --glob '*.go' || true); [[ -n "$semantic_booleans" ]]; then
   printf 'CODE_PROTOCOL: semantic choices encoded as booleans:\n%s\n' "$semantic_booleans" >&2
   exit 1
 fi
 
-if rg --no-ignore -n 'internal/graph|\bgraph\.' cmd internal test --glob '*.go'; then
+if rg --no-ignore -n 'internal/graph|\bgraph\.' access cmd internal test --glob '*.go'; then
   printf 'CODE_PROTOCOL: legacy graph ownership remains\n' >&2
   exit 1
 fi

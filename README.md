@@ -1,105 +1,79 @@
 # PocketStation Relay
 
-Stream independently named application, microphone, caller, or generated-audio
-buses to native and browser receivers over WebRTC.
+PocketStation Relay provides Session access, readable join links and finite,
+source-aware WebRTC audio delivery. It carries independent application,
+microphone, caller and generated-audio buses to native or browser receivers.
+Capture, recording and model connectors remain separate owners. Relay owns
+Session access rules; managed control supplies persistence and orchestration.
 
 ```text
-authenticated publisher
-        │
-        ├─ application AudioBus ── selected receivers
-        ├─ microphone AudioBus ─── selected receivers
-        └─ assistant AudioBus ──── selected receivers
+authenticated source attachment
+              ↓
+       one RelaySession
+              ↓
+    named AudioBus + generation
+              ↓
+ finite BusSubscription fan-out
+              ↓
+ RTP continuity, pacing, repair, and observations
 ```
 
-Relay forwards live media. It does not capture desktop audio, run models, write
-recordings, or store durable application state. PocketStation Core captures and
-routes audio. The Control Plane creates RelaySessions and receiver invitations
-when a deployment uses control-plane mode.
+An `AudioBus` keeps a stable semantic identity while a transient publisher
+attachment, SSRC, and source generation may change. A subscriber selects one
+bus or the declared `mix` output.
 
-An `AudioBus` is a name such as `application`, `microphone`, or `assistant`.
-The name stays stable when a publisher reconnects; `source_generation`
-identifies the new attachment. A receiver is authorized for one bus or for a
-declared `mix` output.
+## Standalone and managed operation
 
-## Start Relay locally
+Standalone is the default. Relay includes Session creation, owner and per-bus
+credentials, readable links, one-use grant redemption, observation events and
+revocation. Memory requires no database. SQLite retains logical state across
+restarts when `POCKETSTATION_STORAGE=sqlite` and `POCKETSTATION_SQLITE_PATH` are
+set. Stored observations are cleared until live media reports again.
 
-You need Go 1.26 or newer and UDP access on the host.
+In managed operation, the control plane invokes the same Relay-owned `access`
+module with its selected storage adapter. It does not implement a second grant
+or signing policy. The separate media process uses authenticated internal calls:
 
-Generate development credentials and start standalone mode:
-
-```bash
-export POCKETSTATION_JWT_SECRET="$(openssl rand -hex 32)"
-export RELAY_INVITATION_SECRET="$(openssl rand -hex 32)"
-export RELAY_AUTHORITY_MODE="standalone"
-go run ./cmd/relay-server
+```text
+RELAY_AUTHORITY_MODE=control-plane
+RELAY_API_SERVER_URL=https://control.example.com
+PUBLIC_CONTROL_PLANE_URL=https://control.example.com
+POCKETSTATION_JWT_SECRET=<shared Session signing and verification secret>
+POCKETSTATION_INTERNAL_SECRET=<shared internal request secret>
 ```
 
-Relay listens on `http://127.0.0.1:4800` by default. In another terminal:
+`RELAY_API_SERVER_URL` stays internal. `GET /.well-known/pocketstation` advertises
+`schema_version: 1` and the public Session-service `authority_url` in both
+modes. Standalone advertises `PUBLIC_RELAY_URL`; managed operation advertises
+`PUBLIC_CONTROL_PLANE_URL` and retains the deprecated `control_plane_url` field.
+A configured public address must use HTTPS, except HTTP loopback development.
 
-```bash
-curl --fail http://127.0.0.1:4800/healthz
-```
+Both modes use one credential profile. New Sessions pin the Relay issuer;
+explicitly migrated Sessions can retain their recorded legacy issuer. The media
+server fetches the trusted Session profile before validating signature, issuer,
+audience, type, role, bus scope and incarnation. It acquires an ordered media
+placement term before allocating transport state. A displaced process cannot
+replace the newer process's observations.
 
-The response is `ok`. This confirms that the HTTP server is accepting work; it
-does not confirm ICE connectivity or media delivery.
+Managed media rejects local Session/join mutations: clients use the advertised
+Session service. A missing Session or unavailable service prevents admission.
+`CONTROL_AUTHORITY_TIMEOUT_MS` can reduce the default five-second admission
+bound. Reconciliation detects deletion after admission and closes media.
+`/healthz` reports process liveness; `/readyz` also checks the Session service.
 
-Publish three seconds of synthetic Opus with the repository test source:
+Readable names such as `rice-river` carry no permission by themselves. A shared
+URL includes the opaque credential in its fragment, and redemption uses POST.
+There is no separate invitation signing secret or name-based permission.
+See [Session access and storage](docs/access-service.md) for retry, expiry,
+renewal, recovery, adapter guarantees and finite capacity.
 
-```bash
-go run ./cmd/relay-test-source -- \
-  --relay http://127.0.0.1:4800 \
-  --duration 3s
-```
-
-The command creates a temporary RelaySession and prints the session, bus, and
-credentials. The fixture checks transport behavior. It is not desktop capture
-or physical-device evidence.
-
-Stop Relay with `Ctrl-C`. The default process shutdown deadline is 30 seconds;
-HTTP work receives a five-second drain interval inside that deadline.
-
-Continue with the [local setup guide](docs/getting-started/run-relay.md) when a
-receiver or Control Plane will join the test.
-
-## Choose how RelaySessions are created
-
-Relay supports two explicit operating modes.
-
-### Control-plane mode
-
-Use this mode when an application service owns RelaySession creation,
-required-bus readiness, receiver invitations, and scoped credentials.
-
-```bash
-export RELAY_AUTHORITY_MODE="control-plane"
-export RELAY_API_SERVER_URL="https://control.example.com"
-export POCKETSTATION_JWT_SECRET="<shared capability secret>"
-export POCKETSTATION_INTERNAL_SECRET="<state synchronization secret>"
-go run ./cmd/relay-server
-```
-
-The Control Plane signs source and receiver capabilities. Relay verifies their
-issuer, audience, token type, role, expiry, RelaySession ID, and AudioBus scope.
-Relay sends complete attachment-state snapshots back to the Control Plane after
-changes and at the configured reconciliation interval.
-
-Relay rejects local RelaySession and invitation creation endpoints in this
-mode.
-
-### Standalone mode
-
-Use standalone mode for a self-contained deployment or protocol development.
-Relay creates temporary RelaySessions and single-use invitations itself. It
-uses `RELAY_INVITATION_SECRET` to sign receiver capabilities.
-
-Credentials from one mode are not accepted in the other. Choose one mode for a
-deployment; do not configure fallback verification with the other issuer or
-secret.
+Deploy endpoints you own. Historical PocketStation Fly demonstration endpoints
+are rate-limited and do not establish a hosted-service guarantee or SLA.
 
 ## Publish named buses
 
-A source capability lists the buses a publisher may attach. One signaling
-connection can publish several WebRTC tracks:
+A source capability lists every bus the publisher may attach. One signaling
+connection can declare multiple independent tracks:
 
 ```json
 {
@@ -113,37 +87,29 @@ connection can publish several WebRTC tracks:
 }
 ```
 
-Every bus must be included in the capability. Stream IDs and bus IDs must be
-unique. Relay rejects missing credentials, ambiguous declarations, oversized
-messages, malformed SDP, and buses outside the token scope before attaching
-media.
+Every declared bus must be inside the token scope. Stream IDs and bus IDs must
+be unique. Relay rejects ambiguous, oversized, malformed, or out-of-scope
+declarations before media attachment.
 
-Rust applications can use the
-[`pocketstation-relay` Connector](https://github.com/pocketstation-io/connectors/tree/main/relay)
-instead of implementing signaling, Opus, RTP, and WebRTC publication.
+For one track, send an explicit `bus_id` instead.
 
-## Receive one selected bus
+## Receive a bus
 
-A receiver capability identifies exactly one RelaySession and AudioBus. Use it
-with WebSocket signaling or WHEP:
+A subscriber capability contains exactly one `bus_id`. Use it with WebSocket
+signaling or WHEP:
 
 ```http
 POST /v1/sessions/{session_id}/whep?bus=application
-Authorization: Bearer <receiver capability>
+Authorization: Bearer <subscriber capability>
 Content-Type: application/sdp
 ```
 
-The bus in the URL must match the capability. `mix` is an explicitly declared
-output, not permission to subscribe to every source.
+The URL bus cannot exceed the token scope. `mix` is a declared virtual output;
+it is not an unrestricted wildcard.
 
-For all HTTP endpoints and authentication requirements, read
-[HTTP and WebRTC](docs/reference/http-and-webrtc.md). For every signaling
-message, field limit, and error code, read
-[WebSocket signaling](docs/reference/signaling.md).
+## Control-state reconciliation
 
-## Keep the Control Plane synchronized
-
-Relay sends one complete state document after an accepted attachment change:
+Relay sends one complete state document for every accepted attachment change:
 
 ```json
 {
@@ -151,6 +117,7 @@ Relay sends one complete state document after an accepted attachment change:
   "session_id": "16d2491c-86ef-4a86-9ba7-af1d2d246244",
   "relay_epoch": "f78124e8-...",
   "revision": 7,
+  "writer_term": 1,
   "observed_at": "2026-08-21T17:45:00Z",
   "buses": [
     {"bus_id":"application","role":"application","source_active":true,"source_generation":2}
@@ -161,13 +128,78 @@ Relay sends one complete state document after an accepted attachment change:
 }
 ```
 
-A later complete snapshot replaces earlier Relay-owned state. Duplicate or
-reordered revisions are safe to acknowledge without replaying mutations. A new
-`relay_epoch` identifies a Relay process restart.
+The callback is authenticated and size-limited. A full snapshot replaces all
+Relay-owned state, so duplicate delivery is safe and callback loss is repaired
+by periodic reconciliation. Reconciliation resends the current revision; it
+does not manufacture a new transition.
 
-State-change notification enters a fixed-capacity mailbox without a lock,
-allocation, network request, or log call in RTP forwarding. If a notification
-is missed, periodic reconciliation sends the latest complete state again.
+State-change notification uses an atomic, nonblocking handoff. It does not add
+a lock, allocation, network call, or log operation to RTP forwarding.
+
+## Run locally
+
+You need Go 1.26 or newer and a host that permits UDP.
+
+Control-plane mode:
+
+```bash
+POCKETSTATION_JWT_SECRET=development-source-secret-32-bytes \
+POCKETSTATION_INTERNAL_SECRET=development-internal-secret-32-bytes \
+RELAY_AUTHORITY_MODE=control-plane \
+RELAY_API_SERVER_URL=http://127.0.0.1:4801 \
+PUBLIC_CONTROL_PLANE_URL=http://127.0.0.1:4801 \
+go run ./cmd/relay-server
+```
+
+Standalone mode:
+
+```bash
+POCKETSTATION_JWT_SECRET=development-source-secret-32-bytes \
+PUBLIC_RELAY_URL=http://127.0.0.1:4800 \
+PUBLIC_RECEIVER_URL=http://127.0.0.1:4173 \
+go run ./cmd/relay-server
+```
+
+The deterministic `relay-test-source` fixture can publish one named test bus
+with explicit credentials:
+
+```bash
+go run ./cmd/relay-test-source -- \
+  --relay http://127.0.0.1:4800 \
+  --session <session_id> \
+  --bus application \
+  --token <source_capability> \
+  --duration 3s
+```
+
+When both `--session` and `--token` are omitted, the fixture creates a temporary
+standalone Session. Managed operation requires both. It emits valid synthetic
+Opus for transport verification; it is not physical capture evidence.
+
+### Optional ICE-TCP
+
+To expose Relay's existing IPv4 ICE-TCP listener, add these variables to the
+chosen startup command and permit both ports in the deployment:
+
+```bash
+ICE_UDP_PORT=4802 ICE_TCP_PORT=4803 go run ./cmd/relay-server
+```
+
+Keep the authentication and Session-service variables from the selected mode above.
+In this source checkout, the default Relay-owned peer settings gather UDP
+candidates and passive TCP4 host candidates when `ICE_TCP_PORT` is enabled.
+Without a TCP mux, Pion's default UDP network types remain unchanged. A caller
+that supplies a `SettingEngine` or signaling `API` retains its network policy;
+it must enable TCP explicitly if needed.
+
+For a known Pion TCP mux bound to an IPv4 listener, those default settings reject
+IPv6 TCP requests before they reach the mux. UDP6 remains enabled. Custom and
+multiport muxes keep their own behavior and interfaces.
+
+ICE-TCP is a separate WebRTC listener, not HTTPS, WSS or an HTTP CONNECT proxy.
+It does not enable TURN. TCP6 support is not qualified. Local candidate tests qualify configuration
+only; deployed connectivity, browser audio decoding and off-host receivers
+require their own evidence. See [ICE configuration](docs/reference/configuration.md).
 
 ## Configure capacity before accepting traffic
 
@@ -200,9 +232,9 @@ claim.
   deployment secret manager.
 - Serve public HTTP and signaling endpoints over TLS.
 - Set `ALLOWED_ORIGINS` to the exact HTTPS origins hosting browser receivers.
-- Restrict `/metrics` and RelaySession diagnostic endpoints with a private
-  network, proxy, or ingress policy; Relay does not add administrator auth to
-  them.
+- Restrict `/metrics` with a private network, proxy, or ingress policy.
+  Session diagnostic endpoints require an exact-Session owner or subscriber
+  capability; packet logs also enforce bus scope.
 - Treat single-use invitation codes as credentials until redeemed or expired.
 - Plan coordinated secret rotation around the remaining capability lifetime.
 
@@ -211,19 +243,30 @@ media encryption only when both clients implement the same key exchange.
 
 Read [security](docs/operations/security.md) before exposing Relay publicly.
 
-## Configure ICE and TURN
+## Finite work
 
-Set `ICE_UDP_PORT` and expose that UDP port for a public Relay. Use
-`RELAY_PUBLIC_IPS` when the server must advertise a public address. Optional
-ICE-TCP uses `ICE_TCP_PORT`.
+Relay bounds:
 
-Set `TURN_PUBLIC_IP` and a 32-byte-or-longer `TURN_SHARED_SECRET` to enable the
-embedded TURN server. Expose the selected TURN listeners and the complete UDP
-allocation port range. Authentication can succeed while media still fails if
-firewalls block allocation ports.
+- RelaySessions and AudioBuses per Session;
+- subscriptions per Session;
+- concurrent signaling and WHIP/WHEP handshakes;
+- pending invitations in standalone mode;
+- control-state notifications;
+- callback duration and response size;
+- control-plane admission duration;
+- packet queues, repair caches, and packet age.
 
-The complete environment-variable reference is in
-[Relay configuration](docs/reference/configuration.md).
+When capacity is unavailable, Relay rejects new work before allocating media
+resources. It returns an explicit capacity response and does not grow an unbounded
+retry or callback queue. Operators should set limits for their own budget and
+expected audience; the repository's `fly.toml` intentionally describes only a
+small demonstration deployment.
+
+Deployment resource settings are not a billing ceiling. Measure host usage and
+check your provider’s current prices and network charges before deployment.
+
+For deployment instructions and endpoint references, see the
+[Relay documentation](docs/README.md).
 
 ## Observe a RelaySession
 
@@ -272,13 +315,15 @@ and limits you control for an application deployment.
 
 ```bash
 scripts/check-code-protocol.sh
-go test -race -short ./...
-go test -race ./internal/server ./test/integration
+go test -race ./...
 ```
 
-CI must pass before deployment. The deploy workflow checks out the successful
-revision and records it in the OCI image. Local or same-host tests do not
-establish WAN/TURN or multi-region performance.
+CI must pass before Fly deploys. Deployment checks out the exact successful CI
+revision and records it in the OCI image. A successful local or same-host test
+does not establish WAN/TURN or multi-region performance.
+
+See [the signaling specification](docs/contracts/SIGNALING_PROTOCOL.md) for the wire
+protocol and failure model.
 
 ## License
 

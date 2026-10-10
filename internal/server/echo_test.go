@@ -18,6 +18,7 @@ import (
 func TestGivenEchoEndpointWhenSendTimestampThenReflected(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
+	cleanupTestRelay(t, srv)
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
@@ -58,6 +59,7 @@ func TestGivenEchoEndpointWhenSendTimestampThenReflected(t *testing.T) {
 func TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
+	cleanupTestRelay(t, srv)
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
 
@@ -88,6 +90,7 @@ func TestGivenEchoEndpointWhenMultipleMessagesThenAllReflected(t *testing.T) {
 func TestGivenEchoEndpointWhenHTTPNotWebSocketThenBadRequest(t *testing.T) {
 	// Given
 	srv := server.New(server.Config{JWTSecret: []byte("test-secret-0123456789abcdef012345")})
+	cleanupTestRelay(t, srv)
 
 	// When — plain HTTP GET (no Upgrade header)
 	req := httptest.NewRequest(http.MethodGet, "/v1/echo", nil)

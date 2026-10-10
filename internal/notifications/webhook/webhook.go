@@ -24,11 +24,11 @@ const maxConcurrentDeliveries = 8
 type EventType string
 
 const (
-	// EventSessionStarted fires when a source publishes to a room.
+	// EventSessionStarted fires when a source publishes to a RelaySession.
 	EventSessionStarted EventType = "session_started"
 	// EventUtteranceDetected fires when a LATENCY_REPORT indicates active capture.
 	EventUtteranceDetected EventType = "utterance_detected"
-	// EventSessionEnded fires when a source or listener session disconnects.
+	// EventSessionEnded fires when a source or subscriber disconnects.
 	EventSessionEnded EventType = "session_ended"
 )
 

@@ -1,25 +1,16 @@
 # PocketStation Relay documentation
 
-Start with the deployment you want to run. The reference pages are for clients
-and operators that need exact message fields or configuration values.
-
-## Get started
-
 - [Run Relay locally](getting-started/run-relay.md)
-
-## Deploy and operate
-
 - [Configure Relay](reference/configuration.md)
 - [Secure credentials and browser access](operations/security.md)
 - [Set capacity and recover from failures](operations/capacity-and-recovery.md)
+- [Session access, naming and storage](access-service.md)
+- [WebSocket signaling](reference/signaling.md)
+- [HTTP and WebRTC endpoints](reference/http-and-webrtc.md)
 
-## Reference
-
-- [WebSocket signaling messages](reference/signaling.md)
-- [HTTP, WebSocket, WHIP, and WHEP endpoints](reference/http-and-webrtc.md)
-
-Relay forwards live media. It does not capture desktop audio, run models,
-write recordings, issue durable application state, or prove what a receiver's
-loudspeaker played. PocketStation Core and the language SDKs own capture and
-source-aware routing. The Control Plane owns RelaySession creation and scoped
-credentials in a production deployment.
+Relay owns the complete Session/join domain and live media transport. Standalone
+mounts both; managed control mounts the same Relay-owned access module and
+supplies persistence and operations. Memory is the default, SQLite is optional,
+and the control composition also supports PostgreSQL. No database is required
+for development. Relay does not capture audio, run model connectors or write
+multistem recordings. Those remain Core, SDK and connector responsibilities.

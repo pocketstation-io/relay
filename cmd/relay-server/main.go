@@ -14,7 +14,11 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/auth"
+	"github.com/pocketstation-io/relay/access"
+	"github.com/pocketstation-io/relay/access/admission"
+	"github.com/pocketstation-io/relay/access/storage"
+	"github.com/pocketstation-io/relay/access/storage/memory"
+	"github.com/pocketstation-io/relay/access/storage/sqlite"
 	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/notifications/webhook"
 	"github.com/pocketstation-io/relay/internal/server"
@@ -27,19 +31,55 @@ func main() {
 		slog.Error("POCKETSTATION_JWT_SECRET must contain at least 32 bytes")
 		os.Exit(1)
 	}
-	authorityMode := getenv("RELAY_AUTHORITY_MODE", "control-plane")
+	authorityMode := getenv("RELAY_AUTHORITY_MODE", "standalone")
 	if authorityMode != "control-plane" && authorityMode != "standalone" {
 		slog.Error("RELAY_AUTHORITY_MODE must be control-plane or standalone")
 		os.Exit(1)
 	}
-	subscriberSecret := []byte(os.Getenv("RELAY_INVITATION_SECRET"))
-	if authorityMode == "standalone" && len(subscriberSecret) < 32 {
-		slog.Error("RELAY_INVITATION_SECRET must contain at least 32 bytes in standalone authority mode")
-		os.Exit(1)
-	}
-	sourceIssuer := auth.ControlPlaneIssuer
+	var localAccess *access.Service
 	if authorityMode == "standalone" {
-		sourceIssuer = auth.RelayIssuer
+		var backend storage.Store
+		profile := getenv("POCKETSTATION_STORAGE", "memory")
+		if os.Getenv("POCKETSTATION_DATABASE_URL") != "" || os.Getenv("POCKETSTATION_INVITATION_DATABASE_URL") != "" {
+			slog.Error("standalone Relay supports memory or SQLite; embed a storage adapter for other backends")
+			os.Exit(1)
+		}
+		switch profile {
+		case "memory":
+			if os.Getenv("POCKETSTATION_SQLITE_PATH") != "" {
+				slog.Error("SQLite path requires sqlite storage profile")
+				os.Exit(1)
+			}
+			backend = memory.New()
+		case "sqlite":
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			var err error
+			backend, err = sqlite.Open(ctx, os.Getenv("POCKETSTATION_SQLITE_PATH"))
+			cancel()
+			if err != nil {
+				slog.Error("open SQLite storage", "error", err)
+				os.Exit(1)
+			}
+		default:
+			slog.Error("POCKETSTATION_STORAGE must be memory or sqlite for standalone Relay")
+			os.Exit(1)
+		}
+		defer backend.Close()
+		ttl, err := access.ParseSessionExpiryDuration(os.Getenv)
+		if err != nil {
+			slog.Error("invalid Session lifetime", "error", err)
+			os.Exit(1)
+		}
+		namePolicy, err := access.ParseNameAllocationPolicy(os.Getenv)
+		if err != nil {
+			slog.Error("invalid readable name policy", "error", err)
+			os.Exit(1)
+		}
+		localAccess, err = access.NewService(jwtSecret, backend, access.Config{NamePolicy: namePolicy, MaxSessions: getenvInt("RELAY_MAX_ROOMS", 100), MaxInvitations: getenvInt("RELAY_MAX_INVITATIONS", 400), MaxReceipts: getenvInt("POCKETSTATION_MAX_RECEIPTS", 400), SessionTTL: ttl, WriterID: getenv("POCKETSTATION_WRITER_ID", "standalone-relay")})
+		if err != nil {
+			slog.Error("start Session service", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	var cbClient *callback.Client
@@ -48,7 +88,7 @@ func main() {
 		slog.Error("RELAY_API_SERVER_URL is required in control-plane authority mode")
 		os.Exit(1)
 	}
-	if apiURL != "" {
+	if authorityMode == "control-plane" {
 		internalSecret := os.Getenv("POCKETSTATION_INTERNAL_SECRET")
 		var err error
 		cbClient, err = callback.NewClient(apiURL, internalSecret)
@@ -68,7 +108,7 @@ func main() {
 	// Build the ICE server list and start embedded TURN when configured.
 	// When TURN_PUBLIC_IP is unset the relay operates in STUN-only mode (dev).
 	//
-	// clientICEServers is what clients receive in createRoom so they can reach
+	// clientICEServers is what clients receive in Session creation responses to reach
 	// the relay's TURN server. The relay's own Pion peers use ICEServers=nil
 	// (falls back to stun.l.google.com when NAT1To1IPs is unset, or no STUN at
 	// all when NAT1To1IPs is set) to avoid self-STUN via the embedded TURN.
@@ -85,8 +125,8 @@ func main() {
 
 	cfg := server.Config{
 		JWTSecret:                jwtSecret,
-		SubscriberJWTSecret:      subscriberSecret,
-		SourceTokenIssuer:        sourceIssuer,
+		AccessService:            localAccess,
+		PublicRelayURL:           getenv("PUBLIC_RELAY_URL", "http://localhost:"+strconv.Itoa(getenvInt("PORT", 4800))),
 		AuthorityMode:            authorityMode,
 		MaxRooms:                 getenvInt("RELAY_MAX_ROOMS", 0),
 		MaxSubscribersPerRoom:    getenvInt("RELAY_MAX_SUBSCRIBERS_PER_SESSION", 0),
@@ -94,6 +134,7 @@ func main() {
 		MaxConcurrentHandshakes:  getenvInt("RELAY_MAX_CONCURRENT_HANDSHAKES", 0),
 		MaxInvitations:           getenvInt("RELAY_MAX_INVITATIONS", 0),
 		CallbackClient:           cbClient,
+		ControlAuthorityTimeout:  time.Duration(getenvInt("CONTROL_AUTHORITY_TIMEOUT_MS", 5000)) * time.Millisecond,
 		WebhookDispatcher:        whDispatcher,
 		ClientICEServers:         clientICEServers,
 		UseTURN:                  useTURN,
@@ -103,6 +144,15 @@ func main() {
 			ReconnectWindow:   time.Duration(reconnectWindowSec) * time.Second,
 			MaxBuses:          getenvInt("RELAY_MAX_BUSES_PER_SESSION", 0),
 		},
+	}
+
+	cfg.AccessHandlerConfig = access.HandlerConfig{
+		CreateAdmission:  admission.NewIPLimiter(getenvInt("MAX_ROOMS_PER_IP_PER_MINUTE", 10), time.Minute, 4096),
+		ResolveAdmission: admission.NewIPLimiter(getenvInt("POCKETSTATION_INVITATION_RESOLVE_RATE_PER_MINUTE", 120), time.Minute, 4096),
+		STUNURLs:         splitComma(os.Getenv("POCKETSTATION_STUN_URLS")),
+	}
+	if publicIP := os.Getenv("TURN_PUBLIC_IP"); publicIP != "" {
+		cfg.AccessHandlerConfig.TURN = &access.TURNConfig{PublicIP: publicIP, Secret: turnSecret, UDPPort: getenvInt("TURN_PORT", 3478), TLSPort: getenvInt("TURN_TLS_PORT", 5349)}
 	}
 
 	// ICE-TCP mux: enabled when ICE_TCP_PORT is set.

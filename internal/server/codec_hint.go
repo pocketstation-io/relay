@@ -2,10 +2,10 @@ package server
 
 // RTCP receiver reports drive CODEC_HINT adaptive bitrate feedback.
 //
-// Each listener PeerConnection sends RTCP Receiver Reports back to the relay
-// describing packet-loss fraction on the relay→listener leg. This file reads
+// Each subscriber PeerConnection sends RTCP Receiver Reports back to Relay
+// describing packet-loss fraction on the Relay-to-subscriber leg. This file reads
 // those reports, maps loss fraction to an Opus bitrate tier, debounces the
-// output to one hint per room per 2 seconds, and delivers a CODEC_HINT
+// output to one hint per RelaySession per two seconds, and delivers a CODEC_HINT
 // ServerMessage to the source session so the source can adjust its encoder.
 
 import (
@@ -37,13 +37,13 @@ const (
 	lossHighThreshold = 0.05
 
 	// codecHintDebounce is the minimum interval between CODEC_HINT messages
-	// sent to a source for a single room. Prevents encoder thrash under
-	// bursty RTCP from many listeners.
+	// sent to a source for one RelaySession. This prevents encoder thrash under
+	// bursty RTCP from many subscribers.
 	codecHintDebounce = 2 * time.Second
 )
 
-// codecHintState holds per-room debounce state for CODEC_HINT emission.
-// Stored in Server.codecHintStates keyed by room ID.
+// codecHintState holds per-RelaySession debounce state for CODEC_HINT emission.
+// Server.codecHintStates stores it by the compatibility room ID.
 type codecHintState struct {
 	mu       sync.Mutex
 	lastSent time.Time
@@ -100,9 +100,9 @@ func bitrateForLoss(fractionLost float64) signaling.CodecHintPayload {
 	}
 }
 
-// maybeEmitCodecHint sends a CODEC_HINT to the source session of roomID if the
-// debounce interval has elapsed. Safe to call concurrently from multiple listener
-// RTCP goroutines for the same room.
+// maybeEmitCodecHint sends a CODEC_HINT to the source peer for roomID if the
+// debounce interval has elapsed. It is safe to call concurrently from multiple
+// subscriber RTCP goroutines for the same RelaySession.
 func (s *Server) maybeEmitCodecHint(
 	roomID string,
 	hint signaling.CodecHintPayload,
@@ -136,8 +136,8 @@ func (s *Server) maybeEmitCodecHint(
 	})
 }
 
-// roomCodecHintState returns the shared codecHintState for roomID, creating it
-// if this is the first listener in the room.
+// roomCodecHintState returns the shared codecHintState for the compatibility
+// room ID, creating it when the first subscriber reports RTCP.
 func (s *Server) roomCodecHintState(roomID string) *codecHintState {
 	v, _ := s.codecHintStates.LoadOrStore(roomID, &codecHintState{})
 	return v.(*codecHintState)

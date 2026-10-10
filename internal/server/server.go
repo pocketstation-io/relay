@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"github.com/pocketstation-io/relay/access"
+	accessAdmission "github.com/pocketstation-io/relay/access/admission"
+	"github.com/pocketstation-io/relay/access/storage/memory"
+	accessTurn "github.com/pocketstation-io/relay/access/turn"
 	"net/http"
 	"os"
 	"strings"
@@ -11,7 +15,6 @@ import (
 	pionIce "github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/admission"
-	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/metrics"
 	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/notifications/webhook"
@@ -20,16 +23,20 @@ import (
 
 // Server is the top-level relay server.
 type Server struct {
+	accessService            *access.Service
+	accessHandlerConfig      access.HandlerConfig
+	accessInitError          error
+	mediaWriterMu            sync.Mutex
+	mediaWriters             map[string]*mediaWriter
 	relaySessions            *session.SessionRegistry
 	jwtSecret                []byte
-	subscriberJWTSecret      []byte
-	sourceTokenIssuer        string
 	authorityMode            string
 	settingEngine            *webrtc.SettingEngine
 	api                      *webrtc.API
 	Metrics                  *metrics.Registry
 	callbackClient           *callback.Client
 	relayEpoch               string
+	controlAuthorityTimeout  time.Duration
 	controlReconcileInterval time.Duration
 	controlStateChanges      chan *session.RelaySession
 	controlSyncOnce          sync.Once
@@ -38,7 +45,7 @@ type Server struct {
 	controlSyncWait          sync.WaitGroup
 	webhookDispatcher        *webhook.Dispatcher
 	iceServers               []webrtc.ICEServer // relay's own Pion PeerConnections
-	clientICEServers         []webrtc.ICEServer // returned to clients in createRoom
+	clientICEServers         []webrtc.ICEServer // returned in Session creation responses
 	iceTCPMux                pionIce.TCPMux
 	iceUDPMux                pionIce.UDPMux
 	nat1to1IPs               []string
@@ -48,14 +55,11 @@ type Server struct {
 	maxInvitations        int
 	handshakeAdmission    *admission.Gate
 
-	// ipLimiter enforces per-IP room-creation rate limiting.
-	// Nil when per-IP limiting is disabled (MaxRoomsPerIPPerMinute == -1).
-	ipLimiter *admission.IPLimiter
-
-	// mu guards httpServer and the active signaling-peer map.
-	mu          sync.RWMutex
-	httpServer  *http.Server
-	signalPeers map[string]*signalPeer
+	// mu guards lifecycle admission, httpServer and signaling-peer state.
+	mu           sync.RWMutex
+	httpServer   *http.Server
+	signalPeers  map[string]*signalPeer
+	shuttingDown bool
 
 	// codecHintStates and iceRestartStates are keyed by RelaySession ID.
 	// sync.Map for concurrent access from multiple subscriber RTCP goroutines.
@@ -67,13 +71,16 @@ type Server struct {
 	// sync.Map: concurrent PATCH/DELETE from multiple HTTP goroutines.
 	whipConns sync.Map
 
+	// audioIngressConns contains authenticated, bounded WSS media sources.
+	// Each retains a handshake admission slot until its source closes.
+	audioIngressConns sync.Map
+
 	// useTURN is set once from Config.UseTURN; propagated to ICE_RESTART msgs.
 	useTURN bool
 
-	publicReceiverURL string
-	publicRelayURL    string
-	joinMu            sync.Mutex
-	joinInvites       map[string]joinInvite
+	publicReceiverURL     string
+	publicRelayURL        string
+	publicControlPlaneURL string
 }
 
 // New creates a Server from cfg.
@@ -98,30 +105,19 @@ func New(cfg Config) *Server {
 	if reconcileInterval <= 0 {
 		reconcileInterval = defaultControlReconcileInterval
 	}
+	authorityTimeout := cfg.ControlAuthorityTimeout
+	if authorityTimeout <= 0 {
+		authorityTimeout = defaultControlAuthorityTimeout
+	} else if authorityTimeout > defaultControlAuthorityTimeout {
+		authorityTimeout = defaultControlAuthorityTimeout
+	}
 	relayEpoch := cfg.RelayEpoch
 	if relayEpoch == "" {
 		relayEpoch = newID()
 	}
-	subscriberSecret := cfg.SubscriberJWTSecret
-	if len(subscriberSecret) == 0 {
-		subscriberSecret = cfg.JWTSecret
-	}
-	sourceIssuer := cfg.SourceTokenIssuer
-	if sourceIssuer == "" {
-		sourceIssuer = auth.RelayIssuer
-	}
 	authorityMode := cfg.AuthorityMode
 	if authorityMode == "" {
 		authorityMode = "standalone"
-	}
-
-	var ipLim *admission.IPLimiter
-	if cfg.MaxRoomsPerIPPerMinute != -1 {
-		maxPerIP := cfg.MaxRoomsPerIPPerMinute
-		if maxPerIP <= 0 {
-			maxPerIP = defaultMaxRoomsPerIPPerMinute
-		}
-		ipLim = admission.New(int64(maxPerIP), time.Minute)
 	}
 
 	// Propagate MaxSubscriptions into the RegistryConfig so each RelaySession
@@ -137,18 +133,43 @@ func New(cfg Config) *Server {
 	if publicRelayURL == "" {
 		publicRelayURL = strings.TrimSpace(os.Getenv("PUBLIC_RELAY_URL"))
 	}
+	publicControlPlaneURL := strings.TrimSpace(cfg.PublicControlPlaneURL)
+	if publicControlPlaneURL == "" {
+		publicControlPlaneURL = strings.TrimSpace(os.Getenv("PUBLIC_CONTROL_PLANE_URL"))
+	}
 
+	service := cfg.AccessService
+	var initErr error
+	if authorityMode == "standalone" && service == nil {
+		service, initErr = access.NewService(cfg.JWTSecret, memory.New(), access.Config{MaxSessions: maxRooms, MaxInvitations: maxInvitations})
+	}
+	handlerConfig := cfg.AccessHandlerConfig
+	for _, ice := range cfg.ClientICEServers {
+		credential, _ := ice.Credential.(string)
+		handlerConfig.ICEServers = append(handlerConfig.ICEServers, accessTurn.ICEServer{URLs: append([]string(nil), ice.URLs...), Username: ice.Username, Credential: credential})
+	}
+
+	if handlerConfig.CreateAdmission == nil {
+		limit := cfg.MaxRoomsPerIPPerMinute
+		if limit == 0 {
+			limit = defaultMaxRoomsPerIPPerMinute
+		}
+		handlerConfig.CreateAdmission = accessAdmission.NewIPLimiter(limit, time.Minute, 4096)
+	}
+	if handlerConfig.ResolveAdmission == nil {
+		handlerConfig.ResolveAdmission = accessAdmission.NewIPLimiter(120, time.Minute, 4096)
+	}
 	return &Server{
+		accessService: service, accessInitError: initErr, accessHandlerConfig: handlerConfig, mediaWriters: make(map[string]*mediaWriter),
 		relaySessions:            session.NewRegistryWithConfig(regCfg),
 		jwtSecret:                cfg.JWTSecret,
-		subscriberJWTSecret:      subscriberSecret,
-		sourceTokenIssuer:        sourceIssuer,
 		authorityMode:            authorityMode,
 		settingEngine:            cfg.SettingEngine,
 		api:                      cfg.API,
 		Metrics:                  metrics.New(),
 		callbackClient:           cfg.CallbackClient,
 		relayEpoch:               relayEpoch,
+		controlAuthorityTimeout:  authorityTimeout,
 		controlReconcileInterval: reconcileInterval,
 		controlStateChanges:      make(chan *session.RelaySession, maxRooms),
 		webhookDispatcher:        cfg.WebhookDispatcher,
@@ -161,11 +182,10 @@ func New(cfg Config) *Server {
 		maxSubscribersPerRoom:    maxSubs,
 		maxInvitations:           maxInvitations,
 		handshakeAdmission:       admission.NewGate(maxHandshakes),
-		ipLimiter:                ipLim,
 		signalPeers:              make(map[string]*signalPeer),
 		useTURN:                  cfg.UseTURN,
 		publicReceiverURL:        strings.TrimRight(publicReceiverURL, "/"),
 		publicRelayURL:           strings.TrimRight(publicRelayURL, "/"),
-		joinInvites:              make(map[string]joinInvite),
+		publicControlPlaneURL:    strings.TrimRight(publicControlPlaneURL, "/"),
 	}
 }

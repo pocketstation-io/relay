@@ -6,9 +6,9 @@ import (
 )
 
 // handleKeyExchange forwards an SFrame KEY_EXCHANGE message from the source to
-// all subscriber sessions. The relay forwards SFrameKey
-// verbatim without reading the key material, preserving the SFrame guarantee
-// that the relay never holds plaintext audio.
+// all subscriber peers in the RelaySession. The Relay forwards SFrameKey
+// verbatim. This forwarding does not itself implement frame encryption or
+// establish an endpoint confidentiality guarantee.
 //
 // Invariant: only the source role may send KEY_EXCHANGE.
 func (s *signalPeer) handleKeyExchange(msg signaling.ClientMessage) {

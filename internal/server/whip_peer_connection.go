@@ -22,14 +22,27 @@ func (s *Server) newWHIPPeerConnection() (*webrtc.PeerConnection, *clocklineage.
 	}
 
 	settingEngine := webrtc.SettingEngine{}
+	if s.settingEngine != nil {
+		settingEngine = *s.settingEngine
+	}
 	if s.iceUDPMux != nil {
 		settingEngine.SetICEUDPMux(s.iceUDPMux)
 	}
 	if s.iceTCPMux != nil {
-		settingEngine.SetICETCPMux(s.iceTCPMux)
+		tcpMux := s.iceTCPMux
+		if s.settingEngine == nil {
+			tcpMux = relayDefaultTCPMux(tcpMux)
+			settingEngine.SetNetworkTypes([]webrtc.NetworkType{
+				webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6, webrtc.NetworkTypeTCP4,
+			})
+		}
+		settingEngine.SetICETCPMux(tcpMux)
 	}
 	if len(s.nat1to1IPs) > 0 {
 		settingEngine.SetNAT1To1IPs(s.nat1to1IPs, webrtc.ICECandidateTypeHost)
+	}
+	if s.explicitLoopbackICE() {
+		settingEngine.SetIncludeLoopbackCandidate(true)
 	}
 	api := webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingEngine),

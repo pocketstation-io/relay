@@ -37,8 +37,8 @@ var (
 // (relay.out("mix") semantics). Buses are created lazily on first PUBLISH.
 //
 // Invariants:
-//   - busesMu guards the buses map for writes; reads inside forwardLoop go
-//     through the room's atomic subscription pointer (no room lock on hot path).
+//   - busesMu guards the buses map for writes; reads inside forwardLoop use the
+//     RelaySession's atomic subscription pointer (no Session lock on the hot path).
 //   - subscriptions is copy-on-write behind subscriptionsMu.
 //   - done is closed by Close and signals all bus forwardLoops to stop.
 type RelaySession struct {
@@ -48,7 +48,7 @@ type RelaySession struct {
 	busesMu sync.RWMutex
 	buses   map[BusID]*AudioBus
 
-	// subscriptionsMu and subscriptions are room-wide; every bus forwardLoop
+	// subscriptionsMu and subscriptions are Session-wide; every bus forwardLoop
 	// writes here tagged with its BusID, and deliver filters per subscriber
 	// (BusMix subscribers receive all buses on one track).
 	subscriptionsMu sync.Mutex
@@ -75,8 +75,8 @@ type RelaySession struct {
 	inactivityTimeout time.Duration
 	reconnectWindow   time.Duration
 
-	// expiryTimer drives active-media-aware room expiry: it periodically closes
-	// the room only when it is truly idle (Corrected Audit §6.4).
+	// expiryTimer drives active-media-aware Session expiry. It closes the
+	// RelaySession only after the configured idle interval.
 	expiryMu    sync.Mutex
 	expiryTimer *time.Timer
 
@@ -138,12 +138,12 @@ func newWithTimeouts(id string, inactivityTimeout, reconnectWindow time.Duration
 // deliver is the hot-path function passed to each AudioBus.forwardLoop. It
 // writes pkt to every subscriber that selected this bus (entry.busID == busID)
 // or the virtual mix (entry.busID == BusMix). A BusMix subscriber therefore
-// receives RTP from all buses — byte-identical to the room-wide behavior.
+// receives RTP from all buses through one subscription.
 //
 // errCounts and deadSubs are pre-allocated per bus. A subscriber with
 // negotiated packet mutation currently requires a deep RTP header clone; that
 // clone allocates extension storage and remains a measured optimization target.
-// Close terminates the room and all its buses. Safe to call multiple times.
+// Close terminates the RelaySession and all its buses. Safe to call multiple times.
 func (r *RelaySession) Close() {
 	r.closeOnce.Do(func() {
 		close(r.done)
@@ -162,3 +162,6 @@ func (r *RelaySession) Close() {
 		}
 	})
 }
+
+// Done closes when Session authority ends; transport owners must stop attachments.
+func (r *RelaySession) Done() <-chan struct{} { return r.done }
