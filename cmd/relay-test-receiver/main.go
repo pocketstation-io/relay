@@ -146,7 +146,7 @@ func receive(relayBase, sessionID, busID, token, stunURL string, timeout time.Du
 
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	for connected == nil || packetReceived == nil {
+	for connected != nil || packetReceived != nil {
 		select {
 		case <-connected:
 			connected = nil

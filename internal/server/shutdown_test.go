@@ -35,6 +35,8 @@ func newShutdownTestServer(t *testing.T) (*httptest.Server, *server.Server, *web
 		JWTSecret: []byte(shutdownTestJWTSecret),
 		API:       api,
 	})
+
+	cleanupTestRelay(t, srv)
 	ts := httptest.NewServer(srv.Handler())
 	return ts, srv, api
 }
@@ -48,11 +50,14 @@ func createShutdownRoom(t *testing.T, ts *httptest.Server) (roomID, sourceToken,
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	var payload map[string]string
+	var payload struct {
+		SessionID   string `json:"session_id"`
+		SourceToken string `json:"source_token"`
+	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("decode room response: %v", err)
 	}
-	return payload["session_id"], payload["source_token"], payload["subscriber_token"]
+	return payload.SessionID, payload.SourceToken, subscriberForOwner(t, ts, payload.SessionID, payload.SourceToken)
 }
 
 // dialShutdownSignal dials the /v1/signal endpoint.

@@ -73,6 +73,7 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.signalPeers, peer.id)
 		s.mu.Unlock()
+		peer.closeConn()
 		peer.cleanup()
 	}()
 	peer.run()

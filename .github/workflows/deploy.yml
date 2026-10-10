@@ -45,6 +45,8 @@ jobs:
       - name: Deploy relay to Fly.io
         run: >-
           flyctl deploy --remote-only
+          --ha=false --update-only --no-public-ips --depot=false
+          --max-concurrent 1 --deploy-retries 0 --wait-timeout 180s
           --build-arg GIT_SHA=${{ github.event.workflow_run.head_sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

@@ -41,8 +41,8 @@ GET /v1/sessions/{id}/media-debug
 GET /v1/sessions/{id}/packet-log?bus={bus_id}&limit=100
 ```
 
-The packet-log limit is capped at 1,000 records. Restrict these endpoints before
-a public deployment.
+These Session endpoints require owner/subscriber authentication; packet logs
+also enforce bus scope. Restrict unauthenticated process metrics at ingress.
 
 ## Handle publisher loss
 
@@ -54,6 +54,17 @@ from uninterrupted media.
 After the reconnect window or RelaySession expiry, create or resolve a new
 RelaySession according to the application's ownership rules. Do not reuse an
 expired capability indefinitely.
+
+## Durable state versus live connections
+
+Memory loses logical Sessions on restart. SQLite retains credentials, grants
+and capacity-limited retry receipts, but not PeerConnections or proof of active capture.
+Clients must reconnect with valid credentials. An access-service outage denies
+new admission; established media continues until an authoritative deletion is
+observed or another documented media lifecycle limit applies. Owner renewal
+must precede its returned expiry even while idle. See [storage and recovery](../access-service.md)
+for leases, placement fencing and explicit old-backup reset. No automatic HA or
+seamless media resume is promised.
 
 ## Shut down cleanly
 

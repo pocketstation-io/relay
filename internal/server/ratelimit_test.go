@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/server"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -31,6 +30,7 @@ func newRateLimitTestServer(t *testing.T, maxRooms, maxListeners int) *httptest.
 		MaxRooms:              maxRooms,
 		MaxSubscribersPerRoom: maxListeners,
 	})
+	cleanupTestRelay(t, srv)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -45,7 +45,14 @@ func postRoom(t *testing.T, ts *httptest.Server) (statusCode int, body map[strin
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	_ = json.Unmarshal(raw, &body)
+	var decoded map[string]any
+	_ = json.Unmarshal(raw, &decoded)
+	body = make(map[string]string)
+	for key, value := range decoded {
+		if text, ok := value.(string); ok {
+			body[key] = text
+		}
+	}
 	return resp.StatusCode, body
 }
 
@@ -65,7 +72,7 @@ func dialRateLimitSignal(t *testing.T, ts *httptest.Server) *websocket.Conn {
 
 // TestGivenMaxRoomsReachedWhenCreateRoomThen429 verifies that once the
 // room count reaches MaxRooms, POST /v1/sessions returns HTTP 429 with
-// {"error":"room_limit_exceeded"}.
+// {"error":"session_capacity_reached"}.
 func TestGivenMaxRoomsReachedWhenCreateRoomThen429(t *testing.T) {
 	// Given — a server with a limit of 2 rooms.
 	const limit = 2
@@ -74,7 +81,7 @@ func TestGivenMaxRoomsReachedWhenCreateRoomThen429(t *testing.T) {
 	// Fill up to the limit.
 	for i := 0; i < limit; i++ {
 		code, _ := postRoom(t, ts)
-		if code != http.StatusOK {
+		if code != http.StatusCreated {
 			t.Fatalf("room %d: expected 200, got %d", i+1, code)
 		}
 	}
@@ -86,8 +93,8 @@ func TestGivenMaxRoomsReachedWhenCreateRoomThen429(t *testing.T) {
 	if code != http.StatusTooManyRequests {
 		t.Errorf("expected 429, got %d", code)
 	}
-	if body["error"] != "room_limit_exceeded" {
-		t.Errorf("expected error room_limit_exceeded, got %q", body["error"])
+	if body["error"] != "session_capacity_reached" {
+		t.Errorf("expected error session_capacity_reached, got %q", body["error"])
 	}
 }
 
@@ -96,6 +103,7 @@ func TestGivenHandshakeCapacityOccupiedWhenAnotherWebSocketConnectsThenItIsRejec
 		JWTSecret:               []byte(rateLimitJWTSecret),
 		MaxConcurrentHandshakes: 1,
 	})
+	cleanupTestRelay(t, server)
 	testServer := httptest.NewServer(server.Handler())
 	t.Cleanup(testServer.Close)
 
@@ -137,35 +145,13 @@ func TestGivenMaxListenersReachedWhenSubscribeThenErrorFrame(t *testing.T) {
 
 	// Create a room.
 	code, roomBody := postRoom(t, ts)
-	if code != http.StatusOK {
+	if code != http.StatusCreated {
 		t.Fatalf("create room: expected 200, got %d", code)
 	}
-	listenerToken := roomBody["subscriber_token"]
-	if listenerToken == "" {
-		t.Fatal("no subscriber_token in Session response")
-	}
-
-	// Send one SUBSCRIBE that fills the limit. We don't complete the full
-	// WebRTC handshake — we just need the session registered in the room.
-	// The listener is registered in handleJoin before the SDP exchange, so
-	// we need to provide a valid SDP offer to reach that code path.
-	//
-	// Strategy: sign a listener token directly and send SUBSCRIBE with a
-	// minimal offer. We verify only that the second SUBSCRIBE gets the error.
+	roomID := roomBody["session_id"]
+	listenerToken := subscriberForOwner(t, ts, roomID, roomBody["source_token"])
+	listenerToken2 := subscriberForOwner(t, ts, roomID, roomBody["source_token"])
 	conn1 := dialRateLimitSignal(t, ts)
-
-	// Parse session_id from the token to sign a second listener token.
-	claims, err := auth.Verify([]byte(rateLimitJWTSecret), listenerToken)
-	if err != nil {
-		t.Fatalf("verify listener token: %v", err)
-	}
-	roomID := claims.SessionID
-
-	// Sign a second listener token for the same room.
-	listenerToken2, err := auth.SignSubscriber([]byte(rateLimitJWTSecret), auth.RelayIssuer, roomID, "mix", time.Hour)
-	if err != nil {
-		t.Fatalf("sign second listener token: %v", err)
-	}
 
 	// First subscriber: send SUBSCRIBE without SDP — the server will error on
 	// SDP validation but the listener count check happens after AddListener.

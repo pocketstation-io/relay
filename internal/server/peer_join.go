@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/media/clocklineage"
 	"github.com/pocketstation-io/relay/internal/media/downlink"
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/notifications/webhook"
 	"github.com/pocketstation-io/relay/internal/session"
 	"github.com/pocketstation-io/relay/internal/signaling"
@@ -25,8 +28,15 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 	}
 	claims, err := peer.srv.verifyCapability(message.Token, expectedRole)
 	if err != nil {
-		slog.Warn("bad token", "session_id", peer.id, "error", err)
-		peer.sendError(signaling.ErrCodeBadToken, err.Error())
+		if errors.Is(err, callback.ErrSessionNotFound) {
+			peer.sendError(signaling.ErrCodeSessionNotActive, "Session is not active")
+			return
+		}
+		if errors.Is(err, errAuthorityUnavailable) {
+			peer.sendError(signaling.ErrCodeAuthorityUnavailable, "Session service unavailable")
+			return
+		}
+		peer.sendError(signaling.ErrCodeBadToken, "invalid Session credential")
 		return
 	}
 
@@ -43,19 +53,6 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 	if sessionID == "" {
 		sessionID = message.EffectiveSessionID()
 	}
-	relaySession, _, accepted := peer.srv.relaySessions.GetOrCreateWithinLimit(
-		sessionID,
-		peer.srv.maxRooms,
-	)
-	if !accepted {
-		peer.sendError(signaling.ErrCodeRoomLimitExceeded, "relay has reached its RelaySession limit")
-		return
-	}
-	peer.room = relaySession
-	peer.srv.bindControlState(relaySession)
-	peer.srv.queueControlState(relaySession)
-	peer.role = claims.Role
-
 	var publishBuses *publishBusPlan
 	var busID session.BusID
 	if message.Type == signaling.TypePublish {
@@ -77,7 +74,32 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 		if busID == "" {
 			busID = session.BusMix
 		}
+		if !claims.AllowsBus(string(busID)) {
+			peer.sendError(signaling.ErrCodeBadRequest, "subscriber capability does not authorize requested AudioBus")
+			return
+		}
 	}
+	if err := peer.srv.requireActiveControlSession(context.Background(), sessionID); err != nil {
+		if errors.Is(err, callback.ErrSessionNotFound) {
+			peer.sendError(signaling.ErrCodeSessionNotActive, "control-plane Session is not active")
+			return
+		}
+		slog.Warn("control-plane Session admission failed", "relay_session_id", sessionID, "error", err)
+		peer.sendError(signaling.ErrCodeAuthorityUnavailable, "control-plane authority is unavailable")
+		return
+	}
+	relaySession, _, accepted := peer.srv.relaySessions.GetOrCreateWithinLimit(
+		sessionID,
+		peer.srv.maxRooms,
+	)
+	if !accepted {
+		peer.sendError(signaling.ErrCodeRoomLimitExceeded, "relay has reached its RelaySession limit")
+		return
+	}
+	peer.room = relaySession
+	peer.srv.bindControlState(relaySession)
+	peer.srv.queueControlState(relaySession)
+	peer.role = claims.Role
 	peer.busID = busID
 
 	if message.Type == signaling.TypePublish && message.Public {
@@ -101,6 +123,15 @@ func (peer *signalPeer) handleJoin(message signaling.ClientMessage) {
 		return
 	}
 	peer.pc = connection
+	// Closing the socket unblocks the owning signaling loop, whose cleanup closes
+	// its PeerConnection. Do not race that owner by touching peer.pc here.
+	go func() {
+		select {
+		case <-relaySession.Done():
+			_ = peer.conn.Close()
+		case <-peer.done:
+		}
+	}()
 	peer.lineage = lineage
 	var localDescriptionSDP string
 

@@ -16,7 +16,7 @@
 //  3. Publisher opens a fresh WebSocket, performs PUBLISH handshake on the
 //     same room_id (same token), and reconnects.
 //  4. Verifies the relay accepts the reconnect (no ERROR response).
-//  5. Verifies the room is still active (GET /v1/rooms/<id> or room-state check).
+//  5. Verifies the room is still active (GET /v1/sessions/<id> or room-state check).
 //  6. Asserts reconnect completed in under 5 seconds.
 //
 // The relay's source reconnect window is configured to be longer than the
@@ -105,7 +105,7 @@ func TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores(t *testing.T
 	// the room survives each deliberate disconnect.
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
-		JWTSecret: []byte("reconnect-soak-secret"),
+		JWTSecret: []byte("reconnect-soak-secret-0123456789abcdef0123456789abcdef"),
 		API:       api,
 		RegistryConfig: session.RegistryConfig{
 			InactivityTimeout: window + 10*time.Minute,
@@ -115,15 +115,16 @@ func TestGivenPublisherWhenReconnectsAtIntervalsThenSessionRestores(t *testing.T
 	})
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
+	defer srv.Shutdown(context.Background())
 
 	// Room.
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewBufferString(`{"required_buses":["application"]}`))
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
 	defer resp.Body.Close()
 	var roomPayload struct {
-		RoomID      string `json:"room_id"`
+		RoomID      string `json:"session_id"`
 		SourceToken string `json:"source_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&roomPayload); err != nil {

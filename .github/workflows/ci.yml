@@ -59,7 +59,6 @@ jobs:
           PORT=8080 \
             RELAY_AUTHORITY_MODE=standalone \
             POCKETSTATION_JWT_SECRET=smoke-source-secret-0123456789abcdef \
-            RELAY_INVITATION_SECRET=smoke-receiver-secret-0123456789abc \
             "${RUNNER_TEMP}/relay-server" &
           relay_pid=$!
           trap 'kill "${relay_pid}" 2>/dev/null || true' EXIT

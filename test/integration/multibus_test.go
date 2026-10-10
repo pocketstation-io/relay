@@ -3,6 +3,8 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -10,7 +12,6 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
 
@@ -56,9 +57,9 @@ func TestGivenOnePublisherWithTwoDeclaredTracksWhenSubscribersSelectBusesThenAud
 	waitICEConnected(ctx, t, publisher)
 
 	received := make(chan receivedBusPacket, 2)
-	applicationSubscriber := subscribeToBus(t, ctx, testServer, clientAPI, sessionID, "application", received)
+	applicationSubscriber := subscribeToBus(t, ctx, testServer, clientAPI, sessionID, session["source_token"], "application", received)
 	defer applicationSubscriber.Close()
-	microphoneSubscriber := subscribeToBus(t, ctx, testServer, clientAPI, sessionID, "microphone", received)
+	microphoneSubscriber := subscribeToBus(t, ctx, testServer, clientAPI, sessionID, session["source_token"], "microphone", received)
 	defer microphoneSubscriber.Close()
 
 	applicationPayload := []byte{0xA1, 0xA2, 0xA3}
@@ -118,20 +119,32 @@ func subscribeToBus(
 	testServer *httptest.Server,
 	clientAPI *webrtc.API,
 	sessionID string,
+	ownerToken string,
 	busID string,
 	received chan<- receivedBusPacket,
 ) *webrtc.PeerConnection {
 	t.Helper()
-	token, err := auth.SignBus(
-		[]byte(testJWTSecret),
-		sessionID,
-		busID,
-		auth.RoleSubscriber,
-		time.Minute,
-	)
+	encoded, _ := json.Marshal(map[string]string{"bus_id": busID})
+	request, err := http.NewRequest(http.MethodPost, testServer.URL+"/v1/sessions/"+sessionID+"/subscribe", bytes.NewReader(encoded))
 	if err != nil {
-		t.Fatalf("sign %s subscriber token: %v", busID, err)
+		t.Fatal(err)
 	}
+	request.Header.Set("Authorization", "Bearer "+ownerToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("subscriber issuance status=%d", response.StatusCode)
+	}
+	var result struct {
+		Token string `json:"subscriber_token"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	token := result.Token
 
 	connection := dialSignal(t, testServer)
 	messages := readServerMessages(connection)
