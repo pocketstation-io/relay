@@ -1,6 +1,11 @@
 package downlink
 
 import (
+	"encoding/binary"
+	"errors"
+	"reflect"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -8,6 +13,317 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pocketstation-io/relay/internal/session"
 )
+
+func assertOwnedPacketsReleased(t *testing.T, pacer *AudioCadencePacer) {
+	t.Helper()
+	for slotIndex := range pacer.ownedPackets {
+		if pacer.ownedPackets[slotIndex].claimed.Load() {
+			t.Errorf("owned slot %d remains claimed after joined stop", slotIndex)
+		}
+	}
+	if pacer.enqueuedCount.Load() != pacer.completedCount.Load() {
+		t.Errorf("enqueued/completed = %d/%d after stop", pacer.enqueuedCount.Load(), pacer.completedCount.Load())
+	}
+}
+
+func TestGivenBoundedOwnershipStorageWhenMeasuredThenFiftySubscribersStayWithinBudget(t *testing.T) {
+	slotBytes := reflect.TypeFor[ownedPacerPacket]().Size()
+	scratchBytes := reflect.TypeFor[pacerWritePacket]().Size()
+	cacheOwnerBytes := uintptr(retransmissionCachePackets) * reflect.TypeFor[*ownedPacerPacket]().Size()
+	queuePendingOwnerBytes := uintptr(2*defaultPacerCapacity+1) * reflect.TypeFor[*ownedPacerPacket]().Size()
+	// Include the added admission/cursor/slice state; round up its padding.
+	ownershipBytes := uintptr(ownedPacerPacketCount)*slotBytes + scratchBytes + cacheOwnerBytes + queuePendingOwnerBytes + 64
+	if ownershipBytes > 2*1024*1024 {
+		t.Fatalf("ownership storage %d bytes exceeds2MiB per subscriber", ownershipBytes)
+	}
+	t.Logf("slot_count=%d slot_bytes=%d scratch_bytes=%d ownership_bytes=%d fifty_subscribers_bytes=%d", ownedPacerPacketCount, slotBytes, scratchBytes, ownershipBytes, 50*ownershipBytes)
+}
+
+func TestGivenOwnedHeadersAndBorrowedPayloadWhenEnqueuedThenNoHeapAllocationIsAdded(t *testing.T) {
+	pacer := &AudioCadencePacer{
+		queue:        make(chan pacedPacket, defaultPacerCapacity),
+		ownedPackets: make([]ownedPacerPacket, ownedPacerPacketCount),
+	}
+	packet := &rtp.Packet{Header: rtp.Header{Version: 2, CSRC: []uint32{7}}, Payload: []byte{0xf8, 1, 2}}
+	if err := packet.SetExtension(8, []byte{3, 4, 5}); err != nil {
+		t.Fatal(err)
+	}
+	allocationsCount := testing.AllocsPerRun(1000, func() {
+		if err := pacer.Enqueue(packet); err != nil {
+			panic(err)
+		}
+		item := <-pacer.queue
+		item.release()
+		pacer.completedCount.Add(1)
+	})
+	if allocationsCount != 0 {
+		t.Fatalf("owned enqueue allocations = %g, want0", allocationsCount)
+	}
+	assertOwnedPacketsReleased(t, pacer)
+	t.Logf("owned_enqueue_allocations_per_packet=%g", allocationsCount)
+}
+
+func TestGivenCanonicalPacketWhenMutablePrimaryAndNackScratchWritesThenNoHeapOrAliasingOccurs(t *testing.T) {
+	packet := &rtp.Packet{Header: rtp.Header{Version: 2, CSRC: []uint32{7}}, Payload: []byte{0xf8, 1, 2}}
+	if err := packet.SetExtension(8, []byte{3, 4, 5}); err != nil {
+		t.Fatal(err)
+	}
+	pacer := &AudioCadencePacer{write: func(scratch *rtp.Packet) error {
+		scratch.CSRC[0] = 0
+		scratch.GetExtension(8)[0] = 0
+		scratch.Payload[0] = 0
+		return nil
+	}}
+	allocationsCount := testing.AllocsPerRun(1000, func() {
+		if err := pacer.writeOwnedPacket(packet); err != nil {
+			panic(err)
+		}
+	})
+	if allocationsCount != 0 || packet.CSRC[0] != 7 || packet.GetExtension(8)[0] != 3 || packet.Payload[0] != 0xf8 {
+		t.Fatalf("scratch allocations=%g or canonical packet mutated", allocationsCount)
+	}
+	t.Logf("deep_writer_scratch_allocations_per_packet=%g", allocationsCount)
+}
+
+func TestGivenInvalidOrOversizedInputWhenEnqueuedThenBoundsErrorClaimsNoSlot(t *testing.T) {
+	pacer := newAudioForwardPacer(func(*rtp.Packet) error { return nil })
+	defer pacer.Stop()
+	packets := []*rtp.Packet{nil, {Header: rtp.Header{CSRC: make([]uint32, 16)}},
+		{Header: rtp.Header{Extension: true, ExtensionProfile: 0x1234}},
+		{Payload: make([]byte, maxPacerPacketBytes)},
+		{Header: rtp.Header{Extensions: make([]rtp.Extension, maxPacerHeaderExtensionsCount+1)}},
+	}
+	for _, packet := range packets {
+		if err := pacer.Enqueue(packet); !errors.Is(err, errPacerPacketBounds) {
+			t.Fatalf("invalid input error=%v, want bounded rejection", err)
+		}
+		if pacer.writeScratch.copy(packet) {
+			t.Fatal("writer scratch accepted malformed or oversized input")
+		}
+	}
+	if pacer.Snapshot().QueueFullDrops != 0 || pacer.enqueuedCount.Load() != 0 {
+		t.Fatal("bounds failure was mislabeled as queue pressure or admitted")
+	}
+	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
+}
+
+func TestGivenEmptyMediaWithHeaderExtensionsWhenCopiedThenNoSentinelIsEmitted(t *testing.T) {
+	for _, extensionProfile := range []uint16{0xbede, 0x1000} {
+		packet := &rtp.Packet{Header: rtp.Header{Version: 2, ExtensionProfile: extensionProfile}}
+		if err := packet.SetExtension(8, []byte{3, 4, 5}); err != nil {
+			t.Fatal(err)
+		}
+		packet.ExtensionProfile = extensionProfile
+		pacer := &AudioCadencePacer{write: func(copied *rtp.Packet) error {
+			if len(copied.Payload) != 0 || copied.MarshalSize() != packet.MarshalSize() || string(copied.GetExtension(8)) != string(packet.GetExtension(8)) {
+				t.Error("empty packet gained media or lost its header extension")
+			}
+			return nil
+		}}
+		if err := pacer.writeOwnedPacket(packet); err != nil {
+			t.Fatalf("empty packet with profile%04x: %v", extensionProfile, err)
+		}
+	}
+}
+
+func TestGivenRetainedCacheWhenEvictedAndStoppedThenEachPayloadSlotIsReleased(t *testing.T) {
+	writes := make(chan uint16, 1)
+	pacer := newAudioForwardPacer(func(packet *rtp.Packet) error { writes <- packet.SequenceNumber; return nil })
+	defer pacer.Stop()
+	for sequenceCount := 0; sequenceCount <= retransmissionCachePackets; sequenceCount++ {
+		packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: uint16(sequenceCount)}, Payload: []byte{0xf8}}
+		if err := pacer.Enqueue(packet); err != nil {
+			t.Fatal(err)
+		}
+		receiveWrite(t, writes)
+	}
+	pacer.HandleNACK(retransmissionCachePackets)
+	receiveWrite(t, writes) // Worker passed the final canonical cache insertion.
+	claimedCount := 0
+	for slotIndex := range pacer.ownedPackets {
+		if pacer.ownedPackets[slotIndex].claimed.Load() {
+			claimedCount++
+		}
+	}
+	if claimedCount != retransmissionCachePackets {
+		t.Fatalf("cache retains %d owned slots, want512 after eviction", claimedCount)
+	}
+	pacer.HandleNACK(0)
+	waitForPacerSnapshot(t, pacer, func(snapshot PacerSnapshot) bool { return snapshot.NackCacheMisses == 1 })
+	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
+}
+
+func TestGivenManyTwoByteExtensionsWhenCopiedThenParserCapacityRemainsBoundedAndAllocationFree(t *testing.T) {
+	const extensionCount = 300
+	wire := make([]byte, 16+2*extensionCount+1)
+	wire[0] = 0x90 // Version2, extension flag, no CSRCs.
+	binary.BigEndian.PutUint16(wire[12:14], 0x1000)
+	binary.BigEndian.PutUint16(wire[14:16], extensionCount/2)
+	for extensionIndex := 0; extensionIndex < extensionCount; extensionIndex++ {
+		wire[16+2*extensionIndex] = 8 // Repeated ID with a zero-length value.
+	}
+	wire[len(wire)-1] = 0xf8
+	packet := &rtp.Packet{}
+	if err := packet.Unmarshal(wire); err != nil || len(packet.Extensions) != extensionCount {
+		t.Fatalf("Pion fixture parse=%v extension_count=%d", err, len(packet.Extensions))
+	}
+	pacer := &AudioCadencePacer{write: func(copied *rtp.Packet) error {
+		if len(copied.Extensions) != extensionCount || len(copied.Payload) != 1 || copied.Payload[0] != 0xf8 {
+			t.Error("bounded header copy truncated parsed extension entries")
+		}
+		return nil
+	}}
+	allocationsCount := testing.AllocsPerRun(1000, func() {
+		if err := pacer.writeOwnedPacket(packet); err != nil {
+			panic(err)
+		}
+	})
+	if allocationsCount != 0 {
+		t.Fatalf("many-extension scratch allocates%g times", allocationsCount)
+	}
+}
+
+func TestGivenStaleOrFailedWritesWhenWorkerCompletesThenPayloadSlotsAreReleased(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		stale bool
+	}{
+		{name: "stale", stale: true}, {name: "writer-error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pacer := newAudioForwardPacer(func(*rtp.Packet) error { return errPacerPacketBounds })
+			defer pacer.Stop()
+			if test.stale {
+				pacer.maxQueueAge = -time.Nanosecond
+			}
+			if err := pacer.Enqueue(&rtp.Packet{Payload: []byte{0xf8}}); err != nil {
+				t.Fatal(err)
+			}
+			waitForPacerSnapshot(t, pacer, func(snapshot PacerSnapshot) bool {
+				return snapshot.EnqueuedCount == 1 && snapshot.QueueDepth == 0
+			})
+			if test.stale && pacer.Snapshot().StaleDrops != 1 {
+				t.Fatal("stale worker path was not exercised")
+			}
+			pacer.Stop()
+			assertOwnedPacketsReleased(t, pacer)
+		})
+	}
+}
+
+func TestGivenLateCadencePacketWhenDroppedThenOwnedPayloadIsReleased(t *testing.T) {
+	writes := make(chan uint16, 1)
+	pacer := newAudioCadencePacer(func(packet *rtp.Packet) error { writes <- packet.SequenceNumber; return nil })
+	defer pacer.Stop()
+	for packetIndex := 0; packetIndex < 2; packetIndex++ {
+		if err := pacer.Enqueue(&rtp.Packet{Header: rtp.Header{SequenceNumber: 100, Timestamp: 1000}, Payload: []byte{0xf8}}); err != nil {
+			t.Fatal(err)
+		}
+		if packetIndex == 0 {
+			receiveWrite(t, writes)
+		}
+	}
+	waitForPacerSnapshot(t, pacer, func(snapshot PacerSnapshot) bool { return snapshot.LatePacketDropCount == 1 })
+	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
+}
+
+func TestGivenExhaustedPayloadPoolWhenEnqueuedThenAdmissionDropsWithoutAllocationOrLeak(t *testing.T) {
+	pacer := &AudioCadencePacer{queue: make(chan pacedPacket, defaultPacerCapacity), ownedPackets: make([]ownedPacerPacket, ownedPacerPacketCount)}
+	for slotIndex := range pacer.ownedPackets {
+		pacer.ownedPackets[slotIndex].claimed.Store(true)
+	}
+	packet := &rtp.Packet{}
+	allocationsCount := testing.AllocsPerRun(1000, func() { _ = pacer.Enqueue(packet) })
+	if allocationsCount != 0 || pacer.Snapshot().QueueFullDrops != 1001 || len(pacer.queue) != 0 {
+		t.Fatalf("pool exhaustion alloc=%g drops=%d queue=%d", allocationsCount, pacer.Snapshot().QueueFullDrops, len(pacer.queue))
+	}
+	for slotIndex := range pacer.ownedPackets {
+		pacer.ownedPackets[slotIndex].release()
+	}
+	assertOwnedPacketsReleased(t, pacer)
+}
+
+func TestGivenAdmittedProducerWhenStopClosesAdmissionThenLateQueuePublicationIsJoined(t *testing.T) {
+	pacer := newAudioForwardPacer(func(*rtp.Packet) error { return nil })
+	if !pacer.beginEnqueue() {
+		t.Fatal("fresh producer was not admitted")
+	}
+	stopped := make(chan struct{})
+	go func() { pacer.Stop(); close(stopped) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for pacer.enqueueState.Load()&pacerAdmissionClosed == 0 {
+		if time.Now().After(deadline) {
+			pacer.enqueueState.Add(^uint64(0))
+			t.Fatal("Stop did not close the atomic admission gate")
+		}
+		runtime.Gosched()
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an admitted producer could still publish")
+	default:
+	}
+	_ = pacer.enqueueOwned(&rtp.Packet{}, session.SourceIdentity{}, time.Time{}, false)
+	pacer.enqueueState.Add(^uint64(0))
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not join the admitted producer and worker")
+	}
+	assertOwnedPacketsReleased(t, pacer)
+	if err := pacer.Enqueue(&rtp.Packet{}); err != nil || len(pacer.queue) != 0 {
+		t.Fatal("stopped pacer admitted another packet")
+	}
+}
+
+func TestGivenConcurrentBusMixProducersWhenStopRacesEnqueueThenAllOwnedSlotsAreJoined(t *testing.T) {
+	pacer := newAudioForwardPacer(func(*rtp.Packet) error { return nil })
+	start := make(chan struct{})
+	progress := make(chan struct{}, 8)
+	continueProducing := make(chan struct{})
+	var producers sync.WaitGroup
+	for producerIndex := 0; producerIndex < 8; producerIndex++ {
+		producers.Add(1)
+		go func() {
+			defer producers.Done()
+			<-start
+			payload := [3]byte{0xf8, 1, 2}
+			first := &rtp.Packet{Header: rtp.Header{Version: 2}, Payload: payload[:]}
+			_ = pacer.EnqueueSource(first, session.SourceIdentity{BusID: "mix", Generation: uint64(producerIndex + 1)}, time.Time{}, false)
+			progress <- struct{}{}
+			<-continueProducing
+			for sequenceCount := 0; sequenceCount < 100; sequenceCount++ {
+				packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: uint16(sequenceCount)}, Payload: payload[:]}
+				_ = pacer.EnqueueSource(packet, session.SourceIdentity{BusID: "mix", Generation: uint64(producerIndex + 1)}, time.Time{}, false)
+				payload[1]++ // Reuse after the synchronous copy returned.
+			}
+		}()
+	}
+	close(start)
+	for producerIndex := 0; producerIndex < 8; producerIndex++ {
+		select {
+		case <-progress:
+		case <-time.After(2 * time.Second):
+			close(continueProducing)
+			pacer.Stop()
+			producers.Wait()
+			t.Fatal("concurrent producers did not reach the production enqueue boundary")
+		}
+	}
+	if pacer.enqueuedCount.Load() == 0 {
+		close(continueProducing)
+		pacer.Stop()
+		producers.Wait()
+		t.Fatal("concurrent-producer test made no real pre-stop progress")
+	}
+	close(continueProducing)
+	pacer.Stop()
+	producers.Wait()
+	assertOwnedPacketsReleased(t, pacer)
+}
 
 func TestGivenClustered20msRTPWhenTimelineSchedulesThenDueTimesAre20msApart(t *testing.T) {
 	timeline := newCadenceTimeline()
@@ -337,6 +653,15 @@ func TestGivenPublisherReconnectWhenForwardPacerRunsThenOutgoingRTPIsContinuousA
 	if retransmit.SequenceNumber != 102 || retransmit.Timestamp != 2920 {
 		t.Fatalf("retransmit = seq %d ts %d, want translated seq 102 ts 2920", retransmit.SequenceNumber, retransmit.Timestamp)
 	}
+	// A source/timeline rebase does not invalidate already translated outgoing
+	// packets. Their immutable cache entries live until eviction or Stop.
+	pacer.HandleNACK(101)
+	previous := receiveWrite(t, writes)
+	if previous.SequenceNumber != 101 || previous.Timestamp != 1960 {
+		t.Fatal("source rebase lost the prior outgoing repair packet")
+	}
+	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
 }
 
 func TestGivenShortReorderWhenForwardPacerRunsThenSequenceAndTimestampAreMonotonic(t *testing.T) {
@@ -419,6 +744,7 @@ func TestGivenGapWaitWhenForwardPacerStopsThenPendingQueueIsDrained(t *testing.T
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
 		t.Fatalf("stop during gap wait took %s, want <= 100ms", elapsed)
 	}
+	assertOwnedPacketsReleased(t, pacer)
 	if got := pacer.Snapshot().QueueDepth; got != 0 {
 		t.Fatalf("queue depth after stop = %d, want 0", got)
 	}
@@ -498,6 +824,8 @@ func TestGivenPaddingBetweenAudioWhenCadencePacerRunsThenMediaTimelineIgnoresPad
 	if snapshot.PaddingPacketCount != 1 {
 		t.Fatalf("padding drops = %d, want 1", snapshot.PaddingPacketCount)
 	}
+	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
 	if resets := snapshot.TimelineResets; resets != 0 {
 		t.Fatalf("timeline resets = %d, want 0 when only padding repeats timestamp", resets)
 	}
@@ -506,7 +834,11 @@ func TestGivenPaddingBetweenAudioWhenCadencePacerRunsThenMediaTimelineIgnoresPad
 func TestGivenSentPacketWhenNACKHandledThenPacketIsRetransmittedFromCache(t *testing.T) {
 	writes := make(chan *rtp.Packet, 2)
 	pacer := newAudioCadencePacer(func(pkt *rtp.Packet) error {
-		writes <- pkt
+		// The writer borrows this scratch only during its callback. Retain an
+		// owned observation, then try to corrupt the canonical NACK data.
+		writes <- pkt.Clone()
+		pkt.Payload[0] = 0
+		pkt.SequenceNumber = 999
 		return nil
 	})
 	defer pacer.Stop()
@@ -522,13 +854,10 @@ func TestGivenSentPacketWhenNACKHandledThenPacketIsRetransmittedFromCache(t *tes
 	pacer.HandleNACK(first.SequenceNumber)
 	second := receiveWrite(t, writes)
 
-	if second == first {
-		t.Fatal("retransmission reused mutable packet pointer, want deep clone")
-	}
 	if second.SequenceNumber != first.SequenceNumber || string(second.Payload) != string(first.Payload) {
 		t.Fatalf("retransmission seq/payload = %d/%v, want %d/%v", second.SequenceNumber, second.Payload, first.SequenceNumber, first.Payload)
 	}
-	snapshot := pacer.Snapshot()
+	snapshot := waitForPacerSnapshot(t, pacer, func(snapshot PacerSnapshot) bool { return snapshot.RetransmitSentCount == 1 })
 	if snapshot.NackCacheHits != 1 || snapshot.RetransmitSentCount != 1 {
 		t.Fatalf("nack hits/retransmits = %d/%d, want 1/1", snapshot.NackCacheHits, snapshot.RetransmitSentCount)
 	}
@@ -584,6 +913,7 @@ func TestGivenBlockedWriterWhenQueueFillsThenEnqueueDoesNotBlockAndDropsAreCount
 
 	close(release)
 	pacer.Stop()
+	assertOwnedPacketsReleased(t, pacer)
 	if got := pacer.Snapshot().QueueDepth; got != 0 {
 		t.Fatalf("queue_depth after Stop = %d, want 0", got)
 	}

@@ -16,6 +16,7 @@ const (
 
 type retransmissionSlot struct {
 	packet             atomic.Pointer[rtp.Packet]
+	owned              *ownedPacerPacket // Worker-only; NACK handlers enqueue IDs.
 	lastRetransmitAtNs atomic.Int64
 	retransmitCount    atomic.Uint32
 }
@@ -28,10 +29,36 @@ type retransmissionCache struct {
 }
 
 func (c *retransmissionCache) store(pkt *rtp.Packet) {
+	c.replace(pkt, nil)
+}
+
+func (c *retransmissionCache) storeOwned(owned *ownedPacerPacket) {
+	c.replace(&owned.packet, owned)
+}
+
+func (c *retransmissionCache) replace(pkt *rtp.Packet, owned *ownedPacerPacket) {
 	slot := &c.slots[int(pkt.SequenceNumber)%len(c.slots)]
+	previous := slot.owned
+	slot.owned = owned
 	slot.lastRetransmitAtNs.Store(0)
 	slot.retransmitCount.Store(0)
 	slot.packet.Store(pkt)
+	if previous != nil {
+		previous.release()
+	}
+}
+
+// clear runs only on the pacer worker, before workerDone is closed. No cache
+// reader can retain a slot past this boundary: retransmits use worker scratch.
+func (c *retransmissionCache) clear() {
+	for slotIndex := range c.slots {
+		slot := &c.slots[slotIndex]
+		slot.packet.Store(nil)
+		if slot.owned != nil {
+			slot.owned.release()
+			slot.owned = nil
+		}
+	}
 }
 
 func (c *retransmissionCache) setRTT(rtt time.Duration) {

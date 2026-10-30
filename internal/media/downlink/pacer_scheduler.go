@@ -9,6 +9,7 @@ import (
 
 func (p *AudioCadencePacer) run() {
 	defer close(p.workerDone)
+	defer p.retransmissionCache.clear()
 	if !p.paceMedia {
 		p.runForward()
 		return
@@ -24,6 +25,12 @@ func (p *AudioCadencePacer) run() {
 	var lastPrimaryWriteStartedAt time.Time
 	var pending [defaultPacerCapacity + 1]pacedPacket
 	pendingLen := 0
+	defer func() {
+		for _, item := range pending[:pendingLen] {
+			item.release()
+		}
+		p.completedCount.Add(uint64(pendingLen))
+	}()
 	var forwarder sequenceForwarder
 
 	for {
@@ -110,6 +117,7 @@ func (p *AudioCadencePacer) run() {
 		}
 		switch forwarder.release(item.packet, item.extSeq) {
 		case dropPadding:
+			item.release()
 			p.completedCount.Add(1)
 			continue
 		case dropLate:
@@ -119,11 +127,13 @@ func (p *AudioCadencePacer) run() {
 			} else {
 				p.lateMediaDropCount.Add(1)
 			}
+			item.release()
 			p.completedCount.Add(1)
 			continue
 		}
 		if time.Since(item.enqueuedAt) > p.maxQueueAge {
 			p.staleDrops.Add(1)
+			item.release()
 			p.completedCount.Add(1)
 			timeline.reset()
 			continue
@@ -152,6 +162,8 @@ func (p *AudioCadencePacer) run() {
 			requestedWait := max(dueAt.Sub(waitStarted), 0)
 			observeAtomicMax(&p.maxTimerWaitNs, uint64(requestedWait))
 			if !p.waitUntil(timer, dueAt) {
+				item.release()
+				p.completedCount.Add(1)
 				return
 			}
 			if oversleep := time.Since(dueAt); oversleep > 0 {
@@ -166,6 +178,7 @@ func (p *AudioCadencePacer) run() {
 		observeAtomicMax(&p.maxQueueAgeNs, queueAge)
 		if queueAgeNs > p.maxQueueAge.Nanoseconds() {
 			p.staleDrops.Add(1)
+			item.release()
 			p.completedCount.Add(1)
 			timeline.reset()
 			continue
@@ -175,7 +188,7 @@ func (p *AudioCadencePacer) run() {
 		if p.observeTranslated != nil {
 			p.observeTranslated(item.packet, item.captureTime, item.captureTimeKnown)
 		}
-		writeErr := p.write(item.packet)
+		writeErr := p.writeOwnedPacket(item.packet)
 		writeDuration := time.Since(writeStarted)
 		observeAtomicMax(&p.maxWriterDurationNs, uint64(writeDuration))
 		if writeDuration > 100*time.Millisecond {
@@ -183,7 +196,9 @@ func (p *AudioCadencePacer) run() {
 		}
 		if writeErr == nil {
 			p.sentCount.Add(1)
-			p.retransmissionCache.store(item.packet)
+			p.retransmissionCache.storeOwned(item.owned)
+		} else {
+			item.release()
 		}
 		p.completedCount.Add(1)
 		nowNs := time.Now().UnixNano()

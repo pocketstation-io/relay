@@ -16,7 +16,8 @@ type subscriptionEntry struct {
 	subscription BusSubscription
 }
 
-// PacketWriter receives one RTP packet for a subscriber transport.
+// PacketWriter borrows one RTP packet for the duration of WriteRTP. A writer
+// retaining packet/header/payload data after return must make its own copy.
 type PacketWriter interface {
 	WriteRTP(pkt *rtp.Packet) error
 }
@@ -31,6 +32,9 @@ type SourceIdentity struct {
 
 // BusSubscription is the Session-owned delivery contract. Transport packages
 // implement pacing, telemetry, and shutdown behind this boundary.
+// When RequiresPacketCopy is true, dispatch transfers a private deep header
+// copy (including CSRC/extension bytes). Payload remains borrowed only until
+// WriteRTPWithSource returns; asynchronous subscriptions must copy it by then.
 type BusSubscription interface {
 	WriteRTPWithSource(
 		pkt *rtp.Packet,

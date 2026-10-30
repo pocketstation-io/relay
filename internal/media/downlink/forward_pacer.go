@@ -29,7 +29,12 @@ func (p *AudioCadencePacer) runForward() {
 	pendingLen := 0
 	var haveReleased bool
 	var lastReleasedExtSeq int64
-	defer func() { p.completedCount.Add(uint64(pendingLen)) }()
+	defer func() {
+		for _, item := range pending[:pendingLen] {
+			item.release()
+		}
+		p.completedCount.Add(uint64(pendingLen))
+	}()
 
 	for {
 		if pendingLen == 0 {
@@ -116,6 +121,12 @@ func (p *AudioCadencePacer) prepareForwardItem(
 }
 
 func (p *AudioCadencePacer) writeForwardItem(item pacedPacket, output *forwardOutputState) {
+	cached := false
+	defer func() {
+		if !cached {
+			item.release()
+		}
+	}()
 	queueAgeNs := time.Since(item.enqueuedAt).Nanoseconds()
 	queueAge := uint64(max(queueAgeNs, 0))
 	p.queueAgeHist.observe(queueAgeNs)
@@ -136,7 +147,7 @@ func (p *AudioCadencePacer) writeForwardItem(item pacedPacket, output *forwardOu
 		p.observeTranslated(item.packet, item.captureTime, item.captureTimeKnown)
 	}
 	writeStarted := time.Now()
-	writeErr := p.write(item.packet)
+	writeErr := p.writeOwnedPacket(item.packet)
 	writeDuration := time.Since(writeStarted)
 	observeAtomicMax(&p.maxWriterDurationNs, uint64(writeDuration))
 	if writeDuration > 100*time.Millisecond {
@@ -144,7 +155,8 @@ func (p *AudioCadencePacer) writeForwardItem(item pacedPacket, output *forwardOu
 	}
 	if writeErr == nil {
 		p.sentCount.Add(1)
-		p.retransmissionCache.store(item.packet)
+		p.retransmissionCache.storeOwned(item.owned)
+		cached = true
 		if output.haveOutput {
 			sequenceDeltaCount := uint16(item.packet.SequenceNumber - output.lastOutputSequence)
 			timestampDeltaSamples := uint32(item.packet.Timestamp - output.lastOutputTimestampSamples)
