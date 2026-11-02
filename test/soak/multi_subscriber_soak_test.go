@@ -141,14 +141,15 @@ func TestGivenRelayWhenMultiSubscriberSoakRunsThenResourcesRemainBounded(t *test
 
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
-		JWTSecret: []byte("soak-multi-subscriber-secret"),
+		JWTSecret: []byte("soak-multi-subscriber-secret-0123456789abcdef0123456789abcdef"),
 		API:       api,
 	})
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
+	defer srv.Shutdown(context.Background())
 
 	// Create session.
-	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewBufferString(`{"required_buses":["application"]}`))
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -156,11 +157,13 @@ func TestGivenRelayWhenMultiSubscriberSoakRunsThenResourcesRemainBounded(t *test
 	var room struct {
 		SessionID     string `json:"session_id"`
 		SourceToken   string `json:"source_token"`
-		ListenerToken string `json:"listener_token"`
+		ListenerToken string `json:"subscriber_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil {
 		t.Fatalf("decode session: %v", err)
 	}
+
+	room.ListenerToken = issueSoakSubscriber(t, ts, room.SessionID, room.SourceToken)
 
 	// Publisher.
 	pubConn := dialWS(t, ts)

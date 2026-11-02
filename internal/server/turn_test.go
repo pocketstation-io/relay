@@ -31,6 +31,7 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 		JWTSecret:        []byte("test-secret-0123456789abcdef012345"),
 		ClientICEServers: turnServers,
 	})
+	cleanupTestRelay(t, srv)
 
 	// When — call handler directly via ResponseRecorder (no TCP binding needed)
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(nil))
@@ -40,7 +41,7 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 	defer resp.Body.Close()
 
 	// Then
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
@@ -54,8 +55,8 @@ func TestGivenTURNConfiguredWhenCreateRoomThenIceServersReturned(t *testing.T) {
 	if _, ok := body["source_token"]; !ok {
 		t.Error("response missing source_token")
 	}
-	if _, ok := body["subscriber_token"]; !ok {
-		t.Error("response missing subscriber_token")
+	if _, ok := body["subscriber_token"]; ok {
+		t.Error("Session creation must not preissue subscriber capability")
 	}
 	rawICE, ok := body["ice_servers"]
 	if !ok {
@@ -79,6 +80,7 @@ func TestGivenNoTURNConfigWhenCreateRoomThenNoIceServersField(t *testing.T) {
 	srv := server.New(server.Config{
 		JWTSecret: []byte("test-secret-0123456789abcdef012345"),
 	})
+	cleanupTestRelay(t, srv)
 
 	// When
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(nil))

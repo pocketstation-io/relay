@@ -93,21 +93,22 @@ func TestGivenWebSocketWhenSoakRunsThenPingPongIsMaintained(t *testing.T) {
 	// Server.
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
-		JWTSecret:              []byte("ws-soak-secret"),
+		JWTSecret:              []byte("ws-soak-secret-0123456789abcdef0123456789abcdef"),
 		API:                    api,
 		MaxRoomsPerIPPerMinute: -1, // disable per-IP rate limit in tests
 	})
 	ts := newIPv4Server(srv.Handler())
 	defer ts.Close()
+	defer srv.Shutdown(context.Background())
 
 	// Room.
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewBufferString(`{"required_buses":["application"]}`))
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
 	defer resp.Body.Close()
 	var room struct {
-		RoomID      string `json:"room_id"`
+		RoomID      string `json:"session_id"`
 		SourceToken string `json:"source_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil {

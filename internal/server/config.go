@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/pocketstation-io/relay/access"
 	"time"
 
 	pionIce "github.com/pion/ice/v4"
@@ -19,9 +20,9 @@ const (
 
 // Config holds the parameters for creating a Server.
 type Config struct {
+	AccessService            *access.Service
+	AccessHandlerConfig      access.HandlerConfig
 	JWTSecret                []byte
-	SubscriberJWTSecret      []byte
-	SourceTokenIssuer        string
 	AuthorityMode            string
 	SettingEngine            *webrtc.SettingEngine
 	API                      *webrtc.API
@@ -31,6 +32,7 @@ type Config struct {
 	MaxConcurrentHandshakes  int
 	MaxInvitations           int
 	CallbackClient           *callback.Client
+	ControlAuthorityTimeout  time.Duration
 	ControlReconcileInterval time.Duration
 	RelayEpoch               string
 	WebhookDispatcher        *webhook.Dispatcher
@@ -43,4 +45,5 @@ type Config struct {
 	NAT1To1IPs               []string
 	PublicReceiverURL        string
 	PublicRelayURL           string
+	PublicControlPlaneURL    string
 }

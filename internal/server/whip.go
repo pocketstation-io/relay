@@ -35,12 +35,14 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/media/clocklineage"
 	"github.com/pocketstation-io/relay/internal/media/downlink"
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
 	"github.com/pocketstation-io/relay/internal/session"
 )
 
@@ -128,6 +130,14 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 	rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	claims, err := s.verifyCapability(rawToken, policy.requiredRole)
 	if err != nil {
+		if errors.Is(err, callback.ErrSessionNotFound) {
+			http.Error(w, "Session is not active", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, errAuthorityUnavailable) {
+			http.Error(w, "Session service unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -157,6 +167,15 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if err := s.requireActiveControlSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, callback.ErrSessionNotFound) {
+			http.Error(w, "control-plane Session is not active", http.StatusNotFound)
+			return
+		}
+		slog.Warn("control-plane Session admission failed", "relay_session_id", sessionID, "error", err)
+		http.Error(w, "control-plane authority is unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
 	offerBytes, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 	if err != nil || len(offerBytes) == 0 {
@@ -180,6 +199,9 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 	}
 
 	connID := newID()
+	attachmentDone := make(chan struct{})
+	var attachmentDoneOnce sync.Once
+	var onConnected func()
 
 	switch direction {
 	case whipIngress:
@@ -222,43 +244,48 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 		}
 		connCapture := connID
 		busCapture := busID
-		pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-			switch state {
-			case webrtc.PeerConnectionStateConnected:
-				var sub session.PacketWriter = audioTrack
-				if redEnabled() {
-					sub = newREDListener(audioTrack, opusPayloadType)
-				}
-				dl := downlink.NewForwardingDownlink(connCapture, sub, nil)
-				if localDescription := pc.LocalDescription(); localDescription != nil {
-					dl.ConfigureExtensions(localDescription.SDP)
-				}
-				if lineage != nil {
-					parameters := sender.GetParameters()
-					if len(parameters.Encodings) > 0 {
-						dl.SetSenderTimeline(lineage.Local(uint32(parameters.Encodings[0].SSRC)))
-					}
-				}
-				var onNACK downlink.NackCallback
-				if !redEnabled() {
-					onNACK = dl.HandleNACK
-				}
-				dl.SetFeedback(downlink.StartFeedbackReader(sender, dl.Stats(), nil, onNACK))
-				if err := rm.AddBusSubscription(connCapture, busCapture, dl); err != nil {
-					dl.StopForwarding()
-				}
-			case webrtc.PeerConnectionStateFailed,
-				webrtc.PeerConnectionStateClosed,
-				webrtc.PeerConnectionStateDisconnected:
-				rm.RemoveSubscription(connCapture)
-				s.whipConns.Delete(connCapture)
+		onConnected = func() {
+			var sub session.PacketWriter = audioTrack
+			if redEnabled() {
+				sub = newREDListener(audioTrack, opusPayloadType)
 			}
-		})
+			dl := downlink.NewForwardingDownlink(connCapture, sub, nil)
+			if localDescription := pc.LocalDescription(); localDescription != nil {
+				dl.ConfigureExtensions(localDescription.SDP)
+			}
+			if lineage != nil {
+				parameters := sender.GetParameters()
+				if len(parameters.Encodings) > 0 {
+					dl.SetSenderTimeline(lineage.Local(uint32(parameters.Encodings[0].SSRC)))
+				}
+			}
+			var onNACK downlink.NackCallback
+			if !redEnabled() {
+				onNACK = dl.HandleNACK
+			}
+			dl.SetFeedback(downlink.StartFeedbackReader(sender, dl.Stats(), nil, onNACK))
+			if err := rm.AddBusSubscription(connCapture, busCapture, dl); err != nil {
+				dl.StopForwarding()
+			}
+		}
 	default:
 		_ = pc.Close()
 		http.Error(w, "invalid connection direction", http.StatusInternalServerError)
 		return
 	}
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			if onConnected != nil {
+				onConnected()
+			}
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+			attachmentDoneOnce.Do(func() { close(attachmentDone) })
+			rm.RemoveSubscription(connID)
+			s.whipConns.Delete(connID)
+		}
+	})
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -304,6 +331,15 @@ func (s *Server) handleWHIPRequest(w http.ResponseWriter, r *http.Request, direc
 		connID:  connID,
 		created: time.Now(),
 	})
+
+	go func() {
+		select {
+		case <-rm.Done():
+		case <-attachmentDone:
+		}
+		s.whipConns.Delete(connID)
+		_ = pc.Close()
+	}()
 
 	// RFC 9725 §4.6: Link headers advertise ICE server configuration.
 	for _, srv := range s.clientICEServers {

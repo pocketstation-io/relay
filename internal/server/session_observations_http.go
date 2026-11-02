@@ -2,8 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/pocketstation-io/relay/internal/auth"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pocketstation-io/relay/internal/session"
@@ -12,6 +15,9 @@ import (
 const packetLogMaxLimit = 1000
 
 func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeObservation(w, r) {
+		return
+	}
 	relaySession, found := s.relaySessions.Get(r.PathValue("id"))
 	if !found {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -22,6 +28,9 @@ func (s *Server) roomLatency(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeObservation(w, r) {
+		return
+	}
 	relaySession, found := s.relaySessions.Get(r.PathValue("id"))
 	if !found {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -33,6 +42,9 @@ func (s *Server) roomHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeObservation(w, r) {
+		return
+	}
 	sessionID := r.PathValue("id")
 	relaySession, found := s.relaySessions.Get(sessionID)
 	if !found {
@@ -55,6 +67,9 @@ func (s *Server) mediaDebug(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeObservation(w, r) {
+		return
+	}
 	sessionID := r.PathValue("id")
 	relaySession, found := s.relaySessions.Get(sessionID)
 	if !found {
@@ -85,4 +100,27 @@ func (s *Server) packetLogHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+func (s *Server) authorizeObservation(w http.ResponseWriter, r *http.Request) bool {
+	credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := s.verifyCapability(credential, "")
+	if errors.Is(err, errAuthorityUnavailable) {
+		http.Error(w, "Session service unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if err != nil {
+		http.Error(w, "Session observation denied", http.StatusUnauthorized)
+		return false
+	}
+	if claims.SessionID != r.PathValue("id") || !(claims.CanControl() || claims.Role == auth.RoleSubscriber) {
+		http.Error(w, "Session observation denied", http.StatusForbidden)
+		return false
+	}
+	if bus := r.URL.Query().Get("bus"); bus != "" && !claims.AllowsBus(bus) {
+		http.Error(w, "AudioBus observation denied", http.StatusForbidden)
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	return true
 }

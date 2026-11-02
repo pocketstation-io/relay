@@ -3,36 +3,36 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
-	"github.com/pion/rtp"
+	"github.com/pocketstation-io/relay/access"
 	"github.com/pocketstation-io/relay/internal/auth"
-	"github.com/pocketstation-io/relay/internal/session"
 )
 
 var joinTestSecret = []byte("join-test-secret-0123456789abcdef")
 
-type blockingJoinSource struct{ released <-chan struct{} }
-
-func (source blockingJoinSource) ReadRTP() (*rtp.Packet, error) {
-	<-source.released
-	return nil, io.EOF
+type joinInvitationResponse struct {
+	JoinURL   string `json:"join_url"`
+	JoinCode  string `json:"join_code"`
+	SessionID string `json:"session_id"`
 }
 
-func newJoinTestServer() *Server {
-	return New(Config{JWTSecret: joinTestSecret, SubscriberJWTSecret: joinTestSecret, PublicReceiverURL: "https://receiver.example", PublicRelayURL: "https://relay.example"})
+func newJoinTestServer(t *testing.T) (*Server, *access.Service) {
+	service := testAccessService(t, joinTestSecret, access.Config{})
+	server := New(Config{JWTSecret: joinTestSecret, AccessService: service, PublicReceiverURL: "https://receiver.example", PublicRelayURL: "https://relay.example"})
+	cleanupTestRelay(t, server)
+	return server, service
 }
 
 func createJoinTestSession(t *testing.T, server *Server) map[string]any {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/sessions", nil))
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusCreated {
 		t.Fatalf("create Session status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var created map[string]any
@@ -40,23 +40,6 @@ func createJoinTestSession(t *testing.T, server *Server) map[string]any {
 		t.Fatal(err)
 	}
 	return created
-}
-
-func attachRequiredJoinSources(t *testing.T, server *Server, sessionID string) func() {
-	t.Helper()
-	relaySession, found := server.relaySessions.Get(sessionID)
-	if !found {
-		t.Fatal("RelaySession missing")
-	}
-	applicationDone := make(chan struct{})
-	microphoneDone := make(chan struct{})
-	if err := relaySession.SetSource("application", session.BusRoleMusic, blockingJoinSource{released: applicationDone}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := relaySession.SetSource("microphone", session.BusRoleVoice, blockingJoinSource{released: microphoneDone}, nil); err != nil {
-		t.Fatal(err)
-	}
-	return func() { close(applicationDone); close(microphoneDone) }
 }
 
 func requestJoinInvitation(t *testing.T, server *Server, created map[string]any, body string) joinInvitationResponse {
@@ -77,7 +60,8 @@ func requestJoinInvitation(t *testing.T, server *Server, created map[string]any,
 }
 
 func TestGivenStandaloneSessionWhenCreatedThenReceiverInvitationIsNotPreissued(t *testing.T) {
-	created := createJoinTestSession(t, newJoinTestServer())
+	server, _ := newJoinTestServer(t)
+	created := createJoinTestSession(t, server)
 	if created["join_code"] != nil || created["join_url"] != nil {
 		t.Fatalf("Session creation preissued invitation: %#v", created)
 	}
@@ -85,10 +69,10 @@ func TestGivenStandaloneSessionWhenCreatedThenReceiverInvitationIsNotPreissued(t
 
 func TestGivenControlPlaneAuthorityWhenRelayMutationIsRequestedThenItIsRejected(t *testing.T) {
 	server := New(Config{
-		JWTSecret:         joinTestSecret,
-		SourceTokenIssuer: auth.ControlPlaneIssuer,
-		AuthorityMode:     "control-plane",
+		JWTSecret:     joinTestSecret,
+		AuthorityMode: "control-plane",
 	})
+	cleanupTestRelay(t, server)
 
 	created := httptest.NewRecorder()
 	server.Handler().ServeHTTP(created, httptest.NewRequest(http.MethodPost, "/v1/sessions", nil))
@@ -103,21 +87,16 @@ func TestGivenControlPlaneAuthorityWhenRelayMutationIsRequestedThenItIsRejected(
 	}
 
 	resolved := httptest.NewRecorder()
-	server.Handler().ServeHTTP(resolved, httptest.NewRequest(http.MethodGet, "/v1/join/code", nil))
+	server.Handler().ServeHTTP(resolved, httptest.NewRequest(http.MethodPost, "/v1/join/code", nil))
 	if resolved.Code != http.StatusConflict {
 		t.Fatalf("Relay invitation resolution status=%d, want 409", resolved.Code)
 	}
 }
 
 func TestGivenPartiallyReadySessionWhenInvitationIsRequestedThenOnlyActiveBusCanBeScoped(t *testing.T) {
-	server := newJoinTestServer()
+	server, service := newJoinTestServer(t)
 	created := createJoinTestSession(t, server)
-	relaySession, _ := server.relaySessions.Get(created["session_id"].(string))
-	released := make(chan struct{})
-	if err := relaySession.SetSource("application", session.BusRoleMusic, blockingJoinSource{released: released}, nil); err != nil {
-		t.Fatal(err)
-	}
-	defer close(released)
+	testReadyAccess(t, service, created["session_id"].(string), "application")
 
 	mixRequest := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created["session_id"].(string)+"/invitations", nil)
 	mixRequest.Header.Set("Authorization", "Bearer "+created["source_token"].(string))
@@ -129,21 +108,20 @@ func TestGivenPartiallyReadySessionWhenInvitationIsRequestedThenOnlyActiveBusCan
 
 	invitation := requestJoinInvitation(t, server, created, `{"bus_id":"application"}`)
 	parsed, err := url.Parse(invitation.JoinURL)
-	if err != nil || parsed.Query().Get("join") != invitation.JoinCode || strings.Contains(invitation.JoinURL, invitation.SessionID) {
+	if err != nil || parsed.Query().Get("join") != "" || parsed.Fragment != "join="+invitation.JoinCode || strings.Contains(invitation.JoinURL, created["session_id"].(string)) {
 		t.Fatalf("unsafe invitation %#v err=%v", invitation, err)
 	}
 }
 
 func TestGivenJoinCodeWhenRedeemedThenSubscriberCapabilityIsScopedAndSingleUse(t *testing.T) {
-	server := newJoinTestServer()
+	server, service := newJoinTestServer(t)
 	created := createJoinTestSession(t, server)
-	cleanup := attachRequiredJoinSources(t, server, created["session_id"].(string))
-	defer cleanup()
+	testReadyAccess(t, service, created["session_id"].(string), "application", "microphone")
 	invitation := requestJoinInvitation(t, server, created, `{"bus_id":"application"}`)
 
 	resolve := func() *httptest.ResponseRecorder {
 		response := httptest.NewRecorder()
-		server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/join/"+invitation.JoinCode, nil))
+		server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/join", strings.NewReader(`{"join_code":"`+invitation.JoinCode+`"}`)))
 		return response
 	}
 	first := resolve()

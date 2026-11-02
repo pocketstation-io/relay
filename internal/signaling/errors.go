@@ -19,4 +19,6 @@ const (
 	ErrCodeNotJoined             ErrorCode = "not_joined"
 	ErrCodeBadRequest            ErrorCode = "bad_request"
 	ErrCodeUnknownType           ErrorCode = "unknown_type"
+	ErrCodeSessionNotActive      ErrorCode = "session_not_active"
+	ErrCodeAuthorityUnavailable  ErrorCode = "authority_unavailable"
 )

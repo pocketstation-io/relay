@@ -70,6 +70,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *webrtc.API) {
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Build a client API with the same codec configuration as the server so that
 	// SDP negotiation succeeds when RELAY_ENABLE_RED=1 (PT=63 must be in both legs).
@@ -101,13 +102,39 @@ func createRoom(t *testing.T, ts *httptest.Server) map[string]string {
 	if err != nil {
 		t.Fatalf("read response body: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("unexpected status %d: %s", resp.StatusCode, body)
 	}
-	var payload map[string]string
-	if err := json.Unmarshal(body, &payload); err != nil {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	payload := make(map[string]string)
+	for key, value := range decoded {
+		if text, ok := value.(string); ok {
+			payload[key] = text
+		}
+	}
+	request, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/sessions/"+payload["session_id"]+"/subscribe", bytes.NewBufferString(`{"bus_id":"application"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+payload["source_token"])
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("issue subscriber status=%d", response.StatusCode)
+	}
+	var subscriber struct {
+		Token string `json:"subscriber_token"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&subscriber); err != nil {
+		t.Fatal(err)
+	}
+	payload["subscriber_token"] = subscriber.Token
 	return payload
 }
 

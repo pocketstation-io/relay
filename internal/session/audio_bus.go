@@ -82,22 +82,22 @@ func (b *AudioBus) SetSource(
 	closer func(),
 	deliver func(*rtp.Packet, uint64),
 	onDetached func(),
-) {
+) uint64 {
 	newLoopDone := make(chan struct{})
-	generation := b.sourceGeneration.Add(1)
+	var timeline *clocklineage.Timeline
+	if source, ok := src.(clockLineageSource); ok {
+		timeline = source.ClockLineage()
+	}
 
 	b.sourceMu.Lock()
+	generation := b.sourceGeneration.Add(1)
 	prevCloser := b.sourceCloser
 	prevDone := b.loopDone
 	b.source = src
 	b.sourceCloser = closer
 	b.loopDone = newLoopDone
-	b.sourceMu.Unlock()
-	var timeline *clocklineage.Timeline
-	if source, ok := src.(clockLineageSource); ok {
-		timeline = source.ClockLineage()
-	}
 	b.sourceTimeline.Store(timeline)
+	b.sourceMu.Unlock()
 
 	if prevCloser != nil {
 		prevCloser()
@@ -118,6 +118,7 @@ func (b *AudioBus) SetSource(
 	// stalled before its first packet arrives.
 	b.lastRTPAtNanos.Store(time.Now().UnixNano())
 	go b.forwardLoop(src, generation, newLoopDone, deliver, onDetached)
+	return generation
 }
 
 // SourceActive reports whether a source is currently attached to this bus.

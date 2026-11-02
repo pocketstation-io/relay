@@ -9,7 +9,7 @@ package server
 // included in the message to hint that the client should prefer TURN relay
 // candidates on the next ICE negotiation.
 //
-// Rate limiting: at most one ICE_RESTART is sent per room per 30 seconds to
+// Rate limiting: at most one ICE_RESTART is sent per RelaySession per 30 seconds to
 // prevent restart storms when loss is sustained.
 
 import (
@@ -21,7 +21,7 @@ import (
 )
 
 // iceRestartDebounce is the minimum interval between ICE_RESTART messages sent
-// to the source for a single room. Prevents restart storms under sustained loss.
+// to the source for one RelaySession. This prevents restart storms under sustained loss.
 const iceRestartDebounce = 30 * time.Second
 
 // lossICEThreshold is the packet-loss fraction above which a report is counted
@@ -66,10 +66,10 @@ func newLossTracker() *lossTracker {
 	return &lossTracker{threshold: lossICEThreshold}
 }
 
-// iceRestartState holds per-room state for ICE restart tracking.
-// Stored in Server.iceRestartStates keyed by room ID.
-// A single iceRestartState is shared across all listener RTCP goroutines in
-// a room; mu serialises both tracker updates and debounce checks.
+// iceRestartState holds per-RelaySession state for ICE restart tracking.
+// Server.iceRestartStates stores it by the compatibility room ID. One state is
+// shared across all subscriber RTCP goroutines in the RelaySession; mu
+// serializes tracker updates and debounce checks.
 type iceRestartState struct {
 	mu       sync.Mutex
 	tracker  *lossTracker
@@ -92,8 +92,8 @@ func (s *Server) roomICERestartState(roomID string) *iceRestartState {
 // and, when the threshold is reached and the debounce interval has elapsed,
 // sends an ICE_RESTART ServerMessage to the source session for roomID.
 //
-// Safe to call concurrently from multiple listener RTCP goroutines for the
-// same room; state.mu serialises all mutations.
+// Safe to call concurrently from multiple subscriber RTCP goroutines for the
+// same RelaySession; state.mu serializes all mutations.
 func (s *Server) maybeEmitICERestart(roomID string, fractionLost float64, state *iceRestartState) {
 	state.mu.Lock()
 	triggered := state.tracker.record(fractionLost)

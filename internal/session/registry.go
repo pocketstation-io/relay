@@ -18,13 +18,13 @@ type SessionRegistry struct {
 
 // RegistryConfig holds configurable parameters for the SessionRegistry.
 type RegistryConfig struct {
-	// InactivityTimeout: time a room waits for its first publisher before
+	// InactivityTimeout is how long a RelaySession waits for its first publisher before
 	// auto-closing. Zero uses defaultInactivityTimeout (30 min).
 	InactivityTimeout time.Duration
-	// ReconnectWindow: time a room keeps subscriptions alive after the last
+	// ReconnectWindow is how long a RelaySession keeps subscriptions alive after the last
 	// source disconnects. Zero uses defaultReconnectWindow (60 s).
 	ReconnectWindow time.Duration
-	// MaxSubscriptions: maximum subscribers per room. Zero means unlimited.
+	// MaxSubscriptions is the maximum subscriber count per RelaySession. Zero means unlimited.
 	MaxSubscriptions int
 	// MaxBuses is the maximum number of named AudioBuses retained by one
 	// RelaySession. Zero uses the finite package default.
@@ -184,7 +184,7 @@ type SessionSummary struct {
 }
 
 // ListPublic returns a summary of every RelaySession created with Public==true.
-// Returns a non-nil empty slice when no public rooms exist.
+// Returns a non-nil empty slice when no public RelaySessions exist.
 func (reg *SessionRegistry) ListPublic() []SessionSummary {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()

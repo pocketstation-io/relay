@@ -12,6 +12,9 @@ import (
 const shutdownDrainTimeout = 5 * time.Second
 
 func (s *Server) Serve(address string) error {
+	if s.accessInitError != nil {
+		return s.accessInitError
+	}
 	s.startControlStateSync()
 	httpServer := &http.Server{
 		Addr:              address,
@@ -29,7 +32,20 @@ func (s *Server) Serve(address string) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	s.shuttingDown = true
+	s.mu.Unlock()
 	s.stopControlStateSync()
+	// All ingress connections share one control-write budget. A slow client
+	// cannot multiply shutdown latency by the bounded connection count.
+	ingressDeadline := time.Now().Add(250 * time.Millisecond)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(ingressDeadline) {
+		ingressDeadline = deadline
+	}
+	s.audioIngressConns.Range(func(_, value any) bool {
+		value.(*opusWebSocketSource).closeBefore(1001, "relay shutting down", ingressDeadline)
+		return true
+	})
 	s.mu.Lock()
 	httpServer := s.httpServer
 	peers := make([]*signalPeer, 0, len(s.signalPeers))
@@ -56,8 +72,5 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 	s.relaySessions.CloseAll()
-	if s.ipLimiter != nil {
-		s.ipLimiter.Stop()
-	}
 	return nil
 }

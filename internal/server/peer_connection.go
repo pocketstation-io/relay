@@ -43,10 +43,16 @@ func (peer *signalPeer) newPeerConnection() (*webrtc.PeerConnection, *clocklinea
 			settingEngine.SetICEUDPMux(peer.srv.iceUDPMux)
 		}
 		if peer.srv.iceTCPMux != nil {
-			settingEngine.SetICETCPMux(peer.srv.iceTCPMux)
+			settingEngine.SetICETCPMux(relayDefaultTCPMux(peer.srv.iceTCPMux))
+			settingEngine.SetNetworkTypes([]webrtc.NetworkType{
+				webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6, webrtc.NetworkTypeTCP4,
+			})
 		}
 		if len(peer.srv.nat1to1IPs) > 0 {
 			settingEngine.SetNAT1To1IPs(peer.srv.nat1to1IPs, webrtc.ICECandidateTypeHost)
+		}
+		if peer.srv.explicitLoopbackICE() {
+			settingEngine.SetIncludeLoopbackCandidate(true)
 		}
 		api = webrtc.NewAPI(
 			webrtc.WithSettingEngine(settingEngine),

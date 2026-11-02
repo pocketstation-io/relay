@@ -124,7 +124,7 @@ func publishHandshake(
 		t.Fatalf("set local desc: %v", err)
 	}
 	if err := conn.WriteJSON(signaling.ClientMessage{
-		Type: signaling.TypePublish, Token: token, SDPOffer: offer.SDP,
+		Type: signaling.TypePublish, Token: token, BusID: "application", SDPOffer: offer.SDP,
 	}); err != nil {
 		t.Fatalf("send PUBLISH: %v", err)
 	}
@@ -279,26 +279,29 @@ func TestGivenRelayWhenSingleSubscriberSoakRunsThenResourcesRemainBounded(t *tes
 
 	api := newLoopbackAPI()
 	srv := server.New(server.Config{
-		JWTSecret: []byte("soak-secret"),
+		JWTSecret: []byte("soak-secret-0123456789abcdef0123456789abcdef"),
 		API:       api,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+	defer srv.Shutdown(context.Background())
 
 	// Create room.
-	resp, err := http.Post(ts.URL+"/v1/rooms", "application/json", bytes.NewReader(nil))
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewBufferString(`{"required_buses":["application"]}`))
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
 	defer resp.Body.Close()
 	var room struct {
-		RoomID        string `json:"room_id"`
+		RoomID        string `json:"session_id"`
 		SourceToken   string `json:"source_token"`
-		ListenerToken string `json:"listener_token"`
+		ListenerToken string `json:"subscriber_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil {
 		t.Fatalf("decode room: %v", err)
 	}
+
+	room.ListenerToken = issueSoakSubscriber(t, ts, room.RoomID, room.SourceToken)
 
 	// Publisher.
 	pubConn := dialWS(t, ts)

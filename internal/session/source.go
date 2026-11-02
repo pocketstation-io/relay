@@ -52,14 +52,26 @@ func (relaySession *RelaySession) SetSource(
 	sourceSession SourceSession,
 	closeSource func(),
 ) error {
+	_, err := relaySession.AttachSource(busID, role, sourceSession, closeSource)
+	return err
+}
+
+// AttachSource returns this attachment's generation, including when another
+// publisher concurrently replaces it. SetSource retains the existing API.
+func (relaySession *RelaySession) AttachSource(
+	busID BusID,
+	role BusRole,
+	sourceSession SourceSession,
+	closeSource func(),
+) (uint64, error) {
 	bus := relaySession.GetOrCreateBus(busID, role)
 	if bus == nil {
-		return ErrBusLimitExceeded
+		return 0, ErrBusLimitExceeded
 	}
 	errorCounts := make(map[string]int, 8)
 	deadSubscriptions := make([]string, 0, 8)
 
-	bus.SetSource(sourceSession, closeSource, func(packet *rtp.Packet, generation uint64) {
+	generation := bus.SetSource(sourceSession, closeSource, func(packet *rtp.Packet, generation uint64) {
 		captureTime, captureTimeKnown := bus.CaptureTime(packet.Timestamp, time.Now())
 		relaySession.deliverWithSource(
 			busID,
@@ -72,7 +84,7 @@ func (relaySession *RelaySession) SetSource(
 		)
 	}, relaySession.notifyStateChange)
 	relaySession.notifyStateChange()
-	return nil
+	return generation, nil
 }
 
 func (relaySession *RelaySession) SourceActive() bool {

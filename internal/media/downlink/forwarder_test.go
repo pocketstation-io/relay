@@ -1,12 +1,168 @@
 package downlink
 
 import (
+	"bytes"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/pion/rtp"
 	"github.com/pocketstation-io/relay/internal/session"
 )
+
+// borrowedDispatchSource reuses one source-owned packet only after the actual
+// RelaySession dispatch has returned and requested the next packet.
+type borrowedDispatchSource struct {
+	packet     *rtp.Packet
+	dispatched chan struct{}
+	closed     chan struct{}
+	readCount  int
+}
+
+func (source *borrowedDispatchSource) ReadRTP() (*rtp.Packet, error) {
+	source.readCount++
+	if source.readCount == 1 {
+		return source.packet, nil
+	}
+	close(source.dispatched)
+	<-source.closed
+	return nil, io.EOF
+}
+
+// delayedOwnershipWriter is a test-only transport boundary. The first write
+// blocks the real pacer worker so source reuse precedes the second consumption.
+type delayedOwnershipWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	written chan *rtp.Packet
+	mutate  bool
+}
+
+func (writer *delayedOwnershipWriter) WriteRTP(packet *rtp.Packet) error {
+	if packet.SequenceNumber == 100 {
+		close(writer.entered)
+		<-writer.release
+		return nil
+	}
+	writer.written <- packet.Clone()
+	if writer.mutate {
+		packet.SSRC = 0
+		packet.CSRC[0] = 0
+		packet.GetExtension(8)[0] = 0
+		packet.Payload[0] = 0
+	}
+	return nil
+}
+
+func TestGivenBorrowedSourcePacketWhenReusedBeforePacedConsumeThenSubscribersKeepOriginalBytes(t *testing.T) {
+	wantPayload := []byte{0xf8, 0x11, 0x22, 0x33}
+	wantExtension := []byte{0x41, 0x42, 0x43}
+	packet := &rtp.Packet{Header: rtp.Header{
+		Version: 2, Marker: true, PayloadType: 111, SequenceNumber: 101,
+		Timestamp: 1960, SSRC: 0x12345678, CSRC: []uint32{0x11223344},
+	}, Payload: append([]byte(nil), wantPayload...)}
+	if err := packet.SetExtension(8, append([]byte(nil), wantExtension...)); err != nil {
+		t.Fatal(err)
+	}
+	source := &borrowedDispatchSource{
+		packet: packet, dispatched: make(chan struct{}), closed: make(chan struct{}),
+	}
+	writers := [2]*delayedOwnershipWriter{}
+	subscriptions := [2]*Downlink{}
+	relaySession := session.New("borrowed-payload-ownership")
+	defer func() {
+		for _, writer := range writers {
+			if writer != nil {
+				select {
+				case <-writer.release:
+				default:
+					close(writer.release)
+				}
+			}
+		}
+		relaySession.Close()
+		for _, subscription := range subscriptions {
+			if subscription != nil {
+				subscription.StopForwarding()
+			}
+		}
+	}()
+	for subscriberIndex := range writers {
+		writer := &delayedOwnershipWriter{
+			entered: make(chan struct{}), release: make(chan struct{}),
+			written: make(chan *rtp.Packet, 1), mutate: subscriberIndex == 0,
+		}
+		writers[subscriberIndex] = writer
+		subscription := NewForwardingDownlink(string(rune('a'+subscriberIndex)), writer, nil)
+		subscriptions[subscriberIndex] = subscription
+		// The fresh music bus's first attachment has generation one. Seed the
+		// same identity so reconnect timing cannot alter the ownership assertion.
+		if err := subscription.WriteRTPWithSource(&rtp.Packet{Header: rtp.Header{
+			Version: 2, SequenceNumber: 100, Timestamp: 1000,
+		}}, time.Time{}, false, session.SourceIdentity{BusID: "music", Generation: 1, SSRC: 0x12345678}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-writer.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("pacer writer did not enter the deterministic barrier")
+		}
+		if err := relaySession.AddBusSubscription(string(rune('a'+subscriberIndex)), "music", subscription); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := relaySession.SetSource("music", session.BusRoleMusic, source, func() { close(source.closed) }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("actual RelaySession dispatch did not return")
+	}
+	// The source is now entitled to reuse every borrowed field. Neither pacer
+	// can consume it yet because both actual writers remain behind the barrier.
+	for byteIndex := range packet.Payload {
+		packet.Payload[byteIndex] = 0xee
+	}
+	packet.CSRC[0] = 0xeeeeeeee
+	packet.GetExtension(8)[0] = 0xee
+	packet.SequenceNumber = 900
+	packet.Timestamp = 9000
+	packet.SSRC = 0xeeeeeeee
+	for _, writer := range writers {
+		close(writer.release)
+	}
+	for subscriberIndex, writer := range writers {
+		select {
+		case received := <-writer.written:
+			if !bytes.Equal(received.Payload, wantPayload) {
+				t.Errorf("subscriber %d payload = %x, want original %x", subscriberIndex, received.Payload, wantPayload)
+			}
+			if received.SequenceNumber != 101 || received.Timestamp != 1960 || received.SSRC != 0x12345678 ||
+				!received.Marker || received.PayloadType != 111 || received.CSRC[0] != 0x11223344 ||
+				!bytes.Equal(received.GetExtension(8), wantExtension) {
+				t.Errorf("subscriber %d lost original RTP/header-extension identity", subscriberIndex)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("subscriber %d did not consume its queued packet", subscriberIndex)
+		}
+	}
+	// The primary writer mutated its scratch. Both actual NACKs must still use
+	// the original canonical cache bytes, including private header storage.
+	for subscriberIndex, subscription := range subscriptions {
+		subscription.HandleNACK(101)
+		select {
+		case received := <-writers[subscriberIndex].written:
+			if !bytes.Equal(received.Payload, wantPayload) || received.SequenceNumber != 101 ||
+				received.Timestamp != 1960 || received.SSRC != 0x12345678 ||
+				received.CSRC[0] != 0x11223344 || !bytes.Equal(received.GetExtension(8), wantExtension) {
+				t.Errorf("subscriber %d retransmission changed after mutable writer", subscriberIndex)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("subscriber %d did not retransmit its cached packet", subscriberIndex)
+		}
+	}
+}
 
 func TestGivenSequenceWrapWhenUnwrappedThenExtendedOrderIsMonotonic(t *testing.T) {
 	var unwrapper sequenceUnwrapper

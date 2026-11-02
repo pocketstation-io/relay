@@ -1,6 +1,7 @@
 package downlink
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,15 @@ const (
 	defaultPacerMaxQueueAge = 120 * time.Millisecond
 	defaultPacerInitialWait = 10 * time.Millisecond
 	defaultPacerReorderWait = 60 * time.Millisecond
+	// Locked Pion receives at most 1460 bytes; WSS Opus payloads are <=1275.
+	// Oversized packets are dropped, never truncated or allocated a fallback.
+	maxPacerPacketBytes = 1460
+	// Both RFC8285 formats need at least two wire bytes per parsed entry.
+	maxPacerHeaderExtensionsCount = maxPacerPacketBytes / 2
+	// The worker can retain 33 pending packets while the queue holds 32 more.
+	// Successful writes remain owned by the existing 512-entry repair cache.
+	ownedPacerPacketCount = retransmissionCachePackets + 2*defaultPacerCapacity + 1
+	pacerAdmissionClosed  = uint64(1) << 63
 )
 
 type packetWriter func(*rtp.Packet) error
@@ -91,11 +101,44 @@ func (p *passThroughPacer) RequiresPacketCopy() bool { return false }
 
 type pacedPacket struct {
 	packet           *rtp.Packet
+	owned            *ownedPacerPacket
 	enqueuedAt       time.Time
 	extSeq           int64
 	source           session.SourceIdentity
 	captureTime      time.Time
 	captureTimeKnown bool
+}
+
+// ownedPacerPacket owns media bytes until write/drop/cache eviction. The header
+// is transferred from the caller: Session.Header.Clone already owns its CSRC
+// and extension payloads. Only the borrowed media payload is copied here.
+type ownedPacerPacket struct {
+	claimed atomic.Bool
+	packet  rtp.Packet
+	payload [maxPacerPacketBytes]byte
+}
+
+func (packet *ownedPacerPacket) release() {
+	packet.packet = rtp.Packet{}
+	packet.claimed.Store(false)
+}
+
+func (item pacedPacket) release() {
+	if item.owned != nil {
+		item.owned.release()
+	}
+}
+
+func withinPacerPacketBounds(packet *rtp.Packet) bool {
+	if packet == nil || len(packet.CSRC) > 15 || len(packet.Extensions) > maxPacerHeaderExtensionsCount {
+		return false
+	}
+	// Pion1.8.11 treats unknown profiles as one opaque extension and indexes
+	// Extensions[0] inside MarshalSize. Reject the malformed empty form first.
+	if packet.Extension && packet.ExtensionProfile != 0xbede && packet.ExtensionProfile != 0x1000 && len(packet.Extensions) == 0 {
+		return false
+	}
+	return packet.MarshalSize() <= maxPacerPacketBytes
 }
 
 // AudioCadencePacer smooths clustered Opus arrivals according to their RTP
@@ -112,6 +155,9 @@ type AudioCadencePacer struct {
 	workerDone        chan struct{}
 	stopOnce          sync.Once
 	stopped           atomic.Bool
+	enqueueState      atomic.Uint64
+	nextOwnedSlot     atomic.Uint32
+	ownedPackets      []ownedPacerPacket
 	maxQueueAge       time.Duration
 
 	enqueuedCount                     atomic.Uint64
@@ -148,6 +194,7 @@ type AudioCadencePacer struct {
 	outputMaxSequenceDelta            atomic.Uint64
 	outputMaxTimestampDeltaSamples    atomic.Uint64
 	retransmissionCache               retransmissionCache
+	writeScratch                      pacerWritePacket
 }
 
 func newAudioCadencePacer(write packetWriter) *AudioCadencePacer {
@@ -178,6 +225,7 @@ func newAudioPacer(
 		done:              make(chan struct{}),
 		workerDone:        make(chan struct{}),
 		maxQueueAge:       defaultPacerMaxQueueAge,
+		ownedPackets:      make([]ownedPacerPacket, ownedPacerPacketCount),
 	}
 	go p.run()
 	return p
@@ -208,11 +256,56 @@ func (p *AudioCadencePacer) EnqueueSource(
 	captureTime time.Time,
 	captureTimeKnown bool,
 ) error {
-	if p.stopped.Load() {
+	if !p.beginEnqueue() {
 		return nil
 	}
+	defer p.enqueueState.Add(^uint64(0))
+	return p.enqueueOwned(pkt, source, captureTime, captureTimeKnown)
+}
+
+// beginEnqueue admits concurrent AudioBus producers without a lock. Stop closes
+// this same atomic gate and joins admitted producers before the final drain.
+func (p *AudioCadencePacer) beginEnqueue() bool {
+	for state := p.enqueueState.Load(); state&pacerAdmissionClosed == 0; state = p.enqueueState.Load() {
+		if p.enqueueState.CompareAndSwap(state, state+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// enqueueOwned receives a subscriber-owned header and a borrowed media payload.
+// Header storage must not be mutated after admission; RequiresPacketCopy tells
+// the Session to provide its existing deep Header.Clone before this boundary.
+func (p *AudioCadencePacer) enqueueOwned(
+	pkt *rtp.Packet,
+	source session.SourceIdentity,
+	captureTime time.Time,
+	captureTimeKnown bool,
+) error {
+	if !withinPacerPacketBounds(pkt) {
+		return errPacerPacketBounds
+	}
+	var owned *ownedPacerPacket
+	startSlot := int(p.nextOwnedSlot.Add(1) % uint32(len(p.ownedPackets)))
+	for offsetCount := range p.ownedPackets {
+		candidate := &p.ownedPackets[(startSlot+offsetCount)%len(p.ownedPackets)]
+		if candidate.claimed.CompareAndSwap(false, true) {
+			owned = candidate
+			break
+		}
+	}
+	if owned == nil {
+		p.queueFullDrops.Add(1)
+		return nil
+	}
+	owned.packet = *pkt
+	copy(owned.payload[:], pkt.Payload)
+	owned.packet.Payload = owned.payload[:len(pkt.Payload)]
+	owned.packet.Raw = nil // Deprecated input-wire view is never retained.
 	item := pacedPacket{
-		packet:           pkt,
+		packet:           &owned.packet,
+		owned:            owned,
 		enqueuedAt:       time.Now(),
 		source:           source,
 		captureTime:      captureTime,
@@ -229,6 +322,7 @@ func (p *AudioCadencePacer) EnqueueSource(
 		}
 	default:
 		p.queueFullDrops.Add(1)
+		item.release()
 	}
 	return nil
 }
@@ -236,11 +330,17 @@ func (p *AudioCadencePacer) EnqueueSource(
 func (p *AudioCadencePacer) Stop() {
 	p.stopOnce.Do(func() {
 		p.stopped.Store(true)
+		p.enqueueState.Or(pacerAdmissionClosed)
+		// Control-path join only: enqueue itself remains nonblocking.
+		for p.enqueueState.Load()&^pacerAdmissionClosed != 0 {
+			runtime.Gosched()
+		}
 		close(p.done)
 		<-p.workerDone
 		for {
 			select {
-			case <-p.queue:
+			case item := <-p.queue:
+				item.release()
 				p.completedCount.Add(1)
 			default:
 				return

@@ -1,29 +1,21 @@
-// Package integration_test — cross-service JWT contract tests.
-//
-// These tests prove that a token minted by api-server (HS256, Claims{RoomID,
-// Role}) using the shared POCKETSTATION_JWT_SECRET is accepted by relay
-// /v1/signal without modification. No api-server binary is required: we use
-// relay's own auth.Sign (which encodes the identical Claims struct and signing
-// method), because the contract under test is the token *format*, not which
-// process mints it.
-//
-// Run the full suite (includes real Pion ICE):
-//
-//	go test -race -run TestGivenApiServer ./test/integration/
-//
-// Skip the ICE-dependent tests:
-//
-//	go test -race -short ./test/integration/
+// Package integration_test verifies a separately mounted Relay access service
+// issues credentials accepted by the managed media Relay. The test uses actual
+// authenticated internal HTTP requests, not a second simulated token issuer.
 package integration_test
 
 import (
+	"context"
+	"github.com/pocketstation-io/relay/access"
+	"github.com/pocketstation-io/relay/access/storage/memory"
+	capability "github.com/pocketstation-io/relay/access/token"
+	"github.com/pocketstation-io/relay/internal/notifications/callback"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/pocketstation-io/relay/internal/auth"
 	"github.com/pocketstation-io/relay/internal/server"
 	"github.com/pocketstation-io/relay/internal/signaling"
 )
@@ -43,18 +35,21 @@ func TestGivenApiServerTokenWhenUsedForRelaySignalThenAccepted(t *testing.T) {
 
 	// Given — relay server started with the shared cross-service secret.
 	loopbackAPI := newLoopbackAPI()
-	ts, clientAPI := newTestServerWithSecret(t, []byte(testCrossServiceSecret), loopbackAPI)
+	ts, clientAPI, domain := newTestServerWithSecret(t, []byte(testCrossServiceSecret), loopbackAPI)
 
 	// Given — a room exists so the relay knows the RoomID.
-	room := createRoom(t, ts)
-	roomID := room["session_id"]
+	created, err := domain.Create("application")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.ID()
 	if roomID == "" {
 		t.Fatal("no session_id in room response")
 	}
 
 	// Given — a source token minted the way api-server mints it:
 	// HS256, Claims{RoomID, Role}, same secret.
-	apiServerToken, err := auth.SignSource([]byte(testCrossServiceSecret), auth.ControlPlaneIssuer, roomID, []string{"application"}, 15*time.Minute)
+	apiServerToken, err := domain.IssuePublisherTokenContext(context.Background(), roomID, "application")
 	if err != nil {
 		t.Fatalf("auth.Sign (simulating api-server): %v", err)
 	}
@@ -150,10 +145,13 @@ func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 
 	// Given — relay started with the correct shared secret.
 	loopbackAPI := newLoopbackAPI()
-	ts, clientAPI := newTestServerWithSecret(t, []byte(testCrossServiceSecret), loopbackAPI)
+	ts, clientAPI, domain := newTestServerWithSecret(t, []byte(testCrossServiceSecret), loopbackAPI)
 
-	room := createRoom(t, ts)
-	roomID := room["session_id"]
+	created, err := domain.Create("application")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.ID()
 	if roomID == "" {
 		t.Fatal("no session_id in room response")
 	}
@@ -161,7 +159,11 @@ func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 	// Given — a token minted with the WRONG secret (simulates misconfigured
 	// api-server or a token from a different deployment).
 	wrongSecret := []byte("wrong-secret-not-the-shared-one-32-bytes")
-	badToken, err := auth.SignSource(wrongSecret, auth.ControlPlaneIssuer, roomID, []string{"application"}, 15*time.Minute)
+	metadata, err := domain.Metadata(context.Background(), roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badToken, err := capability.SignProfile(wrongSecret, metadata.Issuer, metadata.Incarnation, capability.Claims{SessionID: roomID, Role: capability.RoleSource, BusIDs: []string{"application"}}, 15*time.Minute, time.Now())
 	if err != nil {
 		t.Fatalf("auth.Sign (wrong secret): %v", err)
 	}
@@ -249,14 +251,26 @@ func TestGivenApiServerTokenWhenSecretMismatchThenBadToken(t *testing.T) {
 // secret and Pion API. It complements the existing newTestServer helper which
 // hard-codes testJWTSecret, allowing cross-service tests to use their own
 // shared secret.
-func newTestServerWithSecret(t *testing.T, secret []byte, api *webrtc.API) (*httptest.Server, *webrtc.API) {
+func newTestServerWithSecret(t *testing.T, secret []byte, api *webrtc.API) (*httptest.Server, *webrtc.API, *access.Service) {
 	t.Helper()
-	srv := server.New(server.Config{
-		JWTSecret:         secret,
-		SourceTokenIssuer: auth.ControlPlaneIssuer,
-		API:               api,
-	})
+	backend := memory.New()
+	t.Cleanup(func() { _ = backend.Close() })
+	domain, err := access.NewService(secret, backend, access.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const internalSecret = "integration-internal-secret-0123456789"
+	mux := http.NewServeMux()
+	domain.RegisterInternal(mux, []byte(internalSecret))
+	authority := httptest.NewServer(mux)
+	t.Cleanup(authority.Close)
+	client, err := callback.NewClient(authority.URL, internalSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := server.New(server.Config{JWTSecret: secret, AuthorityMode: "control-plane", CallbackClient: client, API: api})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, api
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return ts, api, domain
 }
