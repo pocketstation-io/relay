@@ -105,3 +105,10 @@ connectivity, decoded audio or phone qualification.
 
 Expose the complete allocation range. A configured TURN listener with blocked
 allocation ports will authenticate clients but fail media relay.
+
+On Fly.io, embedded TURN binds its UDP listener and UDP allocation sockets to
+`fly-global-services`. TCP and TLS listeners retain the wildcard bind. Fly's
+UDP forwarding requires a dedicated IPv4 and matching external/internal ports;
+both the listener and every allocation port must be exposed. A failure to
+resolve or bind the platform address stops startup rather than selecting another
+address. Other hosts retain the `0.0.0.0` UDP bind.
