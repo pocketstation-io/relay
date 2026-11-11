@@ -41,6 +41,11 @@ type ServerConfig struct {
 	// Enables the ?transport=tcp TURN URL variant without TLS overhead.
 	TCPPort int
 
+	// TCPListener accepts TURN already decrypted by a trusted TLS edge. Start
+	// takes ownership, including rollback on failure; Stop closes it. It may be
+	// used alongside TCPPort. The composition root owns any shared parent.
+	TCPListener net.Listener
+
 	// TLSPort is the port for TURNS/TLS. Zero disables TLS TURN.
 	TLSPort int
 
@@ -71,11 +76,27 @@ type Server struct {
 //
 // Returns an error if no listeners could be bound.
 func Start(cfg ServerConfig) (*Server, error) {
+	var packetConns []pionTurn.PacketConnConfig
+	var listeners []pionTurn.ListenerConfig
+	started := false
+	defer func() {
+		if !started {
+			if cfg.TCPListener != nil {
+				_ = cfg.TCPListener.Close()
+			}
+			for _, conn := range packetConns {
+				_ = conn.PacketConn.Close()
+			}
+			for _, listener := range listeners {
+				_ = listener.Listener.Close()
+			}
+		}
+	}()
 	if cfg.PublicIP == nil {
 		return nil, fmt.Errorf("turn.Start: PublicIP is required")
 	}
-	if cfg.UDPPort == 0 && cfg.TCPPort == 0 && cfg.TLSPort == 0 {
-		return nil, fmt.Errorf("turn.Start: at least one of UDPPort, TCPPort, or TLSPort must be set")
+	if cfg.UDPPort == 0 && cfg.TCPPort == 0 && cfg.TLSPort == 0 && cfg.TCPListener == nil {
+		return nil, fmt.Errorf("turn.Start: at least one UDP, TCP, TLS or supplied TCP listener must be set")
 	}
 	udpAddress, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.udpBindAddress(), "0"))
 	if err != nil {
@@ -93,19 +114,12 @@ func Start(cfg ServerConfig) (*Server, error) {
 		return nil, err
 	}
 
-	var packetConns []pionTurn.PacketConnConfig
-	var listeners []pionTurn.ListenerConfig
-	started := false
-	defer func() {
-		if !started {
-			for _, conn := range packetConns {
-				_ = conn.PacketConn.Close()
-			}
-			for _, listener := range listeners {
-				_ = listener.Listener.Close()
-			}
-		}
-	}()
+	if cfg.TCPListener != nil {
+		listeners = append(listeners, pionTurn.ListenerConfig{
+			Listener:              cfg.TCPListener,
+			RelayAddressGenerator: relayGen,
+		})
+	}
 
 	if cfg.UDPPort > 0 {
 		udpAddr := net.JoinHostPort(cfg.UDPBindAddress, fmt.Sprint(cfg.UDPPort))

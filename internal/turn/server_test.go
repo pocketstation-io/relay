@@ -11,6 +11,35 @@ import (
 	pionTurn "github.com/pion/turn/v4"
 )
 
+func TestGivenSuppliedTCPListenerWhenTURNStopsOrStartupFailsThenListenerIsReleased(t *testing.T) {
+	for _, valid := range []bool{true, false} {
+		t.Run(strconv.FormatBool(valid), func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			cfg := ServerConfig{TCPListener: listener, UDPBindAddress: "127.0.0.1"}
+			if valid {
+				cfg.PublicIP = net.ParseIP("127.0.0.1")
+			}
+			server, err := Start(cfg)
+			if valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+				server.Stop()
+			} else if err == nil {
+				t.Fatal("invalid startup unexpectedly succeeded")
+			}
+			if connection, err := net.DialTimeout("tcp4", listener.Addr().String(), 100*time.Millisecond); err == nil {
+				_ = connection.Close()
+				t.Fatal("supplied listener survived TURN shutdown/rollback")
+			}
+		})
+	}
+}
+
 func TestGivenNoRelayRangeWhenConfiguredThenOperatingSystemPortsRemainAvailable(t *testing.T) {
 	generator, err := relayAddressGenerator(ServerConfig{PublicIP: net.ParseIP("192.0.2.1")})
 	if err != nil {

@@ -102,6 +102,7 @@ connectivity, decoded audio or phone qualification.
 | `TURN_RELAY_MIN_PORT` | operating-system assigned | First UDP allocation port when a finite range is configured. |
 | `TURN_RELAY_MAX_PORT` | operating-system assigned | Last UDP allocation port. |
 | `TURN_REALM` | `pocketstation.io` | TURN authentication realm. |
+| `RELAY_PROXY_INGRESS_PORT` | disabled | Dedicated internal TCP port accepting HTTP and TURN from a trusted TLS proxy with a PROXY v1 header. Requires embedded TURN. |
 
 Expose the complete allocation range. A configured TURN listener with blocked
 allocation ports will authenticate clients but fail media relay.
@@ -112,3 +113,33 @@ UDP forwarding requires a dedicated IPv4 and matching external/internal ports;
 both the listener and every allocation port must be exposed. A failure to
 resolve or bind the platform address stops startup rather than selecting another
 address. Other hosts retain the `0.0.0.0` UDP bind.
+
+### Shared HTTPS and encrypted TURN
+
+`RELAY_PROXY_INGRESS_PORT=8082` enables one additional internal listener. A
+trusted edge must terminate TLS and prepend PROXY v1 on every connection.
+It must advertise HTTP/1.1 rather than HTTP/2. HTTP requests and WebSocket
+upgrades reach the same Relay handlers; STUN/TURN reaches the existing embedded
+TURN server. `PORT` remains available for ordinary HTTP health checks.
+
+On Fly, configure external 443 with `handlers = ["tls", "proxy_proto"]` and
+internal port 8082. Use TLS 1.2 or 1.3 and ALPN `http/1.1` and `stun.turn`.
+Do not add an HTTP handler to this shared service, expose 8082 as raw public
+TCP, or trust client-supplied `Fly-Client-IP` or `X-Forwarded-For` headers.
+The validated PROXY client address becomes the connection's remote address.
+
+The listener permits 128 simultaneous connections, including pending headers
+and established HTTP/TURN connections. Initial classification has a five-second
+deadline and the PROXY header cannot exceed 108 bytes. Shutdown closes active
+and queued sockets and joins classification workers. Closing the TURN child
+does not close the HTTP child.
+
+Configure the credential issuer separately to advertise
+`turns:your-certificate-hostname:443?transport=tcp`. A TLS edge listener does
+not enable the process's `TURN_TLS_PORT`, which requires its own certificate.
+This configuration requires deployed TLS, signaling and audio checks; local
+TCP tests alone do not establish public connectivity or listening quality.
+
+References: [Fly service handlers](https://docs.fly.io/networking/services/),
+[PROXY v1 specification](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt),
+and [TURN transport specification](https://www.rfc-editor.org/rfc/rfc8656.html).
