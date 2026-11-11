@@ -123,7 +123,10 @@ upgrades reach the same Relay handlers; STUN/TURN reaches the existing embedded
 TURN server. `PORT` remains available for ordinary HTTP health checks.
 
 On Fly, configure external 443 with `handlers = ["tls", "proxy_proto"]` and
-internal port 8082. Use TLS 1.2 or 1.3 and ALPN `http/1.1` and `stun.turn`.
+internal port 8082. Use TLS 1.2 or 1.3 and ALPN `http/1.1`. The current Fly
+Machine API rejects other ALPN labels, including `stun.turn`. TURN clients
+must permit TLS without an ALPN selection; verify the actual client before
+advertising this service. The ingress distinguishes the decrypted protocols.
 Do not add an HTTP handler to this shared service, expose 8082 as raw public
 TCP, or trust client-supplied `Fly-Client-IP` or `X-Forwarded-For` headers.
 The validated PROXY client address becomes the connection's remote address.
