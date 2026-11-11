@@ -32,6 +32,11 @@ type ServerConfig struct {
 	// UDPPort is the port for TURN/UDP (standard: 3478). Zero disables UDP.
 	UDPPort int
 
+	// UDPBindAddress is the local IPv4 address or hostname for the UDP listener
+	// and every UDP relay allocation, including allocations requested over TCP.
+	// Defaults to 0.0.0.0. TCP and TLS listeners always bind the wildcard address.
+	UDPBindAddress string
+
 	// TCPPort is the port for TURN/TCP (standard: 3478). Zero disables plain TCP.
 	// Enables the ?transport=tcp TURN URL variant without TLS overhead.
 	TCPPort int
@@ -72,6 +77,11 @@ func Start(cfg ServerConfig) (*Server, error) {
 	if cfg.UDPPort == 0 && cfg.TCPPort == 0 && cfg.TLSPort == 0 {
 		return nil, fmt.Errorf("turn.Start: at least one of UDPPort, TCPPort, or TLSPort must be set")
 	}
+	udpAddress, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.udpBindAddress(), "0"))
+	if err != nil {
+		return nil, fmt.Errorf("turn.Start: resolve UDP bind address: %w", err)
+	}
+	cfg.UDPBindAddress = udpAddress.IP.String()
 
 	realm := cfg.Realm
 	if realm == "" {
@@ -85,9 +95,20 @@ func Start(cfg ServerConfig) (*Server, error) {
 
 	var packetConns []pionTurn.PacketConnConfig
 	var listeners []pionTurn.ListenerConfig
+	started := false
+	defer func() {
+		if !started {
+			for _, conn := range packetConns {
+				_ = conn.PacketConn.Close()
+			}
+			for _, listener := range listeners {
+				_ = listener.Listener.Close()
+			}
+		}
+	}()
 
 	if cfg.UDPPort > 0 {
-		udpAddr := fmt.Sprintf("0.0.0.0:%d", cfg.UDPPort)
+		udpAddr := net.JoinHostPort(cfg.UDPBindAddress, fmt.Sprint(cfg.UDPPort))
 		conn, err := net.ListenPacket("udp4", udpAddr)
 		if err != nil {
 			return nil, fmt.Errorf("turn.Start: bind UDP %s: %w", udpAddr, err)
@@ -138,14 +159,22 @@ func Start(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("turn.Start: %w", err)
 	}
 
+	started = true
 	return &Server{inner: srv}, nil
+}
+
+func (cfg ServerConfig) udpBindAddress() string {
+	if cfg.UDPBindAddress != "" {
+		return cfg.UDPBindAddress
+	}
+	return "0.0.0.0"
 }
 
 func relayAddressGenerator(cfg ServerConfig) (pionTurn.RelayAddressGenerator, error) {
 	if cfg.RelayMinPort == 0 && cfg.RelayMaxPort == 0 {
 		return &pionTurn.RelayAddressGeneratorStatic{
 			RelayAddress: cfg.PublicIP,
-			Address:      "0.0.0.0",
+			Address:      cfg.udpBindAddress(),
 		}, nil
 	}
 	if cfg.RelayMinPort < 1024 || cfg.RelayMaxPort > 65535 || cfg.RelayMinPort > cfg.RelayMaxPort {
@@ -155,7 +184,7 @@ func relayAddressGenerator(cfg ServerConfig) (pionTurn.RelayAddressGenerator, er
 	}
 	return &pionTurn.RelayAddressGeneratorPortRange{
 		RelayAddress: cfg.PublicIP,
-		Address:      "0.0.0.0",
+		Address:      cfg.udpBindAddress(),
 		MinPort:      uint16(cfg.RelayMinPort),
 		MaxPort:      uint16(cfg.RelayMaxPort),
 		MaxRetries:   (cfg.RelayMaxPort - cfg.RelayMinPort + 1) * 2,

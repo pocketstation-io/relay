@@ -31,7 +31,7 @@ dockerfile = "Dockerfile"
   MAX_ROOMS_PER_IP_PER_MINUTE = "2"
   ROOM_EXPIRY_MINUTES = "15"
   SOURCE_RECONNECT_WINDOW_SEC = "30"
-  ALLOWED_ORIGINS = "https://pocketstation-receiver.fly.dev"
+  ALLOWED_ORIGINS = "https://pocketstation-receiver.fly.dev,https://jamx.fly.dev"
 
 # Signaling + control plane (WebSocket + HTTP)
 [http_service]
@@ -139,6 +139,6 @@ protocol = "tcp"
   port = 3478
 
 [[vm]]
-memory = "512mb"
+memory = "256mb"
 cpu_kind = "shared"
 cpus = 1
