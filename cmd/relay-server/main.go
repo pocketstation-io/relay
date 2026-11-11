@@ -117,12 +117,7 @@ func main() {
 		slog.Error("TURN_SHARED_SECRET must contain at least 32 bytes when TURN is enabled")
 		os.Exit(1)
 	}
-	proxyIngress, err := openProxyIngress(os.Getenv("RELAY_PROXY_INGRESS_PORT"), os.Getenv("TURN_PUBLIC_IP") != "")
-	if err != nil {
-		slog.Error("failed to open TLS proxy ingress", "error", err)
-		os.Exit(1)
-	}
-	clientICEServers, turnSrv := setupTURN(turnSecret, proxyIngress.turnListener())
+	clientICEServers, turnSrv := setupTURN(turnSecret)
 	useTURN := len(clientICEServers) > 0
 
 	roomExpiryMin := getenvInt("ROOM_EXPIRY_MINUTES", 0)              // 0 → package default (30 min)
@@ -247,17 +242,14 @@ func main() {
 	slog.Info("ICE-UDP mux started", "addr", udpConn.LocalAddr().String())
 
 	s := server.New(cfg)
-	proxyIngress.serve(s.Handler())
 
 	const defaultShutdownGraceSec = 30
 	shutdownGraceSec := getenvInt("SHUTDOWN_GRACE_PERIOD_SEC", defaultShutdownGraceSec)
 	shutdownGrace := time.Duration(shutdownGraceSec) * time.Second
 
 	sigCh := make(chan os.Signal, 1)
-	shutdownDone := make(chan struct{})
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
-		defer close(shutdownDone)
 		sig := <-sigCh
 		slog.Info("relay shutting down", "signal", sig.String(), "grace_period", shutdownGrace)
 		turnSrv.Stop()
@@ -265,9 +257,6 @@ func main() {
 		defer cancel()
 		if err := s.Shutdown(ctx); err != nil {
 			slog.Error("shutdown error", "error", err)
-		}
-		if err := proxyIngress.close(ctx); err != nil {
-			slog.Error("TLS proxy ingress shutdown error", "error", err)
 		}
 	}()
 
@@ -277,6 +266,5 @@ func main() {
 		slog.Error("relay serve error", "error", err)
 		os.Exit(1)
 	}
-	<-shutdownDone
 	slog.Info("relay stopped")
 }

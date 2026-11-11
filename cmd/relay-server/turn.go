@@ -12,7 +12,7 @@ import (
 	relayTurn "github.com/pocketstation-io/relay/internal/turn"
 )
 
-func setupTURN(turnSecret []byte, proxyListener net.Listener) (iceServers []webrtc.ICEServer, relay *relayTurn.Server) {
+func setupTURN(turnSecret []byte) (iceServers []webrtc.ICEServer, relay *relayTurn.Server) {
 	publicIPString := os.Getenv("TURN_PUBLIC_IP")
 	if publicIPString == "" {
 		slog.Info("TURN_PUBLIC_IP not set; relay running in STUN-only mode")
@@ -53,7 +53,6 @@ func setupTURN(turnSecret []byte, proxyListener net.Listener) (iceServers []webr
 		UDPPort:        udpPort,
 		UDPBindAddress: udpBindAddress,
 		TCPPort:        tcpPort,
-		TCPListener:    proxyListener,
 		TLSPort:        tlsPort,
 		Realm:          realm,
 		RelayMinPort:   relayMinPort,

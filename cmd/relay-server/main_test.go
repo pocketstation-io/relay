@@ -24,19 +24,3 @@ func TestGivenLocalRuntimeWhenSelectingICEUDPAddressThenUsesConfiguredIPv4(t *te
 		t.Fatalf("address = %q, want 127.0.0.1:10000", address)
 	}
 }
-
-func TestGivenInvalidProxyIngressConfigurationWhenStartingThenRejectsInsteadOfSilentlyDisabling(t *testing.T) {
-	for _, configured := range []string{"invalid", "-1", "65536", " 8082"} {
-		if ingress, err := openProxyIngress(configured, true); err == nil || ingress != nil {
-			t.Fatalf("invalid ingress port %q was accepted", configured)
-		}
-	}
-	if ingress, err := openProxyIngress("8082", false); err == nil || ingress != nil {
-		t.Fatal("proxy ingress accepted without embedded TURN")
-	}
-	for _, configured := range []string{"", "0"} {
-		if ingress, err := openProxyIngress(configured, false); err != nil || ingress != nil {
-			t.Fatalf("disabled ingress %q = %v, %v", configured, ingress, err)
-		}
-	}
-}
