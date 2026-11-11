@@ -143,6 +143,17 @@ not enable the process's `TURN_TLS_PORT`, which requires its own certificate.
 This configuration requires deployed TLS, signaling and audio checks; local
 TCP tests alone do not establish public connectivity or listening quality.
 
+The November 11 customer qualification co-locates embedded TURN and the Relay
+peer on one Fly Machine. It sets `RELAY_PUBLIC_IPS=""` so TURN can reach the
+real private single-mux ICE socket instead of requiring public-IP hairpin
+routing. Public host-candidate replacement is disabled in this configuration;
+the verified browser connections use TURN/TLS. Preserve the dedicated IPv4,
+finite UDP allocation ports and issuer settings when deploying it. Historical
+default Fly templates do not include these customer-specific overrides.
+Brave and iPhone Simulator Safari/PWA exchange decoded Original music in both
+host directions; this does not qualify physical devices, separate Internet
+access networks, background continuity or acoustic synchronization.
+
 References: [Fly service handlers](https://docs.fly.io/networking/services/),
 [PROXY v1 specification](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt),
 and [TURN transport specification](https://www.rfc-editor.org/rfc/rfc8656.html).
