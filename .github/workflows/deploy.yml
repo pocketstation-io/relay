@@ -16,13 +16,21 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     name: Deploy to Fly.io
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      DOCKER_CONFIG: /tmp/relay-registry-auth-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -42,11 +50,44 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Deploy relay to Fly.io
-        run: >-
-          flyctl deploy --remote-only
-          --ha=false --update-only --no-public-ips --depot=false
-          --max-concurrent 1 --deploy-retries 0 --wait-timeout 180s
-          --build-arg GIT_SHA=${{ github.event.workflow_run.head_sha }}
+      - name: Authenticate to the existing Fly registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          flyctl auth docker
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Build and push the exact source image on this runner
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          image="registry.fly.io/pocketstation-relay:git-$SOURCE_COMMIT"
+          docker build --platform linux/amd64 --build-arg "GIT_SHA=$SOURCE_COMMIT" --tag "$image" .
+          revision="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          test "$revision" = "$SOURCE_COMMIT"
+          docker push "$image"
+          image_ref="$(docker image inspect "$image" --format '{{json .RepoDigests}}' | jq -er '
+            map(select(test("^registry.fly.io/pocketstation-relay@sha256:[0-9a-f]{64}$"))) |
+            if length == 1 then .[0] else error("expected one pushed Relay image digest") end')"
+          printf 'image=%s\n' "$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy the built image digest to Fly.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          flyctl deploy --image "$DEPLOY_IMAGE" \
+            --ha=false --update-only --no-public-ips --depot=false \
+            --max-concurrent 1 --deploy-retries 0 --wait-timeout 180s
+        env:
+          DEPLOY_IMAGE: ${{ steps.image.outputs.image }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Remove temporary registry credentials
+        if: always()
+        shell: bash
+        run: rm -f -- "$DOCKER_CONFIG/config.json"
